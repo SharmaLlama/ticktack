@@ -1,5 +1,5 @@
 # Radiocarbon-Model
-This is a Open-Source radiocarbon Model.
+This is an open source radiocarbon Model.
 
 
 # License
