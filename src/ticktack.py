@@ -51,7 +51,7 @@ class Flow:
 
 
 class CarbonBoxModel:
-    def __init__(self):
+    def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr', loaded_model=False):
         self._nodes = {}
         self._reverse_nodes = {}
         self._edges = []
@@ -61,6 +61,10 @@ class CarbonBoxModel:
         self._decay_matrix = None
         self._production_coefficients = None
         self._decay_constant = jax.numpy.log(2) / 5730
+        self._production_rate_units = production_rate_units
+        self._flow_rate_units = flow_rate_units
+        self._corrected_fluxes = None
+        self._loaded_model = loaded_model
 
     def add_nodes(self, nodes):
         for node in nodes:
@@ -96,11 +100,33 @@ class CarbonBoxModel:
     def get_fluxes(self):
         return self._fluxes
 
+    def get_converted_fluxes(self):
+        return self._corrected_fluxes
+
     def get_reservoir_contents(self):
         return self._reservoir_content
 
     def get_production_coefficients(self):
         return self._production_coefficients
+
+    def _convert_production_rate(self, production_rate):
+        if self._production_rate_units == 'atoms/cm^2/s':
+            production_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536 / 10 ** 5
+        elif self._production_rate_units == 'kg/yr':
+            production_rate = production_rate
+        else:
+            raise ValueError('Production Rate units must be either atoms/cm^2/s or kg/yr!')
+        return production_rate
+
+    def _convert_flux_rate(self, fluxes):
+        if self._flow_rate_units == 'Gt/yr':
+            corrected_fluxes = self._fluxes
+        elif self._flow_rate_units == '1/yr':
+            corrected_fluxes = fluxes * jnp.transpose(self._reservoir_content) * 14.003242 / 12
+            corrected_fluxes = corrected_fluxes + jnp.transpose(corrected_fluxes)
+        else:
+            raise ValueError('Flow rate units must be either Gt/yr or 1/yr!')
+        return corrected_fluxes
 
     def compile(self):
         if self._fluxes is None:
@@ -111,16 +137,19 @@ class CarbonBoxModel:
                                                     jax.ops.index[self._reverse_nodes[flow.get_source()],
                                                                   self._reverse_nodes[flow.get_destination()]],
                                                     flow.get_flux())
-            for i in range(self._n_nodes):
-                if jnp.abs(jnp.sum(self._fluxes[:, i]) - jnp.sum(self._fluxes[i, :])) > 0.001:
-                    raise ValueError('the outgoing and incoming fluxes are not balanced for ' + str(self._nodes[i]))
 
             self._decay_matrix = jnp.diag(jnp.array([self._decay_constant] * self._n_nodes))
             self._production_coefficients = jnp.array([self._nodes[j].get_production() for j in range(self._n_nodes)])
             self._production_coefficients /= jnp.sum(self._production_coefficients)
+            self._corrected_fluxes = self._convert_flux_rate(self._fluxes)
+
+            for i in range(self._n_nodes):
+                if jnp.abs(jnp.sum(self._corrected_fluxes[:, i]) - jnp.sum(self._corrected_fluxes[i, :])) > 0.001:
+                    raise ValueError('the outgoing and incoming fluxes are not balanced for ' + str(self._nodes[i]))
 
     def _equilibrate_brehm(self, production_rate):
-        c_14_fluxes = self._fluxes / jnp.transpose(self._reservoir_content)
+        production_rate = self._convert_production_rate(production_rate)
+        c_14_fluxes = self._corrected_fluxes / jnp.transpose(self._reservoir_content)
         new_c_14_fluxes = jnp.diag(jnp.sum(c_14_fluxes, axis=1))
         matrix_to_solve = jnp.transpose(c_14_fluxes) - new_c_14_fluxes - self._decay_matrix
         solution = jnp.linalg.solve(matrix_to_solve, -1 * self._production_coefficients * production_rate)
@@ -188,6 +217,7 @@ class CarbonBoxModel:
             else:
                 raise ValueError("incorrect object type for production")
 
+        production_array = self._convert_production_rate(production_array)
         states = scipy.integrate.odeint(derivative, y0, time_values, args=(production_array,))
         return states
 
@@ -209,22 +239,22 @@ def save_model(carbon_box_model, filename):
     file.clear()  # overwrites if it already exists
     metadata = None
     if isinstance(carbon_box_model, CarbonBoxModel):
-        metadata = {'fluxes': carbon_box_model.get_fluxes(),
+        metadata = {'fluxes': carbon_box_model.get_converted_fluxes(),
                     'reservoir content': carbon_box_model.get_reservoir_contents(),
                     'production coefficients': carbon_box_model.get_production_coefficients(),
                     'nodes': carbon_box_model.get_nodes()}
     else:
-        assert "parameter is not a Carbon Box Model!"
+        raise ValueError("parameter is not a Carbon Box Model!")
 
     hdfdict.dump(metadata, file)
     file.close()
 
 
-def load_model(filename):
+def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
     file = h5py.File(filename, 'r')
     metadata = dict(hdfdict.load(file))
     nodes = metadata['nodes']
-    carbon_box_model = CarbonBoxModel()
+    carbon_box_model = CarbonBoxModel(production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
     box_object_list = []
     for j in range(len(nodes)):
         box_object_list.append(Box(nodes[j].decode("utf-8"), float(metadata['reservoir content'][0][j]),
@@ -235,8 +265,14 @@ def load_model(filename):
     for k in range(metadata['fluxes'].shape[0]):
         for j in range(metadata['fluxes'].shape[1]):
             if metadata['fluxes'][k, j] != 0:
-                carbon_box_model.add_edges([Flow(box_object_list[k], box_object_list[j],
-                                                 float(metadata['fluxes'][k, j]))])
+                if flow_rate_units == 'kg/yr':
+                    carbon_box_model.add_edges([Flow(box_object_list[k], box_object_list[j],
+                                                     float(metadata['fluxes'][k, j]))])
+
+                elif flow_rate_units == '1/yr':
+                    new_flow = float(metadata['fluxes'][k, j]) * 12 / 14.003242 / box_object_list[
+                            k].get_reservoir_content()
+                    carbon_box_model.add_edges([Flow(box_object_list[k], box_object_list[j], new_flow)])
 
     file.close()
     return carbon_box_model
