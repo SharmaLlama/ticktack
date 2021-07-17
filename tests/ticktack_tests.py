@@ -5,8 +5,6 @@ import pytest
 import ticktack
 
 
-
-
 @pytest.fixture
 def box1_creation():
     return ticktack.Box('troposphere', reservoir=100, production_coefficient=0.3)
@@ -17,27 +15,27 @@ def box2_creation():
     return ticktack.Box('marine surface', reservoir=150.14)
 
 
-def test_get_name():
-    assert box1_creation().get_name() == 'troposphere'
-    assert box2_creation().get_name() == 'marine surface'
+def test_get_name(box1_creation, box2_creation):
+    assert box1_creation.get_name() == 'troposphere'
+    assert box2_creation.get_name() == 'marine surface'
 
 
-def test_get_reservoir_content():
-    assert box1_creation().get_reservoir_content() == 100
-    assert box2_creation().get_reservoir_content() == 150.14
+def test_get_reservoir_content(box1_creation, box2_creation):
+    assert box1_creation.get_reservoir_content() == 100
+    assert box2_creation.get_reservoir_content() == 150.14
 
 
-def test_get_production_non_default():
-    assert box1_creation().get_production() == 0.3
+def test_get_production_non_default(box1_creation):
+    assert box1_creation.get_production() == 0.3
 
 
-def test_get_production_default():
-    assert box2_creation().get_production() == 44
+def test_get_production_default(box2_creation):
+    assert box2_creation.get_production() == 44
 
 
-def test_str():
-    assert str(box1_creation()) == 'troposphere:100:0.3'
-    assert str(box2_creation()) == 'marine surface:150.14:0.0'
+def test_str(box1_creation, box2_creation):
+    assert str(box1_creation) == 'troposphere:100:0.3'
+    assert str(box2_creation) == 'marine surface:150.14:0.0'
 
 
 @pytest.fixture
@@ -46,33 +44,33 @@ def flow_object_1_creation():
     box2 = ticktack.Box('marine surface', reservoir=150.14)
     return box1, box2, ticktack.Flow(box1, box2, 66.2)
 
-
+@pytest.fixture
 def flow_object_2_creation():
     box1 = ticktack.Box('troposphere', reservoir=100, production_coefficient=0.3)
     box2 = ticktack.Box('marine surface', reservoir=150.14)
     return box1, box2, ticktack.Flow(box2, box1, 110.5)
 
 
-def test_get_source():
-    assert flow_object_1_creation()[2].get_source() == flow_object_1_creation()[0]
-    assert flow_object_2_creation()[2].get_source() == flow_object_2_creation()[0]
+def test_get_source(flow_object_1_creation, flow_object_2_creation):
+    assert flow_object_1_creation[2].get_source() == flow_object_1_creation[0]
+    assert flow_object_2_creation[2].get_source() == flow_object_2_creation[0]
 
 
 def test_get_destination():
-    assert flow_object_1_creation()[2].get_destination() == flow_object_1_creation()[1]
-    assert flow_object_2_creation()[2].get_destination() == flow_object_2_creation()[1]
+    assert flow_object_1_creation[2].get_destination() == flow_object_1_creation[1]
+    assert flow_object_2_creation[2].get_destination() == flow_object_2_creation[1]
 
 
 def test_get_flux():
-    assert flow_object_1_creation()[2].get_flux() == 66.2
-    assert flow_object_2_creation()[2].get_flux() == 110.5
+    assert flow_object_1_creation[2].get_flux() == 66.2
+    assert flow_object_2_creation[2].get_flux() == 110.5
 
 
 def test_str_flow():
     actual = 'troposphere:100:0.3 --> marine surface:150.14:0.0 : 66.2'
-    assert str(flow_object_1_creation()[2]) == actual
+    assert str(flow_object_1_creation[2]) == actual
     actual2 = 'marine surface:150.14:0.0 --> troposphere:100:0.3 : 110.5'
-    assert str(flow_object_2_creation()[2]) == actual2
+    assert str(flow_object_2_creation[2]) == actual2
 
 
 @pytest.fixture
@@ -93,27 +91,27 @@ def cbm_object_creation():
     return nodes, edges, cbm
 
 
-def test_get_production_coefficients():
+def test_get_production_coefficients(cbm_object_creation):
     assert jnp.all(cbm_object_creation[2].get_production_coefficients() == np.array([0.7, 0.3, 0, 0]))
 
 
-def test_get_edges():
+def test_get_edges(cbm_object_creation):
     actual = ['Stratosphere:60:0.7 --> Troposphere:50:0.3 : 0.5',
               'Troposphere:50:0.3 --> Marine surface:900:0.0 : 0.2',
               'Troposphere:50:0.3 --> Biosphere:1600:0.0 : 1']
     assert cbm_object_creation[2].get_edges() == actual
 
 
-def test_get_edge_objects():
+def test_get_edge_objects(cbm_object_creation):
     assert cbm_object_creation[2].get_edges_objects() == cbm_object_creation[1]
 
 
-def test_get_nodes():
+def test_get_nodes(cbm_object_creation):
     actual = ['Stratosphere', 'Troposphere', 'Marine surface', 'Biosphere']
     assert cbm_object_creation[2].get_nodes() == actual
 
 
-def test_get_nodes_objects():
+def test_get_nodes_objects(cbm_object_creation):
     assert cbm_object_creation[2].get_nodes_objects() == cbm_object_creation[0]
 
 
@@ -133,17 +131,17 @@ def test_converted_fluxes_not_changed():
     assert jnp.all(cbm.get_converted_fluxes() == actual)
 
 
-def test_get_reservoir_contents():
+def test_get_reservoir_contents(cbm_object_creation):
     actual = np.array([60, 50, 900, 1600])
     assert jnp.all(cbm_object_creation[2].get_reservoir_contents() == actual)
 
 
-def test_get_fluxes():
+def test_get_fluxes(cbm_object_creation):
     actual = np.array([[0, 0.5, 0, 0], [0, 0, 0.2, 1], [0, 0, 0, 0], [0, 0, 0, 0]])
     assert jnp.all(cbm_object_creation[2].get_fluxes() == actual)
 
 
-def test_converted_fluxes_changed():
+def test_converted_fluxes_changed(cbm_object_creation):
     actual = np.array([[0, 35.008105, 0, 0], [35.008105, 0, 11.6693683, 58.34684167], [0, 11.6693683, 0, 0],
                        [0, 58.34684167, 0, 0]])
     assert jnp.all(jnp.allclose(cbm_object_creation[2].get_converted_fluxes(), actual))
