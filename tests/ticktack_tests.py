@@ -2,17 +2,19 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from ticktack import Box, CarbonBoxModel, Flow
+import ticktack
+
+
 
 
 @pytest.fixture
 def box1_creation():
-    return Box('troposphere', reservoir=100, production_coefficient=0.3)
+    return ticktack.Box('troposphere', reservoir=100, production_coefficient=0.3)
 
 
 @pytest.fixture()
 def box2_creation():
-    return Box('marine surface', reservoir=150.14)
+    return ticktack.Box('marine surface', reservoir=150.14)
 
 
 def test_get_name():
@@ -40,15 +42,15 @@ def test_str():
 
 @pytest.fixture
 def flow_object_1_creation():
-    box1 = Box('troposphere', reservoir=100, production_coefficient=0.3)
-    box2 = Box('marine surface', reservoir=150.14)
-    return box1, box2, Flow(box1, box2, 66.2)
+    box1 = ticktack.Box('troposphere', reservoir=100, production_coefficient=0.3)
+    box2 = ticktack.Box('marine surface', reservoir=150.14)
+    return box1, box2, ticktack.Flow(box1, box2, 66.2)
 
 
 def flow_object_2_creation():
-    box1 = Box('troposphere', reservoir=100, production_coefficient=0.3)
-    box2 = Box('marine surface', reservoir=150.14)
-    return box1, box2, Flow(box2, box1, 110.5)
+    box1 = ticktack.Box('troposphere', reservoir=100, production_coefficient=0.3)
+    box2 = ticktack.Box('marine surface', reservoir=150.14)
+    return box1, box2, ticktack.Flow(box2, box1, 110.5)
 
 
 def test_get_source():
@@ -75,16 +77,16 @@ def test_str_flow():
 
 @pytest.fixture
 def cbm_object_creation():
-    stra = Box('Stratosphere', 60, 0.7)
-    trop = Box('Troposphere', 50, 0.3)
-    ms = Box("Marine surface", 900)
-    bio = Box("Biosphere", 1600)
-    f1 = Flow(stra, trop, 0.5)
-    f2 = Flow(trop, ms, 0.2)
-    f3 = Flow(trop, bio, 1)
+    stra = ticktack.Box('Stratosphere', 60, 0.7)
+    trop = ticktack.Box('Troposphere', 50, 0.3)
+    ms = ticktack.Box("Marine surface", 900)
+    bio = ticktack.Box("Biosphere", 1600)
+    f1 = ticktack.Flow(stra, trop, 0.5)
+    f2 = ticktack.Flow(trop, ms, 0.2)
+    f3 = ticktack.Flow(trop, bio, 1)
     nodes = [stra, trop, ms, bio]
     edges = [f1, f2, f3]
-    cbm = CarbonBoxModel(flow_rate_units='1/yr')
+    cbm = ticktack.CarbonBoxModel(flow_rate_units='1/yr')
     cbm.add_nodes(nodes)
     cbm.add_edges(edges)
     cbm.compile()
@@ -116,14 +118,14 @@ def test_get_nodes_objects():
 
 
 def test_converted_fluxes_not_changed():
-    box1 = Box('no1', 30)
-    box2 = Box('no2', 40)
-    box3 = Box('no3', 50)
-    flow1 = Flow(box1, box2, 10)
-    flow2 = Flow(box2, box1, 10)
-    flow3 = Flow(box1, box3, 15)
-    flow4 = Flow(box3, box1, 15)
-    cbm = CarbonBoxModel()
+    box1 = ticktack.Box('no1', 30)
+    box2 = ticktack.Box('no2', 40)
+    box3 = ticktack.Box('no3', 50)
+    flow1 = ticktack.Flow(box1, box2, 10)
+    flow2 = ticktack.Flow(box2, box1, 10)
+    flow3 = ticktack.Flow(box1, box3, 15)
+    flow4 = ticktack.Flow(box3, box1, 15)
+    cbm = ticktack.CarbonBoxModel()
     cbm.add_nodes([box1, box2, box3])
     cbm.add_edges([flow1, flow2, flow3, flow4])
     cbm.compile()
@@ -148,7 +150,7 @@ def test_converted_fluxes_changed():
 
 
 def test_add_node_not_box_class():
-    cbm = CarbonBoxModel()
+    cbm = ticktack.CarbonBoxModel()
     with pytest.raises(ValueError):
         cbm.add_nodes(['a'])
 
@@ -156,14 +158,14 @@ def test_add_node_not_box_class():
 
 
 def test_add_node_duplicate():
-    cbm = CarbonBoxModel()
-    box1 = Box('t1', 101)
+    cbm = ticktack.CarbonBoxModel()
+    box1 = ticktack.Box('t1', 101)
     cbm.add_nodes([box1, box1, box1])
     assert cbm.get_nodes() == [box1.get_name()]
 
 
 def test_add_edge_not_flow_class():
-    cbm = CarbonBoxModel()
+    cbm = ticktack.CarbonBoxModel()
     with pytest.raises(ValueError):
         cbm.add_edges(['a'])
 
@@ -171,8 +173,8 @@ def test_add_edge_not_flow_class():
 
 
 def test_add_edge_not_flow_class2():
-    cbm = CarbonBoxModel()
-    b1 = Box('t1', 101)
+    cbm = ticktack.CarbonBoxModel()
+    b1 = ticktack.Box('t1', 101)
     with pytest.raises(ValueError):
         cbm.add_edges([b1])
 
