@@ -28,7 +28,7 @@ class Box:
         return self._production
 
     def __str__(self):
-        return self._name
+        return self._name + ":" + str(self._reservoir) + ":" + str(self._production)
 
 
 class Flow:
