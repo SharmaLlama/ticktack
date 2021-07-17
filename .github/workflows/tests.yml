@@ -27,5 +27,5 @@ jobs:
             python setup.py install
           name: 'Install ticktack'
 
-        - run: unittest tests/*.py
+        - run: tests/*.py
           name: 'Run unittests'
