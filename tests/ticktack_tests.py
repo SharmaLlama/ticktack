@@ -1,6 +1,5 @@
 import numpy as np
 import jax.numpy as jnp
-
 import pytest
 
 from ticktack import Box, CarbonBoxModel, Flow
@@ -93,7 +92,7 @@ def cbm_object_creation():
 
 
 def test_get_production_coefficients():
-    assert (jnp.all(cbm_object_creation[2].get_production_coefficients() == np.array([0.7, 0.3, 0, 0])), True)
+    assert jnp.all(cbm_object_creation[2].get_production_coefficients() == np.array([0.7, 0.3, 0, 0]))
 
 
 def test_get_edges():
