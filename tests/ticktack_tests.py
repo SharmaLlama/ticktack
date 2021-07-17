@@ -129,23 +129,23 @@ def test_converted_fluxes_not_changed():
     cbm.add_edges([flow1, flow2, flow3, flow4])
     cbm.compile()
     actual = np.array([[0, 10, 15], [10, 0, 0], [15, 0, 0]])
-    assert (np.all(cbm.get_converted_fluxes() == actual), True)
+    assert jnp.all(cbm.get_converted_fluxes() == actual)
 
 
 def test_get_reservoir_contents():
     actual = np.array([60, 50, 900, 1600])
-    assert (jnp.all(cbm_object_creation[2].get_reservoir_contents() == actual), True)
+    assert jnp.all(cbm_object_creation[2].get_reservoir_contents() == actual)
 
 
 def test_get_fluxes():
     actual = np.array([[0, 0.5, 0, 0], [0, 0, 0.2, 1], [0, 0, 0, 0], [0, 0, 0, 0]])
-    assert (jnp.all(cbm_object_creation[2].get_fluxes() == actual), True)
+    assert jnp.all(cbm_object_creation[2].get_fluxes() == actual)
 
 
 def test_converted_fluxes_changed():
     actual = np.array([[0, 35.008105, 0, 0], [35.008105, 0, 11.6693683, 58.34684167], [0, 11.6693683, 0, 0],
                        [0, 58.34684167, 0, 0]])
-    assert (jnp.all(jnp.allclose(cbm_object_creation[2].get_converted_fluxes(), actual)), True)
+    assert jnp.all(jnp.allclose(cbm_object_creation[2].get_converted_fluxes(), actual))
 
 
 def test_add_node_not_box_class():
