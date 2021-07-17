@@ -18,26 +18,26 @@ def box2_creation():
 
 
 def test_get_name():
-    assert box1_creation.get_name() == 'troposphere'
-    assert box2_creation.get_name() == 'marine surface'
+    assert box1_creation().get_name() == 'troposphere'
+    assert box2_creation().get_name() == 'marine surface'
 
 
 def test_get_reservoir_content():
-    assert box1_creation.get_reservoir_content() == 100
-    assert box2_creation.get_reservoir_content() == 150.14
+    assert box1_creation().get_reservoir_content() == 100
+    assert box2_creation().get_reservoir_content() == 150.14
 
 
 def test_get_production_non_default():
-    assert box1_creation.get_production() == 0.3
+    assert box1_creation().get_production() == 0.3
 
 
 def test_get_production_default():
-    assert box2_creation.get_production() == 44
+    assert box2_creation().get_production() == 44
 
 
 def test_str():
-    assert str(box1_creation) == 'troposphere:100:0.3'
-    assert str(box2_creation) == 'marine surface:150.14:0.0'
+    assert str(box1_creation()) == 'troposphere:100:0.3'
+    assert str(box2_creation()) == 'marine surface:150.14:0.0'
 
 
 @pytest.fixture
