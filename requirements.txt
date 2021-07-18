@@ -1,6 +1,7 @@
 h5py
 hdfdict
 jax
+jaxlib
 matplotlib
 numpy
 scipy
