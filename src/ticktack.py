@@ -82,7 +82,7 @@ class CarbonBoxModel:
     def add_edges(self, flow_objs):
         for flow_obj in flow_objs:
             if not isinstance(flow_obj, Flow):
-                raise ValueError("One/many of the input edge are not of Flow Class.")
+                raise ValueError("One/many of the input edges are not of Flow Class.")
             self._edges.append(flow_obj)
 
     def get_edges(self):
@@ -122,7 +122,7 @@ class CarbonBoxModel:
         if self._flow_rate_units == 'Gt/yr':
             corrected_fluxes = self._fluxes
         elif self._flow_rate_units == '1/yr':
-            corrected_fluxes = fluxes * jnp.transpose(self._reservoir_content) * 14.003242 / 12
+            corrected_fluxes = fluxes * jnp.transpose(self._reservoir_content) * 14.003242 / 12.
             corrected_fluxes = corrected_fluxes + jnp.transpose(corrected_fluxes)
         else:
             raise ValueError('Flow rate units must be either Gt/yr or 1/yr!')
@@ -157,14 +157,14 @@ class CarbonBoxModel:
 
     def _equilibrate_guttler(self, target_C_14):
         try:
-            troposphere_index = self._reverse_nodes['troposphere']
+            troposphere_index = self._reverse_nodes['troposphere'] # need to have option for multi-hemisphere ie multi target
         except KeyError:
             raise ValueError('there is currently no troposphere node to equilibrate!')
 
         @jit
         def objective_function(production_rate):
             _, equilibrium = self._equilibrate_brehm(production_rate)
-            return (equilibrium[troposphere_index] - target_C_14) ** 2
+            return (equilibrium[troposphere_index] - target_C_14) ** 2 # multi-target np.sum()
 
         grad_obj = jax.jit(jax.grad(objective_function))
         final_production_rate = scipy.optimize.minimize(objective_function, np.array([6.]), method='BFGS', jac=grad_obj)
