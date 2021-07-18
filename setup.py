@@ -5,7 +5,7 @@ from setuptools import setup
 import os
 import codecs
 import re
-long_description = 'A Python package for building a carbon box model consisting of any number of boxes.'
+long_description = 'A Python package implementing carbon box models for tree ring radiocarbon data analysis.'
 
 here = os.path.abspath(os.path.dirname(__file__))
 
