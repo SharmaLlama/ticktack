@@ -30,7 +30,7 @@ def test_get_production_non_default(box1_creation):
 
 
 def test_get_production_default(box2_creation):
-    assert box2_creation.get_production() == 44
+    assert box2_creation.get_production() == 0
 
 
 def test_str(box1_creation, box2_creation):
