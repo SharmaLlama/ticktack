@@ -1,6 +1,6 @@
-h5py~=3.3.0
-hdfdict~=0.3.1
-jax[cpu]~=0.2.16
-matplotlib~=3.4.2
-numpy~=1.21.0
-scipy~=1.7.0
+h5py
+hdfdict
+jax
+matplotlib
+numpy
+scipy

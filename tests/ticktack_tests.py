@@ -152,7 +152,7 @@ def test_add_node_not_box_class():
     with pytest.raises(ValueError):
         cbm.add_nodes(['a'])
 
-    assert False
+    assert True
 
 
 def test_add_node_duplicate():
@@ -167,7 +167,7 @@ def test_add_edge_not_flow_class():
     with pytest.raises(ValueError):
         cbm.add_edges(['a'])
 
-    assert False
+    assert True
 
 
 def test_add_edge_not_flow_class2():
@@ -176,4 +176,4 @@ def test_add_edge_not_flow_class2():
     with pytest.raises(ValueError):
         cbm.add_edges([b1])
 
-    assert False
+    assert True
