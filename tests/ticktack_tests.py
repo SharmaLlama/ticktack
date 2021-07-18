@@ -53,20 +53,20 @@ def flow_object_2_creation():
 
 def test_get_source(flow_object_1_creation, flow_object_2_creation):
     assert flow_object_1_creation[2].get_source() == flow_object_1_creation[0]
-    assert flow_object_2_creation[2].get_source() == flow_object_2_creation[0]
+    assert flow_object_2_creation[2].get_source() == flow_object_2_creation[1]
 
 
-def test_get_destination():
+def test_get_destination(flow_object_1_creation, flow_object_2_creation):
     assert flow_object_1_creation[2].get_destination() == flow_object_1_creation[1]
-    assert flow_object_2_creation[2].get_destination() == flow_object_2_creation[1]
+    assert flow_object_2_creation[2].get_destination() == flow_object_2_creation[0]
 
 
-def test_get_flux():
+def test_get_flux(flow_object_1_creation, flow_object_2_creation):
     assert flow_object_1_creation[2].get_flux() == 66.2
     assert flow_object_2_creation[2].get_flux() == 110.5
 
 
-def test_str_flow():
+def test_str_flow(flow_object_1_creation, flow_object_2_creation):
     actual = 'troposphere:100:0.3 --> marine surface:150.14:0.0 : 66.2'
     assert str(flow_object_1_creation[2]) == actual
     actual2 = 'marine surface:150.14:0.0 --> troposphere:100:0.3 : 110.5'
