@@ -8,6 +8,7 @@ import scipy.integrate
 import scipy.optimize
 from jax import jit
 from jax.config import config
+import pkg_resources
 
 config.update("jax_enable_x64", True)
 
@@ -19,15 +20,40 @@ class Box:
         self._production = production_coefficient
 
     def get_name(self):
+        """
+        getter method for the name of the Box Class.
+
+        :return:
+            returns a string that represents the name of the Box.
+        """
         return self._name
 
     def get_reservoir_content(self):
+        """
+        getter method for the reservoir content of the Box Class.
+
+        :return:
+            returns the reservoir content that was passed into __init__ method.
+        """
         return self._reservoir
 
     def get_production(self):
+        """
+        getter method for the reservoir content of the Box Class.
+
+        :return:
+            returns the production coefficient that was passed into __init__ method.
+        """
         return self._production
 
     def __str__(self):
+        """
+       returns a string representation of the Box.
+
+        :return:
+            returns the
+        """
+
         return self._name + ":" + str(self._reservoir) + ":" + str(self._production)
 
 
@@ -82,7 +108,7 @@ class CarbonBoxModel:
     def add_edges(self, flow_objs):
         for flow_obj in flow_objs:
             if not isinstance(flow_obj, Flow):
-                raise ValueError("One/many of the input edges are not of Flow Class.")
+                raise ValueError("One/many of the input edge are not of Flow Class.")
             self._edges.append(flow_obj)
 
     def get_edges(self):
@@ -122,7 +148,7 @@ class CarbonBoxModel:
         if self._flow_rate_units == 'Gt/yr':
             corrected_fluxes = self._fluxes
         elif self._flow_rate_units == '1/yr':
-            corrected_fluxes = fluxes * jnp.transpose(self._reservoir_content) * 14.003242 / 12.
+            corrected_fluxes = fluxes * jnp.transpose(self._reservoir_content) * 14.003242 / 12
             corrected_fluxes = corrected_fluxes + jnp.transpose(corrected_fluxes)
         else:
             raise ValueError('Flow rate units must be either Gt/yr or 1/yr!')
@@ -156,15 +182,18 @@ class CarbonBoxModel:
         return matrix_to_solve, solution
 
     def _equilibrate_guttler(self, target_C_14):
-        try:
-            troposphere_index = self._reverse_nodes['troposphere'] # need to have option for multi-hemisphere ie multi target
-        except KeyError:
-            raise ValueError('there is currently no troposphere node to equilibrate!')
+        troposphere_index = None
+        for index, node in self._nodes.items():
+            if node.get_name() == 'Troposphere':
+                troposphere_index = index
+                break
+        if troposphere_index is None:
+            raise ValueError('there is currently no Troposphere node to equilibrate!')
 
         @jit
         def objective_function(production_rate):
             _, equilibrium = self._equilibrate_brehm(production_rate)
-            return (equilibrium[troposphere_index] - target_C_14) ** 2 # multi-target np.sum()
+            return (equilibrium[troposphere_index] - target_C_14) ** 2
 
         grad_obj = jax.jit(jax.grad(objective_function))
         final_production_rate = scipy.optimize.minimize(objective_function, np.array([6.]), method='BFGS', jac=grad_obj)
@@ -233,6 +262,33 @@ class CarbonBoxModel:
 
         return binned_data
 
+    def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
+                          steady_state_production=None):
+
+        time_out = np.array(time_out)
+        data = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
+                            y0=y0, args=args, target_C_14=target_C_14, steady_state_production=steady_state_production)
+
+        if steady_state_production is not None:
+            _, solution = self.equilibrate(production_rate=steady_state_production)
+
+        elif target_C_14 is not None:
+            _, solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
+
+        else:
+            raise ValueError("Must give either target C-14 or production rate.")
+
+        troposphere_steady_state = None
+        d_14_c = None
+        for index, node in self._nodes.items():
+            if node.get_name() == 'Troposphere':
+                troposphere_steady_state = solution[index]
+                d_14_c = (data[:, index] - troposphere_steady_state) / troposphere_steady_state * 1000
+                break
+        if troposphere_steady_state is None:
+            raise ValueError('there is currently no Troposphere node to equilibrate!')
+        return d_14_c
+
 
 def save_model(carbon_box_model, filename):
     file = h5py.File(filename, 'a')
@@ -265,14 +321,40 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
     for k in range(metadata['fluxes'].shape[0]):
         for j in range(metadata['fluxes'].shape[1]):
             if metadata['fluxes'][k, j] != 0:
-                if flow_rate_units == 'kg/yr':
+                if flow_rate_units == 'Gt/yr':
                     carbon_box_model.add_edges([Flow(box_object_list[k], box_object_list[j],
                                                      float(metadata['fluxes'][k, j]))])
 
                 elif flow_rate_units == '1/yr':
                     new_flow = float(metadata['fluxes'][k, j]) * 12 / 14.003242 / box_object_list[
-                            k].get_reservoir_content()
+                        k].get_reservoir_content()
                     carbon_box_model.add_edges([Flow(box_object_list[k], box_object_list[j], new_flow)])
+                else:
+                    raise ValueError('flow_rate_units are not valid.')
 
     file.close()
     return carbon_box_model
+
+
+def load_brehm21(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+    model = load_model(pkg_resources.resource_stream(__name__, 'data/Brehm21.hd5'),
+                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
+    return model
+
+
+def load_buntgen18(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+    model = load_model(pkg_resources.resource_stream(__name__, 'data/Buntgen18.hd5'),
+                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
+    return model
+
+
+def load_guttler14(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+    model = load_model(pkg_resources.resource_stream(__name__, 'data/Guttler14.hd5'),
+                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
+    return model
+
+
+def load_miyaki17(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+    model = load_model(pkg_resources.resource_stream(__name__, 'data/Miyaki17.hd5'),
+                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
+    return model
