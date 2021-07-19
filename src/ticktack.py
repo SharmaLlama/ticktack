@@ -337,10 +337,10 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
 
 
 def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    if model in ['Guttler14', 'Brehm21', 'Miyaki17', 'Buntgen18']:
+    if model in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
         file = 'data/' + model + '.hd5'
         carbonmodel = load_model(pkg_resources.resource_stream(__name__, file),
                                  production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
         return carbonmodel
     else:
-        raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyaki17, Buntgen18')
+        raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyake17, Buntgen18')
