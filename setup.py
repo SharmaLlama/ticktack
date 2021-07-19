@@ -49,7 +49,7 @@ setup(name='ticktack',
           "Intended Audience :: Science/Research",
           "Intended Audience :: Developers",
           "Development Status :: 4 - Beta",
-          "License :: MIT License",
+          "License :: OSI Approved :: MIT License",
           "Operating System :: OS Independent",
           "Programming Language :: Python"
       ]
