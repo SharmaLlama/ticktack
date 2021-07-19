@@ -1,1 +1,2 @@
 exclude notebooks/*
+exclude src/model_builder.py
