@@ -336,25 +336,11 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
     return carbon_box_model
 
 
-def load_brehm21(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    model = load_model(pkg_resources.resource_stream(__name__, 'data/Brehm21.hd5'),
-                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
-    return model
-
-
-def load_buntgen18(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    model = load_model(pkg_resources.resource_stream(__name__, 'data/Buntgen18.hd5'),
-                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
-    return model
-
-
-def load_guttler14(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    model = load_model(pkg_resources.resource_stream(__name__, 'data/Guttler14.hd5'),
-                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
-    return model
-
-
-def load_miyaki17(production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    model = load_model(pkg_resources.resource_stream(__name__, 'data/Miyaki17.hd5'),
-                       production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
-    return model
+def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+    if model in ['Guttler14', 'Brehm21', 'Miyaki17', 'Buntgen18']:
+        file = 'data/' + model + '.hd5'
+        carbonmodel = load_model(pkg_resources.resource_stream(__name__, file),
+                                 production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
+        return carbonmodel
+    else:
+        raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyaki17, Buntgen18')
