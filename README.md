@@ -10,6 +10,10 @@ Utkarsh Sharma
 
 ## Installation
 
+The easiest way to install is from PyPI: just use
+
+`pip install ticktack`
+
 To install from source: clone this git repo, enter the directory, and run
 
 `python setup.py install`

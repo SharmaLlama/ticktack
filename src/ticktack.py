@@ -223,7 +223,6 @@ class CarbonBoxModel:
 
         elif target_C_14 is not None:
             matrix, solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
-
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
