@@ -232,7 +232,8 @@ class CarbonBoxModel:
 
     def compile(self):
         if self._fluxes is None:
-            self._reservoir_content = jnp.array([[self._nodes[j].get_reservoir_content() for j in range(self._n_nodes)]])
+            self._reservoir_content = jnp.array(
+                [[self._nodes[j].get_reservoir_content() for j in range(self._n_nodes)]])
             self._fluxes = jnp.zeros((self._n_nodes, self._n_nodes))
             for flow in self._edges:
                 self._fluxes = jax.ops.index_update(self._fluxes,
@@ -330,36 +331,28 @@ class CarbonBoxModel:
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                 steady_state_production=None):
-
         time_out = np.array(time_out)
         t = np.linspace(np.min(time_out), np.max(time_out), (time_out.shape[0] - 1) * time_oversample)
         states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
-                             steady_state_production=steady_state_production)
+                                    steady_state_production=steady_state_production)
         binned_data = np.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
                           .sum(2).sum(0) / time_oversample
 
         return binned_data, solution
 
     def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
-                          steady_state_production=None):
+                          steady_state_production=None, steady_state_solutions=None):
 
         time_out = np.array(time_out)
         data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
                                   y0=y0, args=args, target_C_14=target_C_14,
                                   steady_state_production=steady_state_production)
 
-        if y0 is None:
+        if steady_state_solutions is None:
             solution = soln
-        elif steady_state_production is not None or target_C_14 is not None:
-            if steady_state_production is not None:
-                solution = self.equilibrate(production_rate=steady_state_production)
 
-            elif target_C_14 is not None:
-                solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
-            else:
-                raise ValueError('must provide either y0 or steady_state_production/target_C_14')
         else:
-            solution = y0
+            solution = steady_state_solutions
 
         troposphere_steady_state = None
         d_14_c = None
