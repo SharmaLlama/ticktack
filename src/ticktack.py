@@ -232,8 +232,8 @@ class CarbonBoxModel:
 
     def compile(self):
         if self._fluxes is None:
-            self._reservoir_content = np.array([[self._nodes[j].get_reservoir_content() for j in range(self._n_nodes)]])
-            self._fluxes = np.zeros((self._n_nodes, self._n_nodes))
+            self._reservoir_content = jnp.array([[self._nodes[j].get_reservoir_content() for j in range(self._n_nodes)]])
+            self._fluxes = jnp.zeros((self._n_nodes, self._n_nodes))
             for flow in self._edges:
                 self._fluxes = jax.ops.index_update(self._fluxes,
                                                     jax.ops.index[self._reverse_nodes[flow.get_source()],
@@ -309,14 +309,14 @@ class CarbonBoxModel:
             y_initial = solution
 
         if callable(production):
-            production_array = np.array([production(time_values[j], *args) for j in range(time_values.shape[0])])
+            production_array = jnp.array([production(time_values[j], *args) for j in range(time_values.shape[0])])
 
         else:
             if isinstance(production, (float, int)):
-                production_array = production * np.ones_like(time_values)
+                production_array = production * jnp.ones_like(time_values)
 
             elif isinstance(production, (np.ndarray, list, jnp.ndarray)):
-                production_array = np.array(production)
+                production_array = jnp.array(production)
 
             elif not time_values.shape == production.shape:
                 raise ValueError("time array and production array have different sizes")
