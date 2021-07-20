@@ -15,6 +15,13 @@ config.update("jax_enable_x64", True)
 
 class Box:
     def __init__(self, name, reservoir, production_coefficient=0.0):
+        """
+        init method for when the object is created.
+
+        :param name: name of the Box.
+        :param reservoir: reservoir content of the Box.
+        :param production_coefficient: production coefficient of the Box.
+        """
         self._name = name
         self._reservoir = reservoir
         self._production = production_coefficient
@@ -51,7 +58,7 @@ class Box:
        returns a string representation of the Box.
 
         :return:
-            returns the
+            returns the string in thw follow representation - name:reservoir_content:production_value
         """
 
         return self._name + ":" + str(self._reservoir) + ":" + str(self._production)
@@ -59,25 +66,52 @@ class Box:
 
 class Flow:
     def __init__(self, source, destination, flux_rate):
+        """
+
+        :param source:
+        :param destination:
+        :param flux_rate:
+        """
         self._source = source
         self._destination = destination
         self._flux = flux_rate
 
     def get_source(self):
+        """
+
+        :return:
+        """
         return self._source
 
     def get_destination(self):
+        """
+
+        :return:
+        """
         return self._destination
 
     def get_flux(self):
+        """
+
+        :return:
+        """
         return self._flux
 
     def __str__(self):
+        """
+
+        :return:
+        """
         return str(self._source) + " --> " + str(self._destination) + " : " + str(self._flux)
 
 
 class CarbonBoxModel:
-    def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr', loaded_model=False):
+    def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+        """
+
+        :param production_rate_units:
+        :param flow_rate_units:
+        """
         self._nodes = {}
         self._reverse_nodes = {}
         self._edges = []
@@ -90,9 +124,14 @@ class CarbonBoxModel:
         self._production_rate_units = production_rate_units
         self._flow_rate_units = flow_rate_units
         self._corrected_fluxes = None
-        self._loaded_model = loaded_model
+        self._matrix = None
 
     def add_nodes(self, nodes):
+        """
+        
+        :param nodes:
+        :return:
+        """
         for node in nodes:
             if isinstance(node, Box):
                 if node in self._nodes.values():
@@ -106,33 +145,70 @@ class CarbonBoxModel:
                 raise ValueError("One/many of the input nodes are not of Box Class.")
 
     def add_edges(self, flow_objs):
+        """
+
+        :param flow_objs:
+        :return:
+        """
         for flow_obj in flow_objs:
             if not isinstance(flow_obj, Flow):
                 raise ValueError("One/many of the input edge are not of Flow Class.")
             self._edges.append(flow_obj)
 
     def get_edges(self):
+        """
+
+        :return:
+        """
         return list(map(str, self._edges))
 
     def get_edges_objects(self):
+        """
+
+        :return:
+        """
         return self._edges
 
     def get_nodes(self):
+        """
+
+        :return:
+        """
         return [self._nodes[j].get_name() for j in range(self._n_nodes)]
 
     def get_nodes_objects(self):
+        """
+
+        :return:
+        """
         return [self._nodes[j] for j in range(self._n_nodes)]
 
     def get_fluxes(self):
+        """
+
+        :return:
+        """
         return self._fluxes
 
     def get_converted_fluxes(self):
+        """
+
+        :return:
+        """
         return self._corrected_fluxes
 
     def get_reservoir_contents(self):
+        """
+
+        :return:
+        """
         return self._reservoir_content
 
     def get_production_coefficients(self):
+        """
+
+        :return:
+        """
         return self._production_coefficients
 
     def _convert_production_rate(self, production_rate):
@@ -168,6 +244,9 @@ class CarbonBoxModel:
             self._production_coefficients = jnp.array([self._nodes[j].get_production() for j in range(self._n_nodes)])
             self._production_coefficients /= jnp.sum(self._production_coefficients)
             self._corrected_fluxes = self._convert_flux_rate(self._fluxes)
+            c_14_fluxes = self._corrected_fluxes / jnp.transpose(self._reservoir_content)
+            new_c_14_fluxes = jnp.diag(jnp.sum(c_14_fluxes, axis=1))
+            self._matrix = jnp.transpose(c_14_fluxes) - new_c_14_fluxes - self._decay_matrix
 
             for i in range(self._n_nodes):
                 if jnp.abs(jnp.sum(self._corrected_fluxes[:, i]) - jnp.sum(self._corrected_fluxes[i, :])) > 0.001:
@@ -175,11 +254,8 @@ class CarbonBoxModel:
 
     def _equilibrate_brehm(self, production_rate):
         production_rate = self._convert_production_rate(production_rate)
-        c_14_fluxes = self._corrected_fluxes / jnp.transpose(self._reservoir_content)
-        new_c_14_fluxes = jnp.diag(jnp.sum(c_14_fluxes, axis=1))
-        matrix_to_solve = jnp.transpose(c_14_fluxes) - new_c_14_fluxes - self._decay_matrix
-        solution = jnp.linalg.solve(matrix_to_solve, -1 * self._production_coefficients * production_rate)
-        return matrix_to_solve, solution
+        solution = jnp.linalg.solve(self._matrix, -1 * self._production_coefficients * production_rate)
+        return solution
 
     def _equilibrate_guttler(self, target_C_14):
         troposphere_index = None
@@ -192,7 +268,7 @@ class CarbonBoxModel:
 
         @jit
         def objective_function(production_rate):
-            _, equilibrium = self._equilibrate_brehm(production_rate)
+            equilibrium = self._equilibrate_brehm(production_rate)
             return (equilibrium[troposphere_index] - target_C_14) ** 2
 
         grad_obj = jax.jit(jax.grad(objective_function))
@@ -213,21 +289,24 @@ class CarbonBoxModel:
 
         @jit
         def derivative(y, t, prod_val):
-            ans = jnp.matmul(matrix, y)
+            ans = jnp.matmul(self._matrix, y)
             production_rate_constant = (lambda x: jnp.interp(x, time_values, prod_val))(t)
             production_term = self._production_coefficients * production_rate_constant
             return ans + production_term
 
-        if steady_state_production is not None:
-            matrix, solution = self.equilibrate(production_rate=steady_state_production)
-
-        elif target_C_14 is not None:
-            matrix, solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
-        else:
-            raise ValueError("Must give either target C-14 or production rate.")
-
-        y0 = y0 if y0 is not None else np.array(solution)
         time_values = np.array(time_values)
+        solution = None
+        if y0 is not None:
+            y_initial = y0
+        else:
+            if steady_state_production is not None:
+                solution = self.equilibrate(production_rate=steady_state_production)
+
+            elif target_C_14 is not None:
+                solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
+            else:
+                ValueError("Must give either target C-14 or production rate.")
+            y_initial = solution
 
         if callable(production):
             production_array = np.array([production(time_values[j], *args) for j in range(time_values.shape[0])])
@@ -246,36 +325,41 @@ class CarbonBoxModel:
                 raise ValueError("incorrect object type for production")
 
         production_array = self._convert_production_rate(production_array)
-        states = scipy.integrate.odeint(derivative, y0, time_values, args=(production_array,))
-        return states
+        states = scipy.integrate.odeint(derivative, y_initial, time_values, args=(production_array,))
+        return states, solution
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                 steady_state_production=None):
 
         time_out = np.array(time_out)
         t = np.linspace(np.min(time_out), np.max(time_out), (time_out.shape[0] - 1) * time_oversample)
-        states = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
-                          steady_state_production=steady_state_production)
+        states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
+                             steady_state_production=steady_state_production)
         binned_data = np.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
                           .sum(2).sum(0) / time_oversample
 
-        return binned_data
+        return binned_data, solution
 
     def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                           steady_state_production=None):
 
         time_out = np.array(time_out)
-        data = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
-                            y0=y0, args=args, target_C_14=target_C_14, steady_state_production=steady_state_production)
+        data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
+                                  y0=y0, args=args, target_C_14=target_C_14,
+                                  steady_state_production=steady_state_production)
 
-        if steady_state_production is not None:
-            _, solution = self.equilibrate(production_rate=steady_state_production)
+        if y0 is None:
+            solution = soln
+        elif steady_state_production is not None or target_C_14 is not None:
+            if steady_state_production is not None:
+                solution = self.equilibrate(production_rate=steady_state_production)
 
-        elif target_C_14 is not None:
-            _, solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
-
+            elif target_C_14 is not None:
+                solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
+            else:
+                raise ValueError('must provide either y0 or steady_state_production/target_C_14')
         else:
-            raise ValueError("Must give either target C-14 or production rate.")
+            solution = y0
 
         troposphere_steady_state = None
         d_14_c = None
