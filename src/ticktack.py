@@ -9,6 +9,12 @@ import scipy.optimize
 from jax import jit
 from jax.config import config
 import pkg_resources
+USE_JAX = True
+if USE_JAX:
+    from jax.experimental.ode import odeint
+else:
+    from scipy.integrate import odeint
+
 
 config.update("jax_enable_x64", True)
 
@@ -326,7 +332,10 @@ class CarbonBoxModel:
                 raise ValueError("incorrect object type for production")
 
         production_array = self._convert_production_rate(production_array)
-        states = scipy.integrate.odeint(derivative, y_initial, time_values, args=(production_array,))
+        if USE_JAX:
+            states = odeint(derivative, y_initial, time_values, production_array)
+        else:
+            states = odeint(derivative, y_initial, time_values, args = (production_array,))
         return states, solution
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
