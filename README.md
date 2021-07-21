@@ -1,6 +1,7 @@
 # ticktack
 [![integration](https://github.com/SharmaLlama/ticktack/actions/workflows/tests.yml/badge.svg)](https://github.com/SharmaLlama/ticktack/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PyPI version](https://badge.fury.io/py/ticktack.svg)](https://badge.fury.io/py/ticktack)
 
 This is a lightweight, open-source carbon box modelling library, adapted for modelling tree ring radiocarbon time series.
 
