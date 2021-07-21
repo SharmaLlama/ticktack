@@ -332,7 +332,10 @@ class CarbonBoxModel:
                 raise ValueError("incorrect object type for production")
 
         production_array = self._convert_production_rate(production_array)
-        states = odeint(derivative, y_initial, time_values, production_array)
+        if USE_JAX:
+            states = odeint(derivative, y_initial, time_values, production_array)
+        else:
+            states = odeint(derivative, y_initial, time_values, args = (production_array,))
         return states, solution
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
