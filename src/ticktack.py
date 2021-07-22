@@ -279,7 +279,7 @@ class CarbonBoxModel:
             return (equilibrium[troposphere_index] - target_C_14) ** 2
 
         grad_obj = jax.jit(jax.grad(objective_function))
-        final_production_rate = scipy.optimize.minimize(objective_function, np.array([6.]), method='BFGS', jac=grad_obj)
+        final_production_rate = scipy.optimize.minimize(objective_function, jnp.array([6.]), method='BFGS', jac=grad_obj)
         return final_production_rate.x[0]
 
     def equilibrate(self, target_C_14=None, production_rate=None):
@@ -301,7 +301,7 @@ class CarbonBoxModel:
             production_term = self._production_coefficients * production_rate_constant
             return ans + production_term
 
-        time_values = np.array(time_values)
+        time_values = jnp.array(time_values)
         solution = None
         if y0 is not None:
             y_initial = y0
@@ -340,11 +340,11 @@ class CarbonBoxModel:
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                 steady_state_production=None):
-        time_out = np.array(time_out)
-        t = np.linspace(np.min(time_out), np.max(time_out), (time_out.shape[0] - 1) * time_oversample)
+        time_out = jnp.array(time_out)
+        t = jnp.linspace(np.min(time_out), np.max(time_out), (time_out.shape[0] - 1) * time_oversample)
         states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
                                     steady_state_production=steady_state_production)
-        binned_data = np.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
+        binned_data = jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
                           .sum(2).sum(0) / time_oversample
 
         return binned_data, solution
@@ -352,7 +352,7 @@ class CarbonBoxModel:
     def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                           steady_state_production=None, steady_state_solutions=None):
 
-        time_out = np.array(time_out)
+        time_out = jnp.array(time_out)
         data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
                                   y0=y0, args=args, target_C_14=target_C_14,
                                   steady_state_production=steady_state_production)
