@@ -341,7 +341,7 @@ class CarbonBoxModel:
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                 steady_state_production=None):
         time_out = jnp.array(time_out)
-        t = jnp.linspace(np.min(time_out), np.max(time_out), (time_out.shape[0] - 1) * time_oversample)
+        t = jnp.linspace(jnp.min(time_out), jnp.max(time_out), (time_out.shape[0] - 1) * time_oversample)
         states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
                                     steady_state_production=steady_state_production)
         binned_data = jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
