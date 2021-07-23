@@ -5,3 +5,5 @@ jaxlib
 matplotlib
 numpy
 scipy
+pandas
+astropy
