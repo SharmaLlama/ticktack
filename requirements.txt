@@ -7,3 +7,6 @@ numpy
 scipy
 pandas
 astropy
+emcee
+celerite
+corner
