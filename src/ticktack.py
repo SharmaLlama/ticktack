@@ -10,7 +10,7 @@ from jax import jit, partial
 from jax.config import config
 import pkg_resources
 
-USE_JAX = True
+USE_JAX = False
 if USE_JAX:
     from jax.experimental.ode import odeint
 else:
@@ -217,14 +217,15 @@ class CarbonBoxModel:
         """
         return self._production_coefficients
 
+    @partial(jit,static_argnums=0)
     def _convert_production_rate(self, production_rate):
         if self._production_rate_units == 'atoms/cm^2/s':
-            production_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536. / 1.e5
+            new_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536. / 1.e5
         elif self._production_rate_units == 'kg/yr':
-            production_rate = production_rate
+            new_rate = production_rate
         else:
             raise ValueError('Production Rate units must be either atoms/cm^2/s or kg/yr!')
-        return production_rate
+        return new_rate
 
     def _convert_flux_rate(self, fluxes):
         if self._flow_rate_units == 'Gt/yr':
@@ -295,6 +296,7 @@ class CarbonBoxModel:
 
     def run(self, time_values, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
 
+        @jit
         def derivative(y, t):
             ans = jnp.matmul(self._matrix, y)
             production_rate_constant = production(t, *args)
