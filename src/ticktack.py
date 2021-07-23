@@ -10,7 +10,7 @@ from jax import jit, partial
 from jax.config import config
 import pkg_resources
 
-USE_JAX = False
+USE_JAX = True
 if USE_JAX:
     from jax.experimental.ode import odeint
 else:
@@ -219,7 +219,7 @@ class CarbonBoxModel:
 
     def _convert_production_rate(self, production_rate):
         if self._production_rate_units == 'atoms/cm^2/s':
-            production_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536 / 10 ** 5
+            production_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536. / 1.e5
         elif self._production_rate_units == 'kg/yr':
             production_rate = production_rate
         else:
