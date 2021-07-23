@@ -6,15 +6,15 @@ import numpy as np
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
-from jax import jit
+from jax import jit, partial
 from jax.config import config
 import pkg_resources
-USE_JAX = True
+
+USE_JAX = False
 if USE_JAX:
     from jax.experimental.ode import odeint
 else:
     from scipy.integrate import odeint
-
 
 config.update("jax_enable_x64", True)
 
@@ -134,7 +134,7 @@ class CarbonBoxModel:
 
     def add_nodes(self, nodes):
         """
-        
+
         :param nodes:
         :return:
         """
@@ -279,7 +279,8 @@ class CarbonBoxModel:
             return (equilibrium[troposphere_index] - target_C_14) ** 2
 
         grad_obj = jax.jit(jax.grad(objective_function))
-        final_production_rate = scipy.optimize.minimize(objective_function, jnp.array([6.]), method='BFGS', jac=grad_obj)
+        final_production_rate = scipy.optimize.minimize(objective_function, jnp.array([6.]), method='BFGS',
+                                                        jac=grad_obj)
         return final_production_rate.x[0]
 
     def equilibrate(self, target_C_14=None, production_rate=None):
@@ -294,17 +295,17 @@ class CarbonBoxModel:
 
     def run(self, time_values, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
 
-        @jit
-        def derivative(y, t, prod_val):
+        def derivative(y, t):
             ans = jnp.matmul(self._matrix, y)
-            production_rate_constant = (lambda x: jnp.interp(x, time_values, prod_val))(t)
+            production_rate_constant = production(t, *args)
+            production_rate_constant = self._convert_production_rate(production_rate_constant)
             production_term = self._production_coefficients * production_rate_constant
             return ans + production_term
 
         time_values = jnp.array(time_values)
         solution = None
         if y0 is not None:
-            y_initial = y0
+            y_initial = jnp.array(y0)
         else:
             if steady_state_production is not None:
                 solution = self.equilibrate(production_rate=steady_state_production)
@@ -313,29 +314,15 @@ class CarbonBoxModel:
                 solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
             else:
                 ValueError("Must give either target C-14 or production rate.")
-            y_initial = solution
+            y_initial = jnp.array(solution)
 
-        if callable(production):
-            production_array = jnp.array([production(time_values[j], *args) for j in range(time_values.shape[0])])
+        if not callable(production):
+            raise ValueError("incorrect object type for production")
 
-        else:
-            if isinstance(production, (float, int)):
-                production_array = production * jnp.ones_like(time_values)
-
-            elif isinstance(production, (np.ndarray, list, jnp.ndarray)):
-                production_array = jnp.array(production)
-
-            elif not time_values.shape == production.shape:
-                raise ValueError("time array and production array have different sizes")
-
-            else:
-                raise ValueError("incorrect object type for production")
-
-        production_array = self._convert_production_rate(production_array)
         if USE_JAX:
-            states = odeint(derivative, y_initial, time_values, production_array)
+            states = odeint(derivative, y_initial, time_values)
         else:
-            states = odeint(derivative, y_initial, time_values, args = (production_array,))
+            states = odeint(derivative, y_initial, time_values)
         return states, solution
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
