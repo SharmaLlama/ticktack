@@ -7,7 +7,7 @@ This is a lightweight, open-source carbon box modelling library, adapted for mod
 
 ## Contributors
 
-Utkarsh Sharma, Benjamin Pope
+Utkarsh Sharma, Qingyuan Zhang, Benjamin Pope
 
 ## Installation
 
