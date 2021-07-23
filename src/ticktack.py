@@ -10,7 +10,7 @@ from jax import jit, partial
 from jax.config import config
 import pkg_resources
 
-USE_JAX = False
+USE_JAX = True
 if USE_JAX:
     from jax.experimental.ode import odeint
 else:
