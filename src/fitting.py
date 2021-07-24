@@ -171,5 +171,5 @@ class CarbonFitter():
         mean_draw = self.miyake_event(self.time_grid_fine, value[0], value[1], value[2], value[3])
         ax2.plot(self.time_grid_fine, mean_draw, color="k", lw=2)
         ax2.set_ylim(np.min(mean_draw)*0.8, np.max(mean_draw)*1.1);
-        ax2.set_xlabel("Calender Year (AD)");
+        ax2.set_xlabel("Calendar Year (CE)");
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
