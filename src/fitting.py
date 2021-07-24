@@ -24,7 +24,7 @@ rcParams['figure.figsize'] = (16.0, 8.0)
 class CarbonFitter():
     """
     """
-    def __init__(self, cbm, production_rate_units='atoms/cm^2/s',target_C_14=707):
+    def __init__(self, cbm, production_rate_units='atoms/cm^2/s',target_C_14=707.):
         if isinstance(cbm, str):
             try:
                 if cbm in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
@@ -35,7 +35,7 @@ class CarbonFitter():
                 raise ValueError('Must be a valid CBM model')
         self.cbm = cbm
         self.cbm.compile()
-        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
+        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14) # 707 default for Guttler
         self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
 
     def load_data(self, file_name, resolution=1000, fine_grid=0.02, time_oversample=1000):
@@ -159,7 +159,7 @@ class CarbonFitter():
         ax1.plot(self.time_data[:-1], d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7)
         ax1.errorbar(self.time_data, self.d14c_data, 
             yerr=self.d14c_data_error, fmt="o", color="k", fillstyle="full", capsize=3, markersize=7)
-        ax1.set_ylabel("$\delta^{14}$C (%)")
+        ax1.set_ylabel("$\delta^{14}$C (‰)")
         fig.subplots_adjust(hspace=0.05)
 
 
