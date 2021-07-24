@@ -24,7 +24,7 @@ rcParams['figure.figsize'] = (16.0, 8.0)
 class CarbonFitter():
     """
     """
-    def __init__(self, cbm, production_rate_units='atoms/cm^2/s'):
+    def __init__(self, cbm, production_rate_units='atoms/cm^2/s',target_C_14=707):
         if isinstance(cbm, str):
             try:
                 if cbm in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
@@ -35,14 +35,14 @@ class CarbonFitter():
                 raise ValueError('Must be a valid CBM model')
         self.cbm = cbm
         self.cbm.compile()
-        self.steady_state_production = self.cbm.equilibrate(target_C_14=707)
+        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
         self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
 
     def load_data(self, file_name, resolution=1000, fine_grid=0.02, time_oversample=1000):
         data = Table.read(file_name, format="ascii")
-        self.time_data = data["year"]
-        self.d14c_data = data["d14c"]
-        self.d14c_data_error = data["sig_d14c"]
+        self.time_data = jnp.array(data["year"])
+        self.d14c_data = jnp.array(data["d14c"])
+        self.d14c_data_error = jnp.array(data["sig_d14c"])
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
         self.resolution = resolution
@@ -145,7 +145,7 @@ class CarbonFitter():
 
 
     def plot_samples(self, sampler):
-        value = np.mean(sampler.flatchain, axis=0)
+        value = jnp.mean(sampler.flatchain, axis=0)
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         samples = sampler.flatchain
         for s in samples[np.random.randint(len(samples), size=100)]:
@@ -170,6 +170,6 @@ class CarbonFitter():
 
         mean_draw = self.miyake_event(self.time_grid_fine, value[0], value[1], value[2], value[3])
         ax2.plot(self.time_grid_fine, mean_draw, color="k", lw=2)
-        ax2.set_ylim(np.min(mean_draw)*0.8, np.max(mean_draw)*1.1);
+        ax2.set_ylim(jnp.min(mean_draw)*0.8, jnp.max(mean_draw)*1.1);
         ax2.set_xlabel("Calendar Year (CE)");
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
