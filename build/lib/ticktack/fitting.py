@@ -53,12 +53,6 @@ class CarbonFitter():
             custom_function = False
             f = None
         try:
-            use_data = kwargs['use_data']
-            data = kwargs['data']
-        except:
-            use_data = False
-            data = None
-        try:
             production = kwargs['production']
         except:
             production = None
@@ -72,14 +66,13 @@ class CarbonFitter():
                 self.production = self.miyake_event_flexible_solar
             else:
                 self.production = self.miyake_event_fixed_solar
-
         if custom_function == True and f != None:
             self.production = f
 
         if self.production == None:
             self.production = self.miyake_event_fixed_solar
-            print("No matching production function, use default "
-                  "miyake production with fixed solar cycle (11 yrs) and amplitude (0.18)\n")
+            print("No matching production function, use default \
+            miyake production with fixed solar cycle (11 yrs) and amplitude (0.18)\n")
 
     @partial(jit, static_argnums=(0,)) 
     def super_gaussian(self, t, start_time, duration, area):
@@ -202,7 +195,7 @@ class CarbonFitter():
 
 
         for s in samples[np.random.randint(len(samples), size=10)]:
-            production_rate = self.miyake_event_fixed_solar(self.time_grid_fine,
+            production_rate = self.miyake_event(self.time_grid_fine, 
                                            s[0], s[1], s[2], s[3])
             ax2.plot(self.time_grid_fine, production_rate, alpha=0.25, color="g")
 
