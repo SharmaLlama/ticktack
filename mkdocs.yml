@@ -1,0 +1,21 @@
+site_name: ticktack for Radiocarbon Box Modelling
+nav:
+    - Home: index.md
+    - 'Fitting a Carbon Box Model':
+        - fitting-with-mcmc: notebooks/fitting.ipynb
+
+theme:
+  name: "material"
+repo_url: https://github.com/SharmaLlama/ticktack
+plugins:
+  - search
+  - mkdocs-jupyter
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          selection:
+            docstring_style: "numpy"
+          rendering:
+            show_source: false
+      custom_templates: templates

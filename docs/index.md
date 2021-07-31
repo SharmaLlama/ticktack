@@ -1,9 +1,5 @@
 # ticktack
-[![integration](https://github.com/SharmaLlama/ticktack/actions/workflows/tests.yml/badge.svg)](https://github.com/SharmaLlama/ticktack/actions/workflows/tests.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PyPI version](https://badge.fury.io/py/ticktack.svg)](https://badge.fury.io/py/ticktack)
-
-A lightweight, open-source carbon box modelling library in Python, adapted for modelling tree ring radiocarbon time series.
+A lightweight, open-source carbon box modelling library, adapted for modelling tree ring radiocarbon time series.
 
 ## Contributors
 
@@ -21,7 +17,7 @@ The easiest way to install is from PyPI: just use
 
 `pip install ticktack`
 
-To install from source: clone this git repo, enter the directory, and run
+To install from source: clone [this git repo](https://github.com/SharmaLlama/ticktack), enter the directory, and run
 
 `python setup.py install`
 
