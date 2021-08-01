@@ -52,7 +52,6 @@ class CarbonFitter():
         except:
             custom_function = False
             f = None
-
         try:
             use_control_points = kwargs['use_control_points']
             control_points = kwargs['control_points']
@@ -74,17 +73,17 @@ class CarbonFitter():
             else:
                 self.production = self.miyake_event_fixed_solar
 
-        if custom_function == True and f != None:
+        if custom_function is True and f is not None:
             self.production = f
 
-        if use_control_points == True and control_points != None:
+        if use_control_points is True and control_points is not None:
             def f(tval, *args):
                 control_points = jnp.array(list(args))
                 t = jnp.linspace(self.start, self.end, num=len(args), endpoint=True)
                 return jnp.interp(tval, self.time_data, control_points)
             self.production = f
 
-        if self.production == None:
+        if self.production is None:
             self.production = self.miyake_event_fixed_solar
             print("No matching production function, use default "
                   "miyake production with fixed solar cycle (11 yrs) and amplitude (0.18)\n")

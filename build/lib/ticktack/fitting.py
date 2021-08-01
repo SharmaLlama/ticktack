@@ -55,12 +55,10 @@ class CarbonFitter():
 
         try:
             use_control_points = kwargs['use_control_points']
-            years = kwargs['years']
             control_points = kwargs['control_points']
         except:
             use_control_points = False
             control_points = None
-            years = None
         try:
             production = kwargs['production']
         except:
