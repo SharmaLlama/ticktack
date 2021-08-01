@@ -2,7 +2,6 @@ MANIFEST.in
 README.md
 setup.py
 src/__init__.py
-src/fit.py
 src/fitting.py
 src/ticktack.py
 ticktack.egg-info/PKG-INFO

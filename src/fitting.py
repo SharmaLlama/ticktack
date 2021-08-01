@@ -52,12 +52,15 @@ class CarbonFitter():
         except:
             custom_function = False
             f = None
+
         try:
-            use_data = kwargs['use_data']
-            data = kwargs['data']
+            use_control_points = kwargs['use_control_points']
+            years = kwargs['years']
+            control_points = kwargs['control_points']
         except:
-            use_data = False
-            data = None
+            use_control_points = False
+            control_points = None
+            years = None
         try:
             production = kwargs['production']
         except:
@@ -74,6 +77,13 @@ class CarbonFitter():
                 self.production = self.miyake_event_fixed_solar
 
         if custom_function == True and f != None:
+            self.production = f
+
+        if use_control_points == True and control_points != None:
+            def f(tval, *args):
+                control_points = jnp.array(list(args))
+                t = jnp.linspace(self.start, self.end, num=len(args), endpoint=True)
+                return jnp.interp(tval, self.time_data, control_points)
             self.production = f
 
         if self.production == None:
@@ -161,7 +171,7 @@ class CarbonFitter():
         sampler.run_mcmc(p0, production, progress=True);
         return sampler
 
-    def corner_plot(self, sampler, labels=None):
+    def corner_plot(self, sampler, labels=None, save=False):
         ndim = sampler.flatchain.shape[1]
         if labels is not None:
             labels = labels
@@ -180,9 +190,11 @@ class CarbonFitter():
                 ax.axvline(value[xi], color="r")
                 ax.axhline(value[yi], color="r")
                 ax.plot(value[xi], value[yi], "sr")
+        if save:
+            figure.savefig("corner.jpg")
 
 
-    def plot_samples(self, sampler):
+    def plot_samples(self, sampler, save=False):
         value = jnp.mean(sampler.flatchain, axis=0)
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         samples = sampler.flatchain
@@ -211,3 +223,5 @@ class CarbonFitter():
         ax2.set_ylim(jnp.min(mean_draw)*0.8, jnp.max(mean_draw)*1.1);
         ax2.set_xlabel("Calendar Year (CE)");
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
+        if save:
+            fig.savefig("samples.jpg")
