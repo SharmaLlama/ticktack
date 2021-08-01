@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from jax import grad, jit, partial
 import ticktack
 from astropy.table import Table
+from scipy.optimize import minimize
 import emcee
 import corner
 
@@ -68,7 +69,7 @@ class CarbonFitter():
             fit_solar_params = False
 
         if production == 'miyake':
-            if fit_solar_params == True:
+            if fit_solar_params is True:
                 self.production = self.miyake_event_flexible_solar
             else:
                 self.production = self.miyake_event_fixed_solar
@@ -80,7 +81,7 @@ class CarbonFitter():
             def f(tval, *args):
                 control_points = jnp.array(list(args))
                 t = jnp.linspace(self.start, self.end, num=len(args), endpoint=True)
-                return jnp.interp(tval, self.time_data, control_points)
+                return jnp.interp(tval, t, control_points)
             self.production = f
 
         if self.production is None:
@@ -154,10 +155,21 @@ class CarbonFitter():
         pos = self.log_like(params)
         return lp + pos
 
-    def sampling(self, params, burnin=500, production=2000):
+    @partial(jit, static_argnums=(0,))
+    def grad_log_like(self, param):
+        return jit(grad(self.log_like))(param)
+
+    def optimise(self, params):
+        soln = minimize(self.log_like, params, jac=self.grad_log_like)
+        return soln
+
+    def sampling(self, params, burnin=500, production=2000, log_like=False):
         initial = params
         ndim, nwalkers = len(initial), 5*len(initial)
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_prob)
+        if log_like:
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_like)
+        else:
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_prob)
 
         print("Running burn-in...")
         p0 = initial + 1e-5 * np.random.rand(nwalkers, ndim)
