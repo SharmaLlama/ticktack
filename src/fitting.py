@@ -203,11 +203,10 @@ class CarbonFitter():
         fig.subplots_adjust(hspace=0.05)
 
         for s in samples[np.random.randint(len(samples), size=10)]:
-            production_rate = self.miyake_event_fixed_solar(self.time_grid_fine,
-                                                            s[0], s[1], s[2], s[3])
+            production_rate = self.production(self.time_grid_fine,*s)
             ax2.plot(self.time_grid_fine, production_rate, alpha=0.25, color="g")
 
-        mean_draw = self.miyake_event(self.time_grid_fine, value[0], value[1], value[2], value[3])
+        mean_draw = self.production(self.time_grid_fine, *value)
         ax2.plot(self.time_grid_fine, mean_draw, color="k", lw=2)
         ax2.set_ylim(jnp.min(mean_draw) * 0.8, jnp.max(mean_draw) * 1.1);
         ax2.set_xlabel("Calendar Year (CE)");
