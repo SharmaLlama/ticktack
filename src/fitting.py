@@ -55,10 +55,8 @@ class CarbonFitter():
             f = None
         try:
             use_control_points = kwargs['use_control_points']
-            control_points = kwargs['control_points']
         except:
             use_control_points = False
-            control_points = None
         try:
             production = kwargs['production']
         except:
@@ -77,9 +75,9 @@ class CarbonFitter():
         if custom_function is True and f is not None:
             self.production = f
 
-        if use_control_points is True and control_points is not None:
+        if use_control_points is True:
             def f(tval, *args):
-                control_points = jnp.array(list(args))
+                control_points = jnp.squeeze(jnp.array(list(args)))
                 t = jnp.linspace(self.start, self.end, num=len(args), endpoint=True)
                 return jnp.interp(tval, t, control_points)
             self.production = f
