@@ -13,6 +13,7 @@ from astropy.table import Table
 from scipy.optimize import minimize
 import emcee
 import corner
+import scipy
 
 rcParams['figure.figsize'] = (16.0, 8.0)
 
@@ -209,7 +210,6 @@ class CarbonFitter():
         if save:
             figure.savefig("corner.jpg")
 
-
     def plot_samples(self, sampler, save=False):
         value = jnp.mean(sampler.flatchain, axis=0)
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
@@ -241,3 +241,19 @@ class CarbonFitter():
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
         if save:
             fig.savefig("samples.jpg")
+
+    @partial(jit, static_argnums=(0,))
+    def like_cp(self, params):
+        d_14_c = self.dc14(params)
+        lik = jnp.sum((self.d14c_data[:-1] - d_14_c) ** 2)
+        return lik / len(d_14_c)
+
+    @partial(jit, static_argnums=(0,))
+    def grad_like_cp(self, params):
+        return jit(grad(self.like_cp))(params)
+
+    def fit_cp(self):
+        steady_state = self.steady_state_production * jnp.ones((len(self.time_data) + 1,))
+        params = steady_state
+        soln = scipy.optimize.minimize(self.like_cp, params)
+        return soln
