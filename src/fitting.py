@@ -48,23 +48,23 @@ class CarbonFitter():
 
     def prepare_function(self, **kwargs):
         self.production = None
-        # self.parametric = True
         try:
             custom_function = kwargs['custom_function']
             f = kwargs['f']
-            # self.parametric = kwargs['parametric']
         except:
             custom_function = False
             f = None
+
         try:
             use_control_points = kwargs['use_control_points']
-            # self.parametric = kwargs['parametric']
         except:
             use_control_points = False
+
         try:
             production = kwargs['production']
         except:
             production = None
+
         try:
             fit_solar_params = kwargs['fit_solar']
         except:
@@ -153,7 +153,8 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def log_prior(self, params=()):
-        lp = jnp.where(((params[1]<=0)|(params[1]>=3)), -np.inf, 0)
+        lp = 0
+        # lp = jnp.where(((params[1]<=0)|(params[1]>=3)), -np.inf, 0)
         return lp
 
     @partial(jit, static_argnums=(0,))
@@ -243,17 +244,29 @@ class CarbonFitter():
             fig.savefig("samples.jpg")
 
     @partial(jit, static_argnums=(0,))
-    def like_cp(self, params):
+    def loss_se(self, params):
         d_14_c = self.dc14(params)
-        lik = jnp.sum((self.d14c_data[:-1] - d_14_c) ** 2)
-        return lik / len(d_14_c)
+        loss = jnp.sum((self.d14c_data[:-1] - d_14_c) ** 2)
+        return loss
 
     @partial(jit, static_argnums=(0,))
-    def grad_like_cp(self, params):
-        return jit(grad(self.like_cp))(params)
+    def grad_loss_se(self, params):
+        return jit(grad(self.loss_se))(params)
 
-    def fit_cp(self):
-        steady_state = self.steady_state_production * jnp.ones((len(self.time_data) + 1,))
+    @partial(jit, static_argnums=(0,))
+    def loss_chi2(self, params=()):
+        # calls dc14 and compare to data, (can be gp or gaussian loglikelihood)
+        d_14_c = self.dc14(params=params)
+        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        return chi2
+
+    def fit_cp(self, loss="se"):
+        steady_state = self.steady_state_production * jnp.ones((len(self.time_data)+1,))
         params = steady_state
-        soln = scipy.optimize.minimize(self.like_cp, params)
+        if loss == "se":
+            soln = scipy.optimize.minimize(self.loss_se, params)
+        elif loss == "chi2":
+            soln = scipy.optimize.minimize(self.loss_chi2, params)
+        else:
+            raise Exception("No valid loss function identified")
         return soln
