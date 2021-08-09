@@ -3,6 +3,10 @@ nav:
     - Home: index.md
     - 'Fitting a Carbon Box Model':
         - fitting-with-mcmc: notebooks/fitting.ipynb
+    - Box API Docs: box_api.md
+    - Flow API Docs: flow_api.md
+    - CarbonBoxModel API Docs: cbm_api.md
+    - CarbonFitter API Docs: cf_api.md
 
 theme:
   name: "material"
