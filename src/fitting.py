@@ -34,7 +34,7 @@ class CarbonFitter():
         self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14) # 707 default for Guttler
         self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
 
-    def load_data(self, file_name, resolution=1000, fine_grid=0.02, time_oversample=1000):
+    def load_data(self, file_name, resolution=1000, fine_grid=0.05, time_oversample=1000, num_offset=4):
         data = Table.read(file_name, format="ascii")
         self.time_data = jnp.array(data["year"])
         self.d14c_data = jnp.array(data["d14c"])
@@ -45,6 +45,7 @@ class CarbonFitter():
         self.burn_in_time = np.linspace(self.start-1000, self.start, self.resolution)
         self.time_grid_fine = np.arange(self.start, self.end, fine_grid)
         self.time_oversample = time_oversample
+        self.offset = jnp.mean(self.d14c_data[:num_offset])
 
     def prepare_function(self, **kwargs):
         self.production = None
@@ -59,6 +60,16 @@ class CarbonFitter():
             use_control_points = kwargs['use_control_points']
         except:
             use_control_points = False
+
+        try:
+            dense_years = kwargs['dense_years']
+        except:
+            dense_years = 3
+
+        try:
+            gap_years = kwargs['gap_years']
+        except:
+            gap_years = 5
 
         try:
             production = kwargs['production']
@@ -80,16 +91,28 @@ class CarbonFitter():
             self.production = f
 
         if use_control_points is True:
-            def f(tval, *args):
-                control_points = jnp.squeeze(jnp.array(list(args)))
-                t = jnp.linspace(self.start-1, self.end, num=len(args), endpoint=True)
-                return jnp.interp(tval, t, control_points)
-            self.production = f
+            self.production = self.f
+            control_points_time = [self.start - 1, self.start]
+
+            n = len(self.time_data[:-1])
+            for i in range(n):
+                if (self.time_data[i] - control_points_time[-1]<=2) & (self.time_data[i] - control_points_time[-1]>0):
+                    control_points_time.append(float(self.time_data[i]) + dense_years)
+                elif self.time_data[i] >= control_points_time[-1] + gap_years:
+                    control_points_time.append(float(self.time_data[i]))
+            control_points_time = np.array(control_points_time)[control_points_time <= self.end]
+
+            self.control_points_time = jnp.array(control_points_time)
 
         if self.production is None:
             self.production = self.miyake_event_fixed_solar
             print("No matching production function, use default "
                   "miyake production with fixed solar cycle (11 yrs) and amplitude (0.18)\n")
+
+    @partial(jit, static_argnums=(0,))
+    def f(self, tval, *args):
+        control_points = jnp.squeeze(jnp.array(list(args)))
+        return jnp.interp(tval, self.control_points_time, control_points)
 
     @partial(jit, static_argnums=(0,)) 
     def super_gaussian(self, t, start_time, duration, area):
@@ -100,7 +123,7 @@ class CarbonFitter():
     @partial(jit, static_argnums=(0,)) 
     def miyake_event_fixed_solar(self, t, start_time, duration, phase, area):
         height = self.super_gaussian(t, start_time, duration, area)
-        prod =  self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
+        prod = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
         return prod
 
     @partial(jit, static_argnums=(0,))
@@ -122,24 +145,19 @@ class CarbonFitter():
                                        steady_state_solutions=self.steady_state_y0)
         return d_14_c
 
-    @partial(jit, static_argnums=(0,))
-    def dc142(self, params=()):
-        burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params[:-1])
-        d_14_c = self.run_D_14_C_values(self.time_data, self.time_oversample, burn_in[-1, :], params=params[:-1])
-        return d_14_c - params[-1]
 
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
         d_14_c = self.run_D_14_C_values(self.time_data, self.time_oversample, burn_in[-1, :], params=params)
-        return d_14_c - 22.72
+        return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
     # calls CBM on production_rate of params
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
         d_14_c = self.run_D_14_C_values(self.time_grid_fine, self.time_oversample, burn_in[-1, :], params=params)
-        return d_14_c - 22.72
+        return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
     def log_like(self, params=()):
@@ -152,8 +170,7 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def log_prior(self, params=()):
-        lp = 0
-        # lp = jnp.where(((params[1]<=0)|(params[1]>=3)), -np.inf, 0)
+        lp = jnp.sum(jnp.where((params<=0), -np.inf, 0))
         return lp
 
     @partial(jit, static_argnums=(0,))
@@ -164,12 +181,37 @@ class CarbonFitter():
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def grad_log_like(self, param=()):
-        return jit(grad(self.log_like))(params=params)
+    def grad_log_like(self, params=()):
+        return jit(grad(self.log_like))(params)
 
-    def optimise(self, params):
-        soln = minimize(self.log_like, params, jac=self.grad_log_like)
+    @partial(jit, static_argnums=(0,))
+    def loss_chi2(self, params=()):
+        d_14_c = self.dc14(params=params)
+        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        return 0.5*chi2
+
+    @partial(jit, static_argnums=(0,))
+    def loss_chi2_avg(self, params=(), k=1):
+        d_14_c = self.dc14(params=params)
+        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        return 0.5*chi2/(k*len(d_14_c))
+
+    def fit_cp(self, low_bound=0, avg=True, k=1):
+        steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time),))
+        params = steady_state
+        bounds = tuple([(low_bound, None)] * len(steady_state))
+        if avg:
+            soln = scipy.optimize.minimize(self.loss_chi2_avg, params, args=(k), bounds=bounds,
+                                           method="L-BFGS-B", tol=2.220446049250313e-09,
+                                           options={"maxfun": 1e6, "maxiter": 1e6})
+        elif not avg:
+            soln = scipy.optimize.minimize(self.loss_chi2, params, bounds=bounds,
+                                           method="L-BFGS-B", tol=2.220446049250313e-09,
+                                           options={"maxfun": 1e6, "maxiter": 1e6})
+        else:
+            raise Exception("No valid loss function specified")
         return soln
+
 
     def sampling(self, params, burnin=500, production=2000, log_like=False):
         initial = params
@@ -241,49 +283,3 @@ class CarbonFitter():
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
         if save:
             fig.savefig("samples.jpg")
-
-    @partial(jit, static_argnums=(0,))
-    def loss_se(self, params):
-        d_14_c = self.dc14(params)
-        loss = jnp.sum((self.d14c_data[:-1] - d_14_c) ** 2)
-        return loss/len(d_14_c)
-
-    @partial(jit, static_argnums=(0,))
-    def loss_se2(self, params):
-        d_14_c = self.dc142(params)
-        loss = jnp.sum((self.d14c_data[:-1] - d_14_c) ** 2)
-        return loss/len(d_14_c)
-
-    @partial(jit, static_argnums=(0,))
-    def grad_loss_se(self, params):
-        return jit(grad(self.loss_se))(params)
-
-    @partial(jit, static_argnums=(0,))
-    def loss_chi2_fit_offset(self, params=()):
-        d_14_c = self.dc142(params=params)
-        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
-        return 0.5*chi2/len(d_14_c)
-
-    def fit_cp(self, loss="se"):
-        steady_state = self.steady_state_production * jnp.ones((len(self.time_data)+1,))
-        params = steady_state
-        if loss == "se":
-            soln = scipy.optimize.minimize(self.loss_se, params)
-        elif loss == "chi2":
-            soln = scipy.optimize.minimize(self.loss_chi2, params)
-        else:
-            raise Exception("No valid loss function identified")
-        return soln
-
-    def fit_cp_offset(self, loss="se", low_bound=0):
-        steady_state = self.steady_state_production * jnp.ones((self.end-self.start+2,))
-        offset = jnp.array([0.])
-        params = jnp.append(steady_state, offset)
-        bounds = tuple([(low_bound, None)] * len(steady_state) + [(0, None)])
-        if loss == "se":
-            soln = scipy.optimize.minimize(self.loss_se2, params, bounds=bounds)
-        elif loss == "chi2":
-            soln = scipy.optimize.minimize(self.loss_chi2_fit_offset, params, tol=1e-8)
-        else:
-            raise Exception("No valid loss function identified")
-        return soln
