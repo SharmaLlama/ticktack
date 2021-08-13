@@ -16,7 +16,6 @@ docs/index.md
 docs/notebooks/fitting.ipynb
 docs/notebooks/miyake12.csv
 docs/notebooks/.ipynb_checkpoints/fitting-checkpoint.ipynb
-notebooks/.ipynb_checkpoints/fitting-checkpoint.ipynb
 notebooks/.ipynb_checkpoints/fitting2-checkpoint.ipynb
 src/__init__.py
 src/fit.py

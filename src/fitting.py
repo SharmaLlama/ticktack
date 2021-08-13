@@ -35,7 +35,7 @@ class CarbonFitter():
         self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
         self.production = None
 
-    def load_data(self, file_name, resolution=1000, fine_grid=0.02, time_oversample=1000):
+    def load_data(self, file_name, resolution=1000, fine_grid=0.02, time_oversample=1000,burn_in_duration=1000):
         data = Table.read(file_name, format="ascii")
         self.time_data = jnp.array(data["year"])
         self.d14c_data = jnp.array(data["d14c"])
@@ -43,7 +43,7 @@ class CarbonFitter():
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
         self.resolution = resolution
-        self.burn_in_time = np.linspace(self.start - 1000, self.start, self.resolution)
+        self.burn_in_time = np.linspace(self.start - burn_in_duration, self.start, self.resolution)
         self.time_grid_fine = np.arange(self.start, self.end, fine_grid)
         self.time_oversample = time_oversample
 
