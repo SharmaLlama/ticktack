@@ -1,12 +1,12 @@
-astropy
-celerite
-corner
-emcee
 h5py
 hdfdict
 jax
 jaxlib
 matplotlib
 numpy
-pandas
 scipy
+pandas
+astropy
+emcee
+celerite
+corner

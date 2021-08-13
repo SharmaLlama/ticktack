@@ -315,7 +315,7 @@ class CarbonBoxModel:
             elif target_C_14 is not None:
                 solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
             else:
-                ValueError("Must give either target C-14 or production rate.")
+                ValueError("Must give either y0, or target C-14, or production rate.")
             y_initial = jnp.array(solution)
 
         if not callable(production):
@@ -338,19 +338,7 @@ class CarbonBoxModel:
 
         return binned_data, solution
 
-    def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
-                          steady_state_production=None, steady_state_solutions=None):
-
-        time_out = jnp.array(time_out)
-        data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
-                                  y0=y0, args=args, target_C_14=target_C_14,
-                                  steady_state_production=steady_state_production)
-
-        if steady_state_solutions is None:
-            solution = soln
-
-        else:
-            solution = steady_state_solutions
+    def _to_d14c(self,data,solution):
 
         troposphere_steady_state = None
         d_14_c = None
@@ -362,6 +350,22 @@ class CarbonBoxModel:
         if troposphere_steady_state is None:
             raise ValueError('there is currently no Troposphere node to equilibrate!')
         return d_14_c
+
+
+    def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
+                          steady_state_production=None, steady_state_solutions=None):
+
+        time_out = jnp.array(time_out)
+        data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
+                                  y0=y0, args=args, target_C_14=target_C_14,
+                                  steady_state_production=steady_state_production)
+
+        if steady_state_solutions is None:
+            solution = soln
+        else:
+            solution = steady_state_solutions
+
+        return self._to_d14c(data,solution)
 
 
 def save_model(carbon_box_model, filename):

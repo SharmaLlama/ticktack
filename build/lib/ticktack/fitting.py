@@ -156,7 +156,8 @@ class CarbonFitter():
     def dc14_fine(self, params=()):
     # calls CBM on production_rate of params
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        d_14_c = self.run_D_14_C_values(self.time_grid_fine, self.time_oversample, burn_in[-1, :], params=params)
+        data, solution = self.cbm.run(self.time_grid_fine, production=self.production, args=params, y0=burn_in[-1,:])
+        d_14_c = self.cbm._to_d14c(data,self.steady_state_y0)
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
