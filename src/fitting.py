@@ -46,6 +46,8 @@ class CarbonFitter():
         self.time_grid_fine = np.arange(self.start, self.end, fine_grid)
         self.time_oversample = time_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
+        self.annual = jnp.arange(self.start, self.end + 1)
+        self.mask = jnp.in1d(self.annual, self.time_data)[:-1]
 
     def prepare_function(self, **kwargs):
         self.production = None
@@ -146,10 +148,16 @@ class CarbonFitter():
         return d_14_c
 
 
+    # @partial(jit, static_argnums=(0,))
+    # def dc14(self, params=()):
+    #     burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
+    #     d_14_c = self.run_D_14_C_values(self.time_data, self.time_oversample, burn_in[-1, :], params=params)
+    #     return d_14_c + self.offset
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        d_14_c = self.run_D_14_C_values(self.time_data, self.time_oversample, burn_in[-1, :], params=params)
+        d_14_c = self.run_D_14_C_values(self.annual, self.time_oversample, burn_in[-1, :], params=params)
+        d_14_c = d_14_c[self.mask]
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))

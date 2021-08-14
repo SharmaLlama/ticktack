@@ -46,6 +46,8 @@ class CarbonFitter():
         self.time_grid_fine = np.arange(self.start, self.end, fine_grid)
         self.time_oversample = time_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
+        self.annual = jnp.arange(self.start, self.end + 1)
+        self.mask = jnp.in1d(self.annual, self.time_data)[:-1]
 
     def prepare_function(self, **kwargs):
         self.production = None
@@ -146,10 +148,16 @@ class CarbonFitter():
         return d_14_c
 
 
+    # @partial(jit, static_argnums=(0,))
+    # def dc14(self, params=()):
+    #     burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
+    #     d_14_c = self.run_D_14_C_values(self.time_data, self.time_oversample, burn_in[-1, :], params=params)
+    #     return d_14_c + self.offset
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        d_14_c = self.run_D_14_C_values(self.time_data, self.time_oversample, burn_in[-1, :], params=params)
+        d_14_c = self.run_D_14_C_values(self.annual, self.time_oversample, burn_in[-1, :], params=params)
+        d_14_c = d_14_c[self.mask]
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
@@ -231,7 +239,7 @@ class CarbonFitter():
         sampler.run_mcmc(p0, production, progress=True);
         return sampler
 
-    def corner_plot(self, sampler, labels=None, save=False):
+    def corner_plot(self, sampler, labels=None, savefile=None):
         ndim = sampler.flatchain.shape[1]
         if labels is not None:
             labels = labels
@@ -250,10 +258,10 @@ class CarbonFitter():
                 ax.axvline(value[xi], color="r")
                 ax.axhline(value[yi], color="r")
                 ax.plot(value[xi], value[yi], "sr")
-        if save:
-            figure.savefig("corner.jpg")
+        if savefile is not None:
+            figure.savefig(savefile,bbox_inches='tight')
 
-    def plot_samples(self, sampler, save=False):
+    def plot_samples(self, sampler, savefile=None):
         value = jnp.mean(sampler.flatchain, axis=0)
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         samples = sampler.flatchain
@@ -282,5 +290,5 @@ class CarbonFitter():
         ax2.set_ylim(jnp.min(mean_draw)*0.8, jnp.max(mean_draw)*1.1);
         ax2.set_xlabel("Calendar Year (CE)");
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
-        if save:
-            fig.savefig("samples.jpg")
+        if savefile is not None:
+            figure.savefig(savefile,bbox_inches='tight')
