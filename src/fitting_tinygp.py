@@ -2,8 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.pyplot import rcParams
-import celerite2
-from celerite2.jax import terms as jax_terms
+from tinygp import kernels, GaussianProcess
 import re
 import jax.numpy as jnp
 import jax
@@ -114,7 +113,6 @@ class CarbonFitter():
             elif interp == "gp":
                 self.control_points_time = self.annual
                 self.production = self.interp_gp
-                self.gp = True
 
         if self.production is None:
             self.production = self.miyake_event_fixed_solar
@@ -128,12 +126,11 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def gp_neg_log_likelihood(self, params):
+        k = kernels.ExpSquared(1.)
         control_points = params[:-1]
         mean = params[-1]
-        kernel = jax_terms.Matern32Term(sigma=1.0, rho=1.)
-        gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
-        gp.compute(self.control_points_time)
-        return -gp.log_likelihood(control_points)
+        gp = GaussianProcess(k, self.control_points_time, mean=mean)
+        return -gp.condition(control_points)
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
@@ -142,10 +139,10 @@ class CarbonFitter():
         control_points = params[:-1]
         mean = params[-1]
 
-        kernel = jax_terms.Matern32Term(sigma=1.0, rho=1.)
-        gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
-        gp.compute(self.control_points_time)
-        mu = gp.predict(control_points, t=tval, return_var=False)
+        k = kernels.ExpSquared(1.)
+        gp = GaussianProcess(k, self.control_points_time, mean=mean)
+        gp.condition(control_points)
+        mu = gp.predict(tval, return_var=False)
         return mu
 
     @partial(jit, static_argnums=(0,)) 
@@ -234,18 +231,18 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def gp_likelihood_avg(self, params=(), k=1):
-        chi2 = self.loss_chi2_avg(params=params, k=k)
-        return chi2 + self.gp_neg_log_likelihood(params)
+        chi2 = self.loss_chi2(params=params)
+        return (chi2 + self.gp_neg_log_likelihood(params))/k
 
-    def fit_cp(self, low_bound=0, avg=False, k=1):
-        if self.gp:
+    def fit_cp(self, low_bound=0, gp=False, avg=True, k=1):
+        if gp:
             steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time) + 1,))
         else:
             steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         params = steady_state
         bounds = tuple([(low_bound, None)] * len(steady_state))
 
-        if self.gp:
+        if gp:
             if avg:
                 soln = scipy.optimize.minimize(self.gp_likelihood_avg, params, args=(k), bounds=bounds,
                                                tol=2.220446049250313e-09)
@@ -267,14 +264,10 @@ class CarbonFitter():
     def sampling(self, params, burnin=500, production=2000, log_like=False):
         initial = params
         ndim, nwalkers = len(initial), 5*len(initial)
-        if self.gp:
-            ndim, nwalkers = len(initial), 2*len(initial)
-            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.gp_likelihood)
+        if log_like:
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_like)
         else:
-            if log_like:
-                sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_like)
-            else:
-                sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_prob)
+            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_prob)
 
         print("Running burn-in...")
         p0 = initial + 1e-5 * np.random.rand(nwalkers, ndim)

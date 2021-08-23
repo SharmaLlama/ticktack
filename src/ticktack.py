@@ -299,12 +299,17 @@ class CarbonBoxModel:
         @jit
         def derivative(y, t):
             ans = jnp.matmul(self._matrix, y)
+            # print("t shape: ", t.shape)
+            # print("y: ", y)
+            # print("t: ", t)
+            # print("args: ", *args)
             production_rate_constant = production(t, *args)
             production_rate_constant = self._convert_production_rate(production_rate_constant)
             production_term = self._production_coefficients * production_rate_constant
             return ans + production_term
 
         time_values = jnp.array(time_values)
+        # print("time_values shape: ", time_values.shape)
         solution = None
         if y0 is not None:
             y_initial = jnp.array(y0)
@@ -322,8 +327,10 @@ class CarbonBoxModel:
             raise ValueError("incorrect object type for production")
 
         if USE_JAX:
+            # print("time_values jax shape: ", time_values.shape)
             states = odeint(derivative, y_initial, time_values)
         else:
+            # print("time_values no jax shape: ", time_values.shape)
             states = odeint(derivative, y_initial, time_values)
         return states, solution
 

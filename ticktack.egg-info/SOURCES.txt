@@ -3,6 +3,7 @@ README.md
 setup.py
 src/__init__.py
 src/fitting.py
+src/fitting_tinygp.py
 src/ticktack.py
 ticktack.egg-info/PKG-INFO
 ticktack.egg-info/SOURCES.txt
