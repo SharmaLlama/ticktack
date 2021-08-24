@@ -145,6 +145,15 @@ class CarbonFitter():
         mu = gp.predict(tval, return_var=False)
         return mu
 
+    @partial(jit, static_argnums=(0,))
+    def sum_interp_gp(self, *args):
+        mu = self.interp_gp(self.annual, *args)
+        return jnp.sum(mu)
+
+    @partial(jit, static_argnums=(0,))
+    def grad_sum_interp_gp(self, *args):
+        return grad(self.sum_interp_gp)(*args)
+
     @partial(jit, static_argnums=(0,)) 
     def super_gaussian(self, t, start_time, duration, area):
         middle = start_time+duration/2.
@@ -228,6 +237,10 @@ class CarbonFitter():
     def gp_likelihood(self, params=()):
         chi2 = self.loss_chi2(params=params)
         return chi2 + self.gp_neg_log_likelihood(params)
+
+    @partial(jit, static_argnums=(0,))
+    def grad_gp_likelihood(self, params=()):
+        return grad(self.gp_likelihood)(params)
 
     @partial(jit, static_argnums=(0,))
     def gp_likelihood_avg(self, params=(), k=1):
