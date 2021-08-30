@@ -6,7 +6,7 @@ from tinygp import kernels, GaussianProcess
 import re
 import jax.numpy as jnp
 import jax
-from jax import grad, jit, partial
+from jax import grad, jit, partial, jacfwd, jacrev
 import ticktack
 from astropy.table import Table
 import emcee
@@ -133,6 +133,14 @@ class CarbonFitter():
         return -gp.condition(control_points)
 
     @partial(jit, static_argnums=(0,))
+    def gp_log_likelihood(self, params):
+        k = kernels.ExpSquared(1.)
+        control_points = params[:-1]
+        mean = params[-1]
+        gp = GaussianProcess(k, self.control_points_time, mean=mean)
+        return gp.condition(control_points)
+
+    @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
         tval = tval.reshape(-1)
         params = jnp.squeeze(jnp.array(list(args)))
@@ -239,8 +247,17 @@ class CarbonFitter():
         return chi2 + self.gp_neg_log_likelihood(params)
 
     @partial(jit, static_argnums=(0,))
+    def gp_sampling_likelihood(self, params=()):
+        chi2 = self.loss_chi2(params=params)
+        return -chi2 + self.gp_log_likelihood(params)
+
+    @partial(jit, static_argnums=(0,))
     def grad_gp_likelihood(self, params=()):
         return grad(self.gp_likelihood)(params)
+
+    @partial(jit, static_argnums=(0,))
+    def hessian_gp_likelihood(self, params=()):
+        return jacrev(jacrev(self.gp_likelihood))(params)
 
     @partial(jit, static_argnums=(0,))
     def gp_likelihood_avg(self, params=(), k=1):

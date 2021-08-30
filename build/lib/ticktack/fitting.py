@@ -136,6 +136,15 @@ class CarbonFitter():
         return -gp.log_likelihood(control_points)
 
     @partial(jit, static_argnums=(0,))
+    def gp_log_likelihood(self, params):
+        control_points = params[:-1]
+        mean = params[-1]
+        kernel = jax_terms.Matern32Term(sigma=1.0, rho=1.)
+        gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
+        gp.compute(self.control_points_time)
+        return gp.log_likelihood(control_points)
+
+    @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
         tval = tval.reshape(-1)
         params = jnp.squeeze(jnp.array(list(args)))
@@ -240,6 +249,11 @@ class CarbonFitter():
     def gp_likelihood(self, params=()):
         chi2 = self.loss_chi2(params=params)
         return chi2 + self.gp_neg_log_likelihood(params)
+
+    @partial(jit, static_argnums=(0,))
+    def gp_sampling_likelihood(self, params=()):
+        chi2 = self.loss_chi2(params=params)
+        return -chi2 + self.gp_log_likelihood(params)
 
     @partial(jit, static_argnums=(0,))
     def grad_gp_likelihood(self, params=()):
