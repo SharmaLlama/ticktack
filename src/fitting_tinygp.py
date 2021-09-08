@@ -111,8 +111,9 @@ class CarbonFitter():
                 self.production = self.interp_linear
 
             elif interp == "gp":
-                self.control_points_time = self.annual
+                self.control_points_time = jnp.arange(self.start, self.end)
                 self.production = self.interp_gp
+                self.gp = True
 
         if self.production is None:
             self.production = self.miyake_event_fixed_solar
@@ -126,17 +127,17 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def gp_neg_log_likelihood(self, params):
+        control_points = params
+        mean = params[0]
         k = kernels.ExpSquared(1.)
-        control_points = params[:-1]
-        mean = params[-1]
         gp = GaussianProcess(k, self.control_points_time, mean=mean)
         return -gp.condition(control_points)
 
     @partial(jit, static_argnums=(0,))
     def gp_log_likelihood(self, params):
+        control_points = params
+        mean = params[0]
         k = kernels.ExpSquared(1.)
-        control_points = params[:-1]
-        mean = params[-1]
         gp = GaussianProcess(k, self.control_points_time, mean=mean)
         return gp.condition(control_points)
 
@@ -144,8 +145,8 @@ class CarbonFitter():
     def interp_gp(self, tval, *args):
         tval = tval.reshape(-1)
         params = jnp.squeeze(jnp.array(list(args)))
-        control_points = params[:-1]
-        mean = params[-1]
+        control_points = params
+        mean = params[0]
 
         k = kernels.ExpSquared(1.)
         gp = GaussianProcess(k, self.control_points_time, mean=mean)
@@ -264,15 +265,12 @@ class CarbonFitter():
         chi2 = self.loss_chi2(params=params)
         return (chi2 + self.gp_neg_log_likelihood(params))/k
 
-    def fit_cp(self, low_bound=0, gp=False, avg=True, k=1):
-        if gp:
-            steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time) + 1,))
-        else:
-            steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time),))
+    def fit_cp(self, low_bound=0, avg=True, k=1):
+        steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         params = steady_state
         bounds = tuple([(low_bound, None)] * len(steady_state))
 
-        if gp:
+        if self.gp:
             if avg:
                 soln = scipy.optimize.minimize(self.gp_likelihood_avg, params, args=(k), bounds=bounds,
                                                tol=2.220446049250313e-09)
