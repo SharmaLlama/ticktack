@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import pandas as pd
 from matplotlib.pyplot import rcParams
 import celerite2.jax
 from celerite2.jax import terms as jax_terms
@@ -112,7 +111,7 @@ class CarbonFitter():
                 self.production = self.interp_linear
 
             elif interp == "gp":
-                self.control_points_time = self.annual
+                self.control_points_time = jnp.arange(self.start + 1, self.end)
                 self.production = self.interp_gp
                 self.gp = True
 
@@ -130,7 +129,7 @@ class CarbonFitter():
     def gp_neg_log_likelihood(self, params):
         control_points = params[:-1]
         mean = params[-1]
-        kernel = jax_terms.Matern32Term(sigma=1.0, rho=1.)
+        kernel = jax_terms.Matern32Term(sigma=2.0, rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
         gp.compute(self.control_points_time)
         return -gp.log_likelihood(control_points)
@@ -139,7 +138,7 @@ class CarbonFitter():
     def gp_log_likelihood(self, params):
         control_points = params[:-1]
         mean = params[-1]
-        kernel = jax_terms.Matern32Term(sigma=1.0, rho=1.)
+        kernel = jax_terms.Matern32Term(sigma=2.0, rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
         gp.compute(self.control_points_time)
         return gp.log_likelihood(control_points)
@@ -151,7 +150,7 @@ class CarbonFitter():
         control_points = params[:-1]
         mean = params[-1]
 
-        kernel = jax_terms.Matern32Term(sigma=1.0, rho=1.)
+        kernel = jax_terms.Matern32Term(sigma=2.0, rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
         gp.compute(self.control_points_time)
         mu = gp.predict(control_points, t=tval, return_var=False)
@@ -209,7 +208,7 @@ class CarbonFitter():
     def dc14_fine(self, params=()):
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
         data, solution = self.cbm.run(self.time_grid_fine, production=self.production, args=params, y0=burn_in[-1,:])
-        d_14_c = self.cbm._to_d14c(data,self.steady_state_y0)
+        d_14_c = self.cbm._to_d14c(data, self.steady_state_y0)
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
