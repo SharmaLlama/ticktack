@@ -4,10 +4,7 @@ setup.py
 src/__init__.py
 src/fitting.py
 src/fitting2.py
-src/fitting3.py
-src/fitting4.py
 src/fitting_tinygp.py
-src/fitting_tinygp2.py
 src/ticktack.py
 ticktack.egg-info/PKG-INFO
 ticktack.egg-info/SOURCES.txt

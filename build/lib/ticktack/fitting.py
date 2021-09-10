@@ -111,7 +111,7 @@ class CarbonFitter():
                 self.production = self.interp_linear
 
             elif interp == "gp":
-                self.control_points_time = jnp.arange(self.start + 1, self.end)
+                self.control_points_time = jnp.arange(self.start, self.end)
                 self.production = self.interp_gp
                 self.gp = True
 
@@ -127,18 +127,18 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def gp_neg_log_likelihood(self, params):
-        control_points = params[:-1]
-        mean = params[-1]
-        kernel = jax_terms.Matern32Term(sigma=2.0, rho=2.)
+        control_points = params
+        mean = params[0]
+        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
         gp.compute(self.control_points_time)
         return -gp.log_likelihood(control_points)
 
     @partial(jit, static_argnums=(0,))
     def gp_log_likelihood(self, params):
-        control_points = params[:-1]
-        mean = params[-1]
-        kernel = jax_terms.Matern32Term(sigma=2.0, rho=2.)
+        control_points = params
+        mean = params[0]
+        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
         gp.compute(self.control_points_time)
         return gp.log_likelihood(control_points)
@@ -147,13 +147,14 @@ class CarbonFitter():
     def interp_gp(self, tval, *args):
         tval = tval.reshape(-1)
         params = jnp.squeeze(jnp.array(list(args)))
-        control_points = params[:-1]
-        mean = params[-1]
+        control_points = params
+        mean = params[0]
 
-        kernel = jax_terms.Matern32Term(sigma=2.0, rho=2.)
+        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
         gp.compute(self.control_points_time)
         mu = gp.predict(control_points, t=tval, return_var=False)
+        mu = (tval > self.start) * mu +  (tval <= self.start) * mean
         return mu
 
     @partial(jit, static_argnums=(0,))
@@ -208,7 +209,7 @@ class CarbonFitter():
     def dc14_fine(self, params=()):
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
         data, solution = self.cbm.run(self.time_grid_fine, production=self.production, args=params, y0=burn_in[-1,:])
-        d_14_c = self.cbm._to_d14c(data, self.steady_state_y0)
+        d_14_c = self.cbm._to_d14c(data,self.steady_state_y0)
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
@@ -236,6 +237,7 @@ class CarbonFitter():
     def loss_chi2(self, params=()):
         d_14_c = self.dc14(params=params)
         chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        chi2 += 10 * jnp.sum(((self.d14c_data[:4] - d_14_c[:4]) / self.d14c_data_error[:4]) ** 2)
         return 0.5*chi2
 
     @partial(jit, static_argnums=(0,))
@@ -264,29 +266,23 @@ class CarbonFitter():
         return chi2 + self.gp_neg_log_likelihood(params)
 
     def fit_cp(self, low_bound=0, avg=False, k=1):
-        if self.gp:
-            steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time) + 1,))
-        else:
-            steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time),))
+        steady_state = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         params = steady_state
         bounds = tuple([(low_bound, None)] * len(steady_state))
 
         if self.gp:
             if avg:
-                soln = scipy.optimize.minimize(self.gp_likelihood_avg, params, args=(k), bounds=bounds,
-                                               tol=2.220446049250313e-09)
+                soln = scipy.optimize.minimize(self.gp_likelihood_avg, params, args=(k), bounds=bounds,)
             else:
                 soln = scipy.optimize.minimize(self.gp_likelihood, params, bounds=bounds,
-                                               tol=2.220446049250313e-09)
+                                               options={'maxiter': 20000})
         else:
             if avg:
                 soln = scipy.optimize.minimize(self.loss_chi2_avg, params, args=(k), bounds=bounds,
-                                               method="L-BFGS-B", tol=2.220446049250313e-09,
-                                               options={"maxfun": 1e6, "maxiter": 1e6})
+                                               method="L-BFGS-B", options={'maxiter': 20000})
             else:
                 soln = scipy.optimize.minimize(self.loss_chi2, params, bounds=bounds,
-                                               method="L-BFGS-B", tol=2.220446049250313e-09,
-                                               options={"maxfun": 1e6, "maxiter": 1e6})
+                                               method="L-BFGS-B", options={'maxiter': 20000})
         return soln
 
 

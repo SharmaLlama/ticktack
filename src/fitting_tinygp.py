@@ -152,6 +152,7 @@ class CarbonFitter():
         gp = GaussianProcess(k, self.control_points_time, mean=mean)
         gp.condition(control_points)
         mu = gp.predict(tval, return_var=False)
+        mu = (tval > self.start) * mu + (tval <= self.start) * mean
         return mu
 
     @partial(jit, static_argnums=(0,))
@@ -234,6 +235,7 @@ class CarbonFitter():
     def loss_chi2(self, params=()):
         d_14_c = self.dc14(params=params)
         chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        chi2 += 5 * jnp.sum(((self.d14c_data[:4] - d_14_c[:4]) / self.d14c_data_error[:4]) ** 2)
         return 0.5*chi2
 
     @partial(jit, static_argnums=(0,))
