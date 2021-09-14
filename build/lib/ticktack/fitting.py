@@ -50,6 +50,7 @@ class CarbonFitter():
 
     def prepare_function(self, **kwargs):
         self.production = None
+        self.gp = None
         try:
             custom_function = kwargs['custom_function']
             f = kwargs['f']
@@ -85,10 +86,10 @@ class CarbonFitter():
         try:
             fit_solar_params = kwargs['fit_solar']
         except:
-            fit_solar_params = False
+            fit_solar_params = None
 
         if production == 'miyake':
-            if fit_solar_params is True:
+            if fit_solar_params:
                 self.production = self.miyake_event_flexible_solar
             else:
                 self.production = self.miyake_event_fixed_solar
@@ -116,10 +117,6 @@ class CarbonFitter():
                 self.production = self.interp_gp
                 self.gp = True
 
-        if self.production is None:
-            self.production = self.miyake_event_fixed_solar
-            print("No matching production function, use default "
-                  "miyake production with fixed solar cycle (11 yrs) and amplitude (0.18)\n")
 
     @partial(jit, static_argnums=(0,))
     def interp_linear(self, tval, *args):
@@ -351,11 +348,11 @@ class CarbonFitter():
         samples = sampler.flatchain
         for s in samples[np.random.randint(len(samples), size=100)]:
             d_c_14_fine = self.dc14_fine(params=s)
-            ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, alpha=0.2, color="g")
+            ax1.plot(self.time_grid_fine, d_c_14_fine, alpha=0.2, color="g")
 
         d_c_14_coarse = self.dc14(params=value)
         d_c_14_fine = self.dc14_fine(params=value)
-        ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, alpha=1, color="k")
+        ax1.plot(self.time_grid_fine, d_c_14_fine, alpha=1, color="k")
 
         ax1.plot(self.time_data[:-1], d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7)
         ax1.errorbar(self.time_data, self.d14c_data, 
