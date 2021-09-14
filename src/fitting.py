@@ -9,6 +9,7 @@ import jax
 from jax import grad, jit, partial
 import ticktack
 from astropy.table import Table
+from tqdm import tqdm
 import emcee
 import corner
 import scipy
@@ -214,7 +215,6 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def log_like(self, params=()):
-        # calls dc14 and compare to data, (can be gp or gaussian loglikelihood)
         d_14_c = self.dc14(params=params)
         
         chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c)/self.d14c_data_error[:-1])**2)
@@ -228,7 +228,6 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def log_prob(self, params=()):
-        # call log_like and log_prior, for later MCMC
         lp = self.log_prior(params=params)
         pos = self.log_like(params=params)
         return lp + pos
@@ -286,17 +285,12 @@ class CarbonFitter():
         return soln
 
 
-    def sampling(self, params, burnin=500, production=2000, log_like=False):
+    def sampling(self, params, likelihood, burnin=500, production=1000):
         initial = params
         ndim, nwalkers = len(initial), 5*len(initial)
         if self.gp:
-            ndim, nwalkers = len(initial), 3*len(initial)
-            sampler = emcee.EnsembleSampler(nwalkers, ndim, self.gp_likelihood)
-        else:
-            if log_like:
-                sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_like)
-            else:
-                sampler = emcee.EnsembleSampler(nwalkers, ndim, self.log_prob)
+            ndim, nwalkers = len(initial), 2*len(initial)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood)
 
         print("Running burn-in...")
         p0 = initial + 1e-5 * np.random.rand(nwalkers, ndim)
@@ -306,6 +300,28 @@ class CarbonFitter():
         sampler.reset()
         sampler.run_mcmc(p0, production, progress=True);
         return sampler
+
+    def plot_recovery(self, sampler, time_data=None, true_production=None):
+        mean = np.mean(sampler.flatchain, axis=0)
+        fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 10), sharex=True)
+        n = 100
+        top_n = np.random.permutation(len(sampler.flatchain))[:n]
+        ax1.errorbar(self.time_data[:-1], self.d14c_data[:-1], yerr=self.d14c_data_error[:-1],
+                     fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="true d14c")
+        for i in tqdm(top_n):
+            d14c = self.dc14_fine(params=sampler.flatchain[i, :])
+            ax1.plot(self.time_grid_fine, d14c, color="g", alpha=0.2)
+            control_points_fine = self.production(self.time_grid_fine, (sampler.flatchain[i, :],))
+            ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=0.2)
+        control_points_fine = self.production(self.time_grid_fine, (mean,))
+        ax2.plot(self.time_grid_fine, control_points_fine, "r", label="sample mean production rate")
+        ax1.set_ylabel("$\Delta^{14}$C (‰)");
+        ax2.set_ylabel("Production rate ($cm^2s^{-1}$)")
+        ax2.set_xlabel("Calendar Year")
+        if (true_production is not None) & (time_data is not None):
+            ax2.plot(time_data, true_production, 'k', label="true production rate")
+        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.13), fancybox=True);
+        ax1.legend();
 
     def corner_plot(self, sampler, labels=None, savefile=None):
         ndim = sampler.flatchain.shape[1]
