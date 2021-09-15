@@ -4,6 +4,8 @@ import pytest
 
 import ticktack
 
+import pandas
+
 
 @pytest.fixture
 def box1_creation():
