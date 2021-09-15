@@ -2,12 +2,12 @@ import h5py
 import hdfdict
 import jax.numpy as jnp
 import jax.ops
-import numpy as np
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
 from jax import jit, partial
 from jax.config import config
+import numpy as np
 import pkg_resources
 
 USE_JAX = True
@@ -37,7 +37,7 @@ class Box:
         getter method for the name of the Box Class.
 
         :return:
-            returns a string that represents the name of the Box.
+        returns a string that represents the name of the Box.
         """
         return self._name
 
@@ -46,7 +46,7 @@ class Box:
         getter method for the reservoir content of the Box Class.
 
         :return:
-            returns the reservoir content that was passed into __init__ method.
+        returns the reservoir content that was passed into __init__ method.
         """
         return self._reservoir
 
@@ -55,16 +55,16 @@ class Box:
         getter method for the reservoir content of the Box Class.
 
         :return:
-            returns the production coefficient that was passed into __init__ method.
+        returns the production coefficient that was passed into __init__ method.
         """
         return self._production
 
     def __str__(self):
         """
-       returns a string representation of the Box.
+        returns a string representation of the Box.
 
         :return:
-            returns the string in thw follow representation - name:reservoir_content:production_value
+        returns the string in thw follow representation - name:reservoir_content:production_value
         """
 
         return self._name + ":" + str(self._reservoir) + ":" + str(self._production)
@@ -73,40 +73,51 @@ class Box:
 class Flow:
     def __init__(self, source, destination, flux_rate):
         """
+        init method for when the Flow object is created.
 
-        :param source:
-        :param destination:
-        :param flux_rate:
+        :param source: source of the flow.
+        :param destination: destination the flow.
+        :param flux_rate: flux rate between the source and the destination. Flux must be a non-negative value.
         """
         self._source = source
         self._destination = destination
+        assert flux_rate >= 0
         self._flux = flux_rate
 
     def get_source(self):
         """
+        getter method for the source node of the Flow Class.
 
         :return:
+        returns the source of the flow.
+
         """
         return self._source
 
     def get_destination(self):
         """
+        getter method for the destination node of the Flow Class.
 
         :return:
+        returns the destination of the flow.
         """
         return self._destination
 
     def get_flux(self):
         """
+        getter method for the flux rate of the Flow Class.
 
         :return:
+        returns the flux of the flow.
         """
         return self._flux
 
     def __str__(self):
         """
+        returns a string representation of the Flow.
 
         :return:
+        returns the string in thw follow representation - str(source) --> str(destination):flux_value
         """
         return str(self._source) + " --> " + str(self._destination) + " : " + str(self._flux)
 
@@ -114,9 +125,11 @@ class Flow:
 class CarbonBoxModel:
     def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
         """
+        init method for when the Carbon Box Model object is created. Initialises the parameters that are needed for
+        the rest of the class.
 
-        :param production_rate_units:
-        :param flow_rate_units:
+        :param production_rate_units: units for the production rate. Only valid values are 'kg/yr' or 'atoms/cm^2/s'.
+        :param flow_rate_units: units for the flow rate. Only valid values are 'Gt/yr' or '1/yr'.
         """
         self._nodes = {}
         self._reverse_nodes = {}
@@ -126,11 +139,12 @@ class CarbonBoxModel:
         self._fluxes = None
         self._decay_matrix = None
         self._production_coefficients = None
-        self._decay_constant = jax.numpy.log(2) / 5730
+        self._decay_constant = jnp.log(2) / 5730
         self._production_rate_units = production_rate_units
         self._flow_rate_units = flow_rate_units
         self._corrected_fluxes = None
         self._matrix = None
+        self._growth_kernel = jnp.array([1] * 12)
 
     def add_nodes(self, nodes):
         """
@@ -217,7 +231,7 @@ class CarbonBoxModel:
         """
         return self._production_coefficients
 
-    @partial(jit,static_argnums=0)
+    @partial(jit, static_argnums=0)
     def _convert_production_rate(self, production_rate):
         if self._production_rate_units == 'atoms/cm^2/s':
             new_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536. / 1.e5
@@ -336,12 +350,37 @@ class CarbonBoxModel:
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                 steady_state_production=None):
+        # time_out = jnp.array(time_out)
+        # # time_step = time_out[1] - time_out[0]
+        # t = jnp.linspace(jnp.min(time_out), jnp.max(time_out), (time_out.shape[0] - 1) * time_oversample)
+        # states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
+        #                             steady_state_production=steady_state_production)
+        # m = int(1 / time_step * time_oversample // 12)
+        # tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1,  int(time_oversample / time_step)))
+        # num = int(time_oversample // (time_step * 12) * 12)
+        # tiled = jax.ops.index_update(tiled, jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), 0)
+        # tiled_full = jnp.resize(jnp.tile(tiled, (states.shape[1], int((time_out.shape[0] - 1) * time_step))),
+        #                         (states.shape[1], states.shape[0]))
+        # # print(tiled_full.shape)
+        # # print(states)
+        # states = jnp.transpose(tiled_full) * states
+        # # print(jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])).sum(2))
+        # binned_data = jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
+        #                   .sum(2).sum(0) / jnp.sum(tiled) / time_step
+
         time_out = jnp.array(time_out)
         t = jnp.linspace(jnp.min(time_out), jnp.max(time_out), (time_out.shape[0] - 1) * time_oversample)
         states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
                                     steady_state_production=steady_state_production)
+        m = time_oversample // 12
+        tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1,  time_oversample))
+        num = int((time_oversample // 12) * 12)
+        tiled = jax.ops.index_update(tiled, jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), 0)
+        tiled_full = jnp.resize(jnp.tile(tiled, (states.shape[1], int(time_out.shape[0] - 1))),
+                                (states.shape[1], states.shape[0]))
+        states = jnp.transpose(tiled_full) * states
         binned_data = jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
-                          .sum(2).sum(0) / time_oversample
+                          .sum(2).sum(0) / jnp.sum(tiled)
 
         return binned_data, solution
 
@@ -361,7 +400,6 @@ class CarbonBoxModel:
 
     def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                           steady_state_production=None, steady_state_solutions=None):
-
         time_out = jnp.array(time_out)
         data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
                                   y0=y0, args=args, target_C_14=target_C_14,
@@ -373,6 +411,13 @@ class CarbonBoxModel:
             solution = steady_state_solutions
 
         return self._to_d14c(data,solution)
+
+    def define_growth_season(self, months):
+        month_list = np.array(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september',
+                               'october', 'november', 'december'])
+        months = np.array(months)
+        self._growth_kernel = jax.ops.index_update(self._growth_kernel, np.in1d(month_list, months,
+                                                                                invert=True), 0)
 
 
 def save_model(carbon_box_model, filename):
