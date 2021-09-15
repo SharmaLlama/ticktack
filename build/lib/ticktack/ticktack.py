@@ -419,6 +419,13 @@ class CarbonBoxModel:
         self._growth_kernel = jax.ops.index_update(self._growth_kernel, np.in1d(month_list, months,
                                                                                 invert=True), 0)
 
+    def define_growth_season(self, months):
+        month_list = np.array(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september',
+                               'october', 'november', 'december'])
+        months = np.array(months)
+        self._growth_kernel = jax.ops.index_update(self._growth_kernel, np.in1d(month_list, months,
+                                                                                invert=True), 0)
+
 
 def save_model(carbon_box_model, filename):
     file = h5py.File(filename, 'a')
