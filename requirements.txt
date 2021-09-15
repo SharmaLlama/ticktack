@@ -9,4 +9,5 @@ pandas
 astropy
 emcee
 celerite
+celerite2
 corner
