@@ -11,3 +11,4 @@ emcee
 celerite
 celerite2
 corner
+tqdm
