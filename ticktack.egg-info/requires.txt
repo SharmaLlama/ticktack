@@ -1,0 +1,14 @@
+astropy
+celerite
+celerite2
+corner
+emcee
+h5py
+hdfdict
+jax
+jaxlib
+matplotlib
+numpy
+pandas
+scipy
+tqdm
