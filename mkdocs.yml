@@ -2,7 +2,7 @@ site_name: ticktack for Radiocarbon Box Modelling
 nav:
     - Home: index.md
     - 'Fitting a Carbon Box Model':
-        - fitting-with-mcmc: notebooks/fitting.ipynb
+        - fitting-with-mcmc: notebooks/02_Fitting.ipynb
         - fitting-with-cps:  notebooks/01_Injection_Recovery_ControlPoints.ipynb
     - Box API Docs: box_api.md
     - Flow API Docs: flow_api.md

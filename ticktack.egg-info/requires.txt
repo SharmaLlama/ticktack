@@ -1,7 +1,7 @@
 astropy
 celerite
 celerite2
-corner
+chainconsumer
 emcee
 h5py
 hdfdict
@@ -11,4 +11,5 @@ matplotlib
 numpy
 pandas
 scipy
+seaborn
 tqdm
