@@ -201,14 +201,14 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def miyake_event_fixed_solar(self, t, *args):
-        start_time, duration, phase, area = list(args)
+        start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         prod = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
         return prod
 
     @partial(jit, static_argnums=(0,))
     def miyake_event_flexible_solar(self, t, *args):
-        start_time, duration, phase, area, omega, amplitude = list(args)
+        start_time, duration, phase, area, omega, amplitude = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         prod = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
             omega * t + phase) + height
@@ -428,7 +428,7 @@ class CarbonFitter():
         n = 100
         top_n = np.random.permutation(len(chain))[:n]
         ax1.errorbar(self.time_data[:-1], self.d14c_data[:-1], yerr=self.d14c_data_error[:-1],
-                     fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="true d14c")
+                     fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="noisy d14c")
         for i in tqdm(top_n):
             d14c = self.dc14_fine(params=chain[i, :])
             ax1.plot(self.time_grid_fine, d14c, color="g", alpha=0.2)

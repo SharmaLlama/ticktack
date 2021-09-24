@@ -201,14 +201,14 @@ class CarbonFitter():
 
     @partial(jit, static_argnums=(0,))
     def miyake_event_fixed_solar(self, t, *args):
-        start_time, duration, phase, area = list(args)
+        start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         prod = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
         return prod
 
     @partial(jit, static_argnums=(0,))
     def miyake_event_flexible_solar(self, t, *args):
-        start_time, duration, phase, area, omega, amplitude = list(args)
+        start_time, duration, phase, area, omega, amplitude = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         prod = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
             omega * t + phase) + height
@@ -365,41 +365,6 @@ class CarbonFitter():
         sampler.run_mcmc(p0, production, progress=True);
         return sampler.flatchain
 
-    def plot_recovery(self, chain, time_data=None, true_production=None):
-        """
-        Takes a chain of MCMC walk, plots random samples from the chain and the true.
-
-        Parameters
-        ----------
-        chain : ndarray
-            The chain of an MCMC walk
-
-        Returns
-        -------
-        figure
-            plot of samples
-        """
-        mean = np.mean(chain, axis=0)
-        fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 10), sharex=True)
-        n = 100
-        top_n = np.random.permutation(len(chain))[:n]
-        ax1.errorbar(self.time_data[:-1], self.d14c_data[:-1], yerr=self.d14c_data_error[:-1],
-                     fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="true d14c")
-        for i in tqdm(top_n):
-            d14c = self.dc14_fine(params=chain[i, :])
-            ax1.plot(self.time_grid_fine, d14c, color="g", alpha=0.2)
-            control_points_fine = self.production(self.time_grid_fine, (chain[i, :],))
-            ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=0.2)
-        control_points_fine = self.production(self.time_grid_fine, (mean,))
-        ax2.plot(self.time_grid_fine, control_points_fine, "r", label="sample mean production rate")
-        ax1.set_ylabel("$\Delta^{14}$C (‰)");
-        ax2.set_ylabel("Production rate ($cm^2s^{-1}$)")
-        ax2.set_xlabel("Calendar Year")
-        if (true_production is not None) & (time_data is not None):
-            ax2.plot(time_data, true_production, 'k', label="true production rate")
-        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.13), fancybox=True);
-        ax1.legend();
-
     def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, distribution=False):
         """
         From a chain of MCMC walk, apply convergence test and plot posterior surfaces, or marginal
@@ -442,6 +407,42 @@ class CarbonFitter():
             c.configure(spacing=0.0)
             fig = c.plotter.plot(figsize=figsize)
         return fig
+
+
+    def plot_recovery(self, chain, time_data=None, true_production=None):
+        """
+        Takes a chain of MCMC walk, plots random samples from the chain and the true.
+
+        Parameters
+        ----------
+        chain : ndarray
+            The chain of an MCMC walk
+
+        Returns
+        -------
+        figure
+            plot of samples
+        """
+        mean = np.mean(chain, axis=0)
+        fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 10), sharex=True)
+        n = 100
+        top_n = np.random.permutation(len(chain))[:n]
+        ax1.errorbar(self.time_data[:-1], self.d14c_data[:-1], yerr=self.d14c_data_error[:-1],
+                     fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="noisy d14c")
+        for i in tqdm(top_n):
+            d14c = self.dc14_fine(params=chain[i, :])
+            ax1.plot(self.time_grid_fine, d14c, color="g", alpha=0.2)
+            control_points_fine = self.production(self.time_grid_fine, (chain[i, :],))
+            ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=0.2)
+        control_points_fine = self.production(self.time_grid_fine, (mean,))
+        ax2.plot(self.time_grid_fine, control_points_fine, "r", label="sample mean production rate")
+        ax1.set_ylabel("$\Delta^{14}$C (‰)");
+        ax2.set_ylabel("Production rate ($cm^2s^{-1}$)")
+        ax2.set_xlabel("Calendar Year")
+        if (true_production is not None) & (time_data is not None):
+            ax2.plot(time_data, true_production, 'k', label="true production rate")
+        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.13), fancybox=True);
+        ax1.legend();
 
 
     def plot_samples(self, chain):
