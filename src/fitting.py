@@ -4,7 +4,8 @@ from matplotlib.pyplot import rcParams
 import celerite2.jax
 from celerite2.jax import terms as jax_terms
 import jax.numpy as jnp
-from jax import grad, jit, partial
+from jax import grad, jit
+from functools import partial
 import ticktack
 from astropy.table import Table
 from tqdm import tqdm
