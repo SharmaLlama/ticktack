@@ -16,12 +16,190 @@ import seaborn as sns
 
 rcParams['figure.figsize'] = (16.0, 8.0)
 
+
 class CarbonFitter():
     """
     A class for parametric and non-parametric inference of d14c data using a Carbon Box Model (cbm).
     Does optimization, MCMC sampling, plotting and more.
     """
-    def __init__(self, cbm, production_rate_units='atoms/cm^2/s',target_C_14=707.):
+
+    def sampling(self, params, likelihood, burnin=500, production=1000, n=2):
+        """
+        Runs an affine-invariant MCMC sampler on an array of initial parameters, subject to
+        some likelihood function.
+
+        Parameters
+        ----------
+        params : ndarray
+            Initial parameters for the MCMC
+        likelihood : function
+            The likelihood function for params
+        burnin : int, optional
+            Number of steps to run in burn-in period
+        production : int, optional
+            Number of steps to run in production period
+
+        Returns
+        -------
+        ndarray
+            A chain of MCMC walk
+        """
+        initial = params
+        ndim, nwalkers = len(initial), n * len(initial)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood)
+
+        print("Running burn-in...")
+        p0 = initial + 1e-5 * np.random.rand(nwalkers, ndim)
+        p0, lp, _ = sampler.run_mcmc(p0, burnin, progress=True);
+
+        print("Running production...")
+        sampler.reset()
+        sampler.run_mcmc(p0, production, progress=True);
+        return sampler.flatchain
+
+    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=True):
+        """
+        From a chain of MCMC walk, apply convergence test and plot posterior surfaces, or marginal
+        distributions, of the the parameters.
+
+        Parameters
+        ----------
+        chain : ndarray
+            The chain of an MCMC walk
+        walker : int
+            The number of walkers for the chain
+        figsize : tuple, optional
+            Output figure size. Should be increasing in the dimension of parameters
+        labels : list[str], optional
+            Parameter names
+        distribution : bool, optional
+            If True, plot the marginal distributions of parameters instead of posterior surfaces.
+            Recommended for high dimensional parameters.
+
+        Returns
+        -------
+        figure
+            plot of marginal distributions or posterior surfaces
+        """
+        if labels:
+            c = ChainConsumer().add_chain(chain, walkers=walkers, parameters=labels)
+        else:
+            c = ChainConsumer().add_chain(chain, walkers=walkers)
+
+        if test_convergence:
+            gelman_rubin_converged = c.diagnostic.gelman_rubin()
+            geweke_converged = c.diagnostic.geweke()
+            if gelman_rubin_converged and geweke_converged:
+                self.convergence = True
+            else:
+                self.convergence = False
+            print("Convergence: %s" % self.convergence)
+
+        if plot_dist:
+            fig = c.plotter.plot_distributions(figsize=figsize)
+        else:
+            c.configure(spacing=0.0)
+            fig = c.plotter.plot(figsize=figsize)
+        return fig
+
+    def scatter_plot(self, array, figsize=10, square_size=100):
+        """
+        Makes clear and easily understandable heatmap.
+
+        Parameters
+        ----------
+        array : ndarray
+            n x n matrix for the heatmap.
+        figsize : int, optional
+            Controls the size of the output figure. Should increase with the size of the array.
+            Default at 10.
+        square_size: int, optional
+            Controls the size of squares in the heatmap. Should decrease with the size of the array.
+            Default at 100.
+
+        Returns
+        -------
+        figure
+            heatmap
+        """
+        n = array.shape[0]
+        arr = array.reshape(-1)
+        size = np.abs(arr)
+        x = np.repeat(np.arange(n), n)
+        y = (n - 1) - np.tile(np.arange(n), n)
+
+        plot_grid = plt.GridSpec(1, 10, hspace=0.2, wspace=0.1)
+        ax = plt.subplots(figsize=(figsize, figsize))
+        ax = plt.subplot(plot_grid[:, :-1])
+
+        n_colors = 256
+        palette = sns.diverging_palette(10, 220, n=n_colors)
+
+        if np.min(array) < 0:
+            bounds = np.abs(np.max((np.min(array), np.max(array))))
+            color_min, color_max = (-bounds, bounds)
+        else:
+            color_min, color_max = (np.min(array), np.max(array))
+
+        def value_to_color(val):
+            val_position = (val - color_min) / (color_max - color_min)
+            ind = int(val_position * (n_colors - 1))
+            return palette[ind]
+
+        ax.scatter(
+            x=x, y=y, s=size * square_size, c=[value_to_color(i) for i in arr], marker='s')
+        ax.set_xticks(np.unique(x));
+        ax.set_yticks(np.unique(x));
+
+        ax.set_xticklabels(np.unique(x));
+        ax.set_yticklabels(reversed(np.unique(x)));
+
+        ax.grid(False, 'major')
+        ax.grid(True, 'minor')
+        ax.set_xticks([t + 0.5 for t in ax.get_xticks()], minor=True)
+        ax.set_yticks([t + 0.5 for t in ax.get_yticks()], minor=True)
+        ax.set_xlim([-0.5, (n - 1) + 0.5]);
+        ax.set_ylim([-0.5, (n - 1) + 0.5]);
+
+        ax = plt.subplot(plot_grid[:, -1])
+        col_x = [0] * len(palette)
+        bar_y = np.linspace(color_min, color_max, n_colors)
+        bar_height = bar_y[1] - bar_y[0]
+        ax.barh(
+            y=bar_y,
+            width=[5] * len(palette),
+            left=col_x,
+            height=bar_height,
+            color=palette,
+            linewidth=0
+        )
+        ax.set_xlim(1, 2)
+        ax.set_ylim(color_min - 0.001, color_max + 0.001)
+        ax.grid(False)
+        ax.set_facecolor('white')
+        ax.set_xticks([])
+        ax.set_yticks([color_min, (color_min + color_max) / 2, color_max])
+        ax.yaxis.tick_right()
+        return
+
+    def plot_multiple_chains(self, chains, walker, parameters=None, labels=None, colors=None, alpha=0.5,
+                             linewidths=None, plot_hists=True):
+        c = ChainConsumer()
+        if labels:
+            assert len(labels) == len(chains), "labels must have the same length as chains"
+            for i in range(len(chains)):
+                c.add_chain(chains[i], walkers=walker, parameters=parameters, name=labels[i])
+        else:
+            for i in range(len(chains)):
+                c.add_chain(chains[i], walkers=walker, parameters=parameters)
+        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, plot_hists=plot_hists)
+        fig = c.plotter.plot(figsize=(10, 10))
+        return fig
+
+
+class SingleFitter(CarbonFitter):
+
+    def __init__(self, cbm, production_rate_units='atoms/cm^2/s', target_C_14=707.):
         if isinstance(cbm, str):
             try:
                 if cbm in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
@@ -32,7 +210,7 @@ class CarbonFitter():
                 raise ValueError('Must be a valid CBM model')
         self.cbm = cbm
         self.cbm.compile()
-        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14) # 707 default for Guttler
+        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)  # 707 default for Guttler
         self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
 
     def load_data(self, file_name, resolution=1000, fine_grid=0.05, time_oversample=1000, num_offset=4):
@@ -43,7 +221,7 @@ class CarbonFitter():
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
         self.resolution = resolution
-        self.burn_in_time = jnp.linspace(self.start-1000, self.start, self.resolution)
+        self.burn_in_time = jnp.linspace(self.start - 1000, self.start, self.resolution)
         self.time_grid_fine = jnp.arange(self.start, self.end, fine_grid)
         self.time_oversample = time_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
@@ -105,7 +283,8 @@ class CarbonFitter():
 
                 n = len(self.time_data[:-1])
                 for i in range(n):
-                    if (self.time_data[i] - control_points_time[-1]<=2) & (self.time_data[i] - control_points_time[-1]>0):
+                    if (self.time_data[i] - control_points_time[-1] <= 2) & (
+                            self.time_data[i] - control_points_time[-1] > 0):
                         control_points_time.append(float(self.time_data[i]) + dense_years)
                     elif self.time_data[i] >= control_points_time[-1] + gap_years:
                         control_points_time.append(float(self.time_data[i]))
@@ -118,7 +297,6 @@ class CarbonFitter():
                 self.control_points_time = jnp.arange(self.start, self.end)
                 self.production = self.interp_gp
                 self.gp = True
-
 
     @partial(jit, static_argnums=(0,))
     def interp_linear(self, tval, *args):
@@ -156,6 +334,28 @@ class CarbonFitter():
         return mu
 
     @partial(jit, static_argnums=(0,))
+    def super_gaussian(self, t, start_time, duration, area):
+        middle = start_time + duration / 2.
+        height = area / duration
+        return height * jnp.exp(- ((t - middle) / (1. / 1.93516 * duration)) ** 16.)
+
+    @partial(jit, static_argnums=(0,))
+    def miyake_event_fixed_solar(self, t, *args):
+        start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        prod = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + phase) + height
+        return prod
+
+    @partial(jit, static_argnums=(0,))
+    def miyake_event_flexible_solar(self, t, *args):
+        start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        prod = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + phase) + height
+        return prod
+
+    @partial(jit, static_argnums=(0,))
     def sum_interp_gp(self, *args):
         mu = self.interp_gp(self.annual, *args)
         return jnp.sum(mu)
@@ -163,6 +363,115 @@ class CarbonFitter():
     @partial(jit, static_argnums=(0,))
     def grad_sum_interp_gp(self, *args):
         return grad(self.sum_interp_gp)(*args)
+
+    @partial(jit, static_argnums=(0,))
+    def run(self, time_values, y0, params=()):
+        burn_in, _ = self.cbm.run(time_values, production=self.production, args=params, y0=y0)
+        return burn_in
+
+    @partial(jit, static_argnums=(0, 2, 4, 5))
+    def run_D_14_C_values(self, time_out, time_oversample, y0, box='Troposphere', hemisphere='north', params=()):
+        d_14_c = self.cbm.run_D_14_C_values(time_out, time_oversample,
+                                            production=self.production, args=params, y0=y0,
+                                            steady_state_solutions=self.steady_state_y0, box=box,
+                                            hemisphere=hemisphere)
+        return d_14_c
+
+    @partial(jit, static_argnums=(0, 1, 2))
+    def dc14(self, box='Troposphere', hemisphere='north', params=()):
+        """
+        Predict d14c on the same time sampling as self.time_data
+
+        Parameters
+        ----------
+        params : ndarray, optional
+            Parameters for self.production
+
+        Returns
+        -------
+        ndarray
+            Predicted d14c value
+        """
+        burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
+        d_14_c = self.run_D_14_C_values(self.annual, self.time_oversample, burn_in[-1, :], box=box,
+                                        hemisphere=hemisphere, params=params)
+        d_14_c = d_14_c[self.mask]
+        return d_14_c + self.offset
+
+    @partial(jit, static_argnums=(0,))
+    def dc14_fine(self, box='Troposphere', hemisphere='north', params=()):
+        """
+        Predict d14c on the same time sampling as self.time_grid_fine.
+
+        Parameters
+        ----------
+        params : ndarray, optional
+            Parameters for self.production
+
+        Returns
+        -------
+        ndarray
+            Predicted d14c value
+        """
+        burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
+        d_14_c = self.run_D_14_C_values(self.time_grid_fine, self.time_oversample, burn_in[-1, :],  box=box,
+                                        hemisphere=hemisphere, params=params)
+        return d_14_c + self.offset
+
+    @partial(jit, static_argnums=(0,))
+    def log_prior_miyake_fixed(self, params=()):
+        lp = 0
+        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
+        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
+        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
+        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
+        return lp
+
+    @partial(jit, static_argnums=(0,))
+    def log_prior_miyake_flexible(self, params=()):
+        lp = 0
+        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
+        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
+        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
+        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
+        lp += ((params[4] < 0.) | (params[4] > 2)) * -jnp.inf
+        return lp
+
+    @partial(jit, static_argnums=(0,))
+    def log_like(self, params=()):
+        """
+        Computes the gaussian log-likelihood for parameters of self.production, using the predicted
+        d14c values and observed d14c values.
+
+        Parameters
+        ----------
+        params : ndarray, optional
+            Parameters for self.production
+
+        Returns
+        -------
+        float
+            Gaussian log-likelihood
+        """
+        d_14_c = self.dc14(params=params)
+        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        return -0.5 * chi2
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_like(self, params=()):
+        return -1 * self.log_like(params=params)
+
+    @partial(jit, static_argnums=(0,))
+    def log_prob_miyake_fixed(self, params=()):
+        lp = self.log_prior_miyake_fixed(params=params)
+        pos = self.log_like(params=params)
+        return lp + pos
+
+    @partial(jit, static_argnums=(0,))
+    def log_prob_miyake_flexible(self, params=()):
+        lp = self.log_prior_miyake_flexible(params=params)
+        pos = self.log_like(params=params)
+        return lp + pos
 
     @partial(jit, static_argnums=(0,))
     def neg_gp_log_likelihood(self, params):
@@ -195,102 +504,8 @@ class CarbonFitter():
         return gp.log_likelihood(control_points)
 
     @partial(jit, static_argnums=(0,))
-    def super_gaussian(self, t, start_time, duration, area):
-        middle = start_time+duration/2.
-        height = area/duration
-        return height*jnp.exp(- ((t-middle)/(1./1.93516*duration))**16.)
-
-    @partial(jit, static_argnums=(0,))
-    def miyake_event_fixed_solar(self, t, *args):
-        start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
-        height = self.super_gaussian(t, start_time, duration, area)
-        prod = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
-        return prod
-
-    @partial(jit, static_argnums=(0,))
-    def miyake_event_flexible_solar(self, t, *args):
-        start_time, duration, phase, area, omega, amplitude = jnp.array(list(args)).reshape(-1)
-        height = self.super_gaussian(t, start_time, duration, area)
-        prod = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
-            omega * t + phase) + height
-        return prod
-
-    @partial(jit, static_argnums=(0,))
-    def run(self, time_values, y0, params=()):
-        burn_in, _ = self.cbm.run(time_values, production=self.production, args=params, y0=y0)
-        return burn_in
-
-    @partial(jit, static_argnums=(0, 2))
-    def run_D_14_C_values(self, time_out, time_oversample, y0, params=()):
-        d_14_c = self.cbm.run_D_14_C_values(time_out, time_oversample,
-                                       production=self.production, args=params, y0=y0,
-                                       steady_state_solutions=self.steady_state_y0)
-        return d_14_c
-
-
-    @partial(jit, static_argnums=(0,))
-    def dc14(self, params=()):
-        """
-        Predict d14c on the same time sampling as self.time_data
-
-        Parameters
-        ----------
-        params : ndarray, optional
-            Parameters for self.production
-
-        Returns
-        -------
-        ndarray
-            Predicted d14c value
-        """
-        burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        d_14_c = self.run_D_14_C_values(self.annual, self.time_oversample, burn_in[-1, :], params=params)
-        d_14_c = d_14_c[self.mask]
-        return d_14_c + self.offset
-
-    @partial(jit, static_argnums=(0,))
-    def dc14_fine(self, params=()):
-        """
-        Predict d14c on the same time sampling as self.time_grid_fine.
-
-        Parameters
-        ----------
-        params : ndarray, optional
-            Parameters for self.production
-
-        Returns
-        -------
-        ndarray
-            Predicted d14c value
-        """
-        burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        data, solution = self.cbm.run(self.time_grid_fine, production=self.production, args=params, y0=burn_in[-1,:])
-        d_14_c = self.cbm._to_d14c(data,self.steady_state_y0)
-        return d_14_c + self.offset
-
-    @partial(jit, static_argnums=(0,))
-    def log_like(self, params=()):
-        """
-        Computes the gaussian log-likelihood for parameters of self.production, using the predicted
-        d14c values and observed d14c values.
-
-        Parameters
-        ----------
-        params : ndarray, optional
-            Parameters for self.production
-
-        Returns
-        -------
-        float
-            Gaussian log-likelihood
-        """
-        d_14_c = self.dc14(params=params)
-        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c)/self.d14c_data_error[:-1])**2)
-        return -0.5*chi2
-
-    @partial(jit, static_argnums=(0,))
-    def neg_log_like(self, params=()):
-        return -1*self.log_like(params=params)
+    def gp_likelihood(self, params=()):
+        return self.log_like(params=params) + self.gp_log_likelihood(params)
 
     @partial(jit, static_argnums=(0,))
     def neg_gp_likelihood(self, params=()):
@@ -299,10 +514,6 @@ class CarbonFitter():
     @partial(jit, static_argnums=(0,))
     def grad_neg_gp_likelihood(self, params=()):
         return grad(self.neg_gp_likelihood)(params=params)
-
-    @partial(jit, static_argnums=(0,))
-    def gp_likelihood(self, params=()):
-        return self.log_like(params=params) + self.gp_log_likelihood(params)
 
     def fit_cp(self, low_bound=0):
         """
@@ -328,87 +539,6 @@ class CarbonFitter():
             soln = scipy.optimize.minimize(self.neg_log_like, initial, bounds=bounds,
                                            method="L-BFGS-B", options={'maxiter': 20000})
         return soln
-
-
-    def sampling(self, params, likelihood, burnin=500, production=1000):
-        """
-        Runs an affine-invariant MCMC sampler on an array of initial parameters, subject to
-        some likelihood function.
-
-        Parameters
-        ----------
-        params : ndarray
-            Initial parameters for the MCMC
-        likelihood : function
-            The likelihood function for params
-        burnin : int, optional
-            Number of steps to run in burn-in period
-        production : int, optional
-            Number of steps to run in production period
-
-        Returns
-        -------
-        ndarray
-            A chain of MCMC walk
-        """
-        initial = params
-        ndim, nwalkers = len(initial), 5*len(initial)
-        if self.gp:
-            ndim, nwalkers = len(initial), 2*len(initial)
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood)
-
-        print("Running burn-in...")
-        p0 = initial + 1e-5 * np.random.rand(nwalkers, ndim)
-        p0, lp, _ = sampler.run_mcmc(p0, burnin, progress=True);
-
-        print("Running production...")
-        sampler.reset()
-        sampler.run_mcmc(p0, production, progress=True);
-        return sampler.flatchain
-
-    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, distribution=False):
-        """
-        From a chain of MCMC walk, apply convergence test and plot posterior surfaces, or marginal
-        distributions, of the the parameters.
-
-        Parameters
-        ----------
-        chain : ndarray
-            The chain of an MCMC walk
-        walker : int
-            The number of walkers for the chain
-        figsize : tuple, optional
-            Output figure size. Should be increasing in the dimension of parameters
-        labels : list[str], optional
-            Parameter names
-        distribution : bool, optional
-            If True, plot the marginal distributions of parameters instead of posterior surfaces.
-            Recommended for high dimensional parameters.
-
-        Returns
-        -------
-        figure
-            plot of marginal distributions or posterior surfaces
-        """
-        if labels:
-            c = ChainConsumer().add_chain(chain, walkers=walkers, parameters=labels)
-        else:
-            c = ChainConsumer().add_chain(chain, walkers=walkers)
-        gelman_rubin_converged = c.diagnostic.gelman_rubin()
-        geweke_converged = c.diagnostic.geweke()
-        if gelman_rubin_converged and geweke_converged:
-            self.convergence = True
-        else:
-            self.convergence = False
-        print("Convergence: %s" % self.convergence)
-
-        if distribution:
-            fig = c.plotter.plot_distributions(figsize=figsize)
-        else:
-            c.configure(spacing=0.0)
-            fig = c.plotter.plot(figsize=figsize)
-        return fig
-
 
     def plot_recovery(self, chain, time_data=None, true_production=None):
         """
@@ -445,8 +575,7 @@ class CarbonFitter():
         ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.13), fancybox=True);
         ax1.legend();
 
-
-    def plot_samples(self, chain):
+    def plot_samples(self, chain, walker):
         """
         Takes a chain of MCMC walk and plots random samples from the chain.
 
@@ -460,110 +589,85 @@ class CarbonFitter():
         figure
             plot of samples
         """
-        value = jnp.mean(chain, axis=0)
+        c = ChainConsumer().add_chain(chain, walkers=walker)
+        mle = []
+        for lst in c.analysis.get_summary().values():
+            mle.append(lst[1])
+
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         for s in chain[np.random.randint(len(chain), size=100)]:
             d_c_14_fine = self.dc14_fine(params=s)
             ax1.plot(self.time_grid_fine, d_c_14_fine, alpha=0.2, color="g")
 
-        d_c_14_coarse = self.dc14(params=value)
-        d_c_14_fine = self.dc14_fine(params=value)
+        d_c_14_coarse = self.dc14(params=mle)
+        d_c_14_fine = self.dc14_fine(params=mle)
         ax1.plot(self.time_grid_fine, d_c_14_fine, color="k")
 
-        ax1.plot(self.time_data[:-1], d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7)
+        ax1.plot(self.time_data[:-1], d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7,
+                 label="fitted $\Delta^{14}$C")
         ax1.errorbar(self.time_data, self.d14c_data,
-            yerr=self.d14c_data_error, fmt="o", color="k", fillstyle="full", capsize=3, markersize=7)
-        ax1.set_ylabel("$\delta^{14}$C (‰)")
+                     yerr=self.d14c_data_error, fmt="o", color="k", fillstyle="full", capsize=3, markersize=7,
+                     label="$\Delta^{14}$C data")
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        ax1.legend(loc="lower right")
         fig.subplots_adjust(hspace=0.05)
 
         for s in chain[np.random.randint(len(chain), size=10)]:
             production_rate = self.production(self.time_grid_fine, *s)
             ax2.plot(self.time_grid_fine, production_rate, alpha=0.25, color="g")
 
-        mean_draw = self.production(self.time_grid_fine, *value)
-        ax2.plot(self.time_grid_fine, mean_draw, color="k", lw=2)
-        ax2.set_ylim(jnp.min(mean_draw)*0.8, jnp.max(mean_draw)*1.1);
+        production_rate = self.production(self.time_grid_fine, *mle)
+        ax2.plot(self.time_grid_fine, production_rate, color="k", lw=2, label="MLE")
+        ax2.set_ylim(jnp.min(production_rate) * 0.8, jnp.max(production_rate) * 1.1);
         ax2.set_xlabel("Calendar Year (CE)");
         ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
-        # if savefile:
-        #     figure.savefig(savefile, bbox_inches='tight')
+        ax2.legend(loc="upper left")
 
-def scatter_plot(array, figsize=10, square_size=100):
-    """
-    Makes clear and easily understandable heatmap.
 
-    Parameters
-    ----------
-    array : ndarray
-        n x n matrix for the heatmap.
-    figsize : int, optional
-        Controls the size of the output figure. Should increase with the size of the array.
-        Default at 10.
-    square_size: int, optional
-        Controls the size of squares in the heatmap. Should decrease with the size of the array.
-        Default at 100.
+class MultiFitter(CarbonFitter):
+    def __init__(self, sf=None):
+        if isinstance(sf, list):
+            self.MultiFitter = sf
+        else:
+            self.MultiFitter = []
 
-    Returns
-    -------
-    figure
-        heatmap
-    """
-    n = array.shape[0]
-    arr = array.reshape(-1)
-    size = np.abs(arr)
-    x = np.repeat(np.arange(n), n)
-    y = (n - 1) - np.tile(np.arange(n), n)
+    @partial(jit, static_argnums=(0,))
+    def multi_likelihood(self, params):
+        like = 0
+        for sf in self.MultiFitter:
+            like += sf.log_like(params)
+        return like
 
-    plot_grid = plt.GridSpec(1, 10, hspace=0.2, wspace=0.1)
-    ax = plt.subplots(figsize=(figsize, figsize))
-    ax = plt.subplot(plot_grid[:, :-1])
+    @partial(jit, static_argnums=(0,))
+    def log_prior_miyake_fixed(self, params=()):
+        lp = 0
+        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
+        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
+        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
+        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
+        return lp
 
-    n_colors = 256
-    palette = sns.diverging_palette(10, 220, n=n_colors)
+    @partial(jit, static_argnums=(0,))
+    def log_prior_miyake_flexible(self, params=()):
+        lp = 0
+        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
+        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
+        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
+        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
+        lp += ((params[4] < 0.) | (params[4] > 2)) * -jnp.inf
+        return lp
 
-    if np.min(array) < 0:
-        bounds = np.abs(np.max((np.min(array), np.max(array))))
-        color_min, color_max = (-bounds, bounds)
-    else:
-        color_min, color_max = (np.min(array), np.max(array))
+    @partial(jit, static_argnums=(0,))
+    def log_prob_miyake_fixed(self, params=()):
+        lp = self.log_prior_miyake_fixed(params=params)
+        pos = self.multi_likelihood(params=params)
+        return lp + pos
 
-    def value_to_color(val):
-        val_position = (val - color_min) / (color_max - color_min)
-        ind = int(val_position * (n_colors - 1))
-        return palette[ind]
+    @partial(jit, static_argnums=(0,))
+    def log_prob_miyake_flexible(self, params=()):
+        lp = self.log_prior_miyake_flexible(params=params)
+        pos = self.multi_likelihood(params=params)
+        return lp + pos
 
-    ax.scatter(
-        x=x, y=y, s=size*square_size, c=[value_to_color(i) for i in arr], marker='s')
-    ax.set_xticks(np.unique(x));
-    ax.set_yticks(np.unique(x));
-
-    ax.set_xticklabels(np.unique(x));
-    ax.set_yticklabels(reversed(np.unique(x)));
-
-    ax.grid(False, 'major')
-    ax.grid(True, 'minor')
-    ax.set_xticks([t + 0.5 for t in ax.get_xticks()], minor=True)
-    ax.set_yticks([t + 0.5 for t in ax.get_yticks()], minor=True)
-    ax.set_xlim([-0.5, (n - 1) + 0.5]);
-    ax.set_ylim([-0.5, (n - 1) + 0.5]);
-
-    ax = plt.subplot(plot_grid[:, -1])
-    col_x = [0] * len(palette)
-    bar_y = np.linspace(color_min, color_max, n_colors)
-    bar_height = bar_y[1] - bar_y[0]
-    ax.barh(
-        y=bar_y,
-        width=[5] * len(palette),
-        left=col_x,
-        height=bar_height,
-        color=palette,
-        linewidth=0
-    )
-    ax.set_xlim(1, 2)
-    ax.set_ylim(color_min - 0.001, color_max + 0.001)
-    ax.grid(False)
-    ax.set_facecolor('white')
-    ax.set_xticks([])
-    ax.set_yticks([color_min, (color_min + color_max) / 2, color_max])
-    ax.yaxis.tick_right()
-    return
+    def add_SingleFitter(self, cf):
+        self.MultiFitter.append(cf)
