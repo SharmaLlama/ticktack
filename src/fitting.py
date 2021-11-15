@@ -23,7 +23,7 @@ class CarbonFitter():
     Does optimization, MCMC sampling, plotting and more.
     """
 
-    def sampling(self, params, likelihood, burnin=500, production=1000, n=2):
+    def sampling(self, params, likelihood, burnin=500, production=1000, k=2):
         """
         Runs an affine-invariant MCMC sampler on an array of initial parameters, subject to
         some likelihood function.
@@ -31,13 +31,14 @@ class CarbonFitter():
         Parameters
         ----------
         params : ndarray
-            Initial parameters for the MCMC
-        likelihood : function
-            The likelihood function for params
+            Initial parameters for MCMC sampler
+        likelihood : callable
+            Likelihood function for params
         burnin : int, optional
-            Number of steps to run in burn-in period
+            Number of steps to run in burn-in period. 500 by default.
         production : int, optional
-            Number of steps to run in production period
+            Number of steps to run in production period. 1000 by default.
+        k: int, optional
 
         Returns
         -------
@@ -45,7 +46,7 @@ class CarbonFitter():
             A chain of MCMC walk
         """
         initial = params
-        ndim, nwalkers = len(initial), n * len(initial)
+        ndim, nwalkers = len(initial), k * len(initial)
         sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood)
 
         print("Running burn-in...")
@@ -182,8 +183,8 @@ class CarbonFitter():
         ax.yaxis.tick_right()
         return
 
-    def plot_multiple_chains(self, chains, walker, parameters=None, labels=None, colors=None, alpha=0.5,
-                             linewidths=None, plot_hists=True):
+    def plot_multiple_chains(self, chains, walker, figsize=(10, 10), parameters=None, labels=None, colors=None, alpha=0.5,
+                             linewidths=None, plot_dists=True):
         c = ChainConsumer()
         if labels:
             assert len(labels) == len(chains), "labels must have the same length as chains"
@@ -192,14 +193,32 @@ class CarbonFitter():
         else:
             for i in range(len(chains)):
                 c.add_chain(chains[i], walkers=walker, parameters=parameters)
-        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, plot_hists=plot_hists)
-        fig = c.plotter.plot(figsize=(10, 10))
+        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths)
+
+        if plot_dists:
+            fig = c.plotter.plot_distributions(figsize=figsize)
+        else:
+            fig = c.plotter.plot(figsize=(10, 10))
         return fig
 
 
 class SingleFitter(CarbonFitter):
 
-    def __init__(self, cbm, production_rate_units='atoms/cm^2/s', target_C_14=707.):
+    def __init__(self, cbm, production_rate_units='atoms/cm^2/s', target_C_14=707., box='Troposphere',
+                 hemisphere='north'):
+        """
+        Description
+
+        Parameters
+        ----------
+        chain : ndarray
+            The chain of an MCMC walk
+
+        Returns
+        -------
+        figure
+            plot of marginal distributions or posterior surfaces
+        """
         if isinstance(cbm, str):
             try:
                 if cbm in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
@@ -210,10 +229,26 @@ class SingleFitter(CarbonFitter):
                 raise ValueError('Must be a valid CBM model')
         self.cbm = cbm
         self.cbm.compile()
-        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)  # 707 default for Guttler
+        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
         self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
+        self.box = box
+        self.hemisphere = hemisphere
 
     def load_data(self, file_name, resolution=1000, fine_grid=0.05, time_oversample=1000, num_offset=4):
+        """
+        Loads d14c data from specified file
+
+        Parameters
+        ----------
+        file_name : str
+            Path to the file
+        num_offset : int, optional
+            When set to x, the first x data points are averaged to compute an offset, which will be subtracted from
+            all data points
+
+        Returns
+        -------
+        """
         data = Table.read(file_name, format="ascii")
         self.time_data = jnp.array(data["year"])
         self.d14c_data = jnp.array(data["d14c"])
@@ -233,93 +268,40 @@ class SingleFitter(CarbonFitter):
         self.gp = None
 
         try:
-            custom_function = kwargs['custom_function']
-            try:
-                f = kwargs['f']
-            except:
-                f = None
+            self.production = kwargs['f']
         except:
-            custom_function = False
+            pass
 
         try:
-            use_control_points = kwargs['use_control_points']
-            try:
-                interp = kwargs['interp']
-            except:
-                interp = 'gp'
-
-            try:
-                dense_years = kwargs['dense_years']
-            except:
-                dense_years = 3
-            try:
-                gap_years = kwargs['gap_years']
-            except:
-                gap_years = 5
-        except:
-            use_control_points = False
-
-        try:
-            production = kwargs['production']
-            try:
-                fit_solar_params = kwargs['fit_solar']
-            except:
-                fit_solar_params = None
-        except:
-            production = None
-
-        if production == 'miyake':
-            if fit_solar_params:
-                self.production = self.miyake_event_flexible_solar
-            else:
-                self.production = self.miyake_event_fixed_solar
-
-        if custom_function is True and f is not None:
-            self.production = f
-
-        if use_control_points is True:
-            if interp == "linear":
-                control_points_time = [self.start - 1, self.start]
-
-                n = len(self.time_data[:-1])
-                for i in range(n):
-                    if (self.time_data[i] - control_points_time[-1] <= 2) & (
-                            self.time_data[i] - control_points_time[-1] > 0):
-                        control_points_time.append(float(self.time_data[i]) + dense_years)
-                    elif self.time_data[i] >= control_points_time[-1] + gap_years:
-                        control_points_time.append(float(self.time_data[i]))
-                control_points_time = np.array(control_points_time)[control_points_time <= self.end]
-
-                self.control_points_time = jnp.array(control_points_time)
-                self.production = self.interp_linear
-
-            elif interp == "gp":
+            model = kwargs['model']
+            if model == "simple_sinusoid":
+                self.production = self.simple_sinusoid
+            elif model == "flexible_sinusoid":
+                self.production = self.flexible_sinusoid
+            elif model == "control_points":
                 self.control_points_time = jnp.arange(self.start, self.end)
                 self.production = self.interp_gp
                 self.gp = True
-
-    @partial(jit, static_argnums=(0,))
-    def interp_linear(self, tval, *args):
-        control_points = jnp.squeeze(jnp.array(list(args)))
-        return jnp.interp(tval, self.control_points_time, control_points)
+        except:
+            pass
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
         """
-        A Gaussian Process interpolator
+        A Gaussian Process regression interpolator
 
         Parameters
         ----------
         tval : ndarray
             Time sampling of the output interpolation
-        args: ndarray|float
-            The set of control-points. Can be passed in as ndarray or individual floats. Must have the same size as
+        args : ndarray | float
+            Set of control-points. Can be passed in as ndarray or individual floats. Must have the same size as
             self.control_points_time.
 
         Returns
         -------
         ndarray
-            Interpolation results on tval
+            Interpolated values on tval
         """
         tval = tval.reshape(-1)
         params = jnp.array(list(args)).reshape(-1)
@@ -340,20 +322,61 @@ class SingleFitter(CarbonFitter):
         return height * jnp.exp(- ((t - middle) / (1. / 1.93516 * duration)) ** 16.)
 
     @partial(jit, static_argnums=(0,))
-    def miyake_event_fixed_solar(self, t, *args):
+    def simple_sinusoid(self, t, *args):
+        """
+        A simple sinusoid model for production rates in a period where a Miyake event is observed. Tunable parameters
+        include:
+        Start time: the start time of miyake event
+        Duration: duration of Miyake event
+        Phase: phase of the solar cycle during this period
+        Area: total area of
+
+        Parameters
+        ----------
+        chain : ndarray
+            The chain of an MCMC walk
+        args : ndarray | float
+            Must include start time, duration, phase and area
+
+        Returns
+        -------
+        ndarray
+            Production rate on t
+        """
         start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        prod = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
+        production = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase) + height
-        return prod
+        return production
 
     @partial(jit, static_argnums=(0,))
-    def miyake_event_flexible_solar(self, t, *args):
+    def flexible_sinusoid(self, t, *args):
+        """
+        A flexible sinusoid model for production rates in a period where a Miyake event is observed. Tunable parameters
+        include:
+        Start time: the start time of miyake event
+        Duration: duration of Miyake event
+        Phase: phase of the solar cycle during this period
+        Area: total area of
+        Amplitude: Amplitude of the solar cycle
+
+        Parameters
+        ----------
+        chain : ndarray
+            The chain of an MCMC walk
+        args : ndarray | float
+            Must include start time, duration, phase and area
+
+        Returns
+        -------
+        ndarray
+            Production rate on t
+        """
         start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        prod = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
+        production = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase) + height
-        return prod
+        return production
 
     @partial(jit, static_argnums=(0,))
     def sum_interp_gp(self, *args):
@@ -377,8 +400,8 @@ class SingleFitter(CarbonFitter):
                                             hemisphere=hemisphere)
         return d_14_c
 
-    @partial(jit, static_argnums=(0, 1, 2))
-    def dc14(self, box='Troposphere', hemisphere='north', params=()):
+    @partial(jit, static_argnums=(0,))
+    def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
 
@@ -393,13 +416,13 @@ class SingleFitter(CarbonFitter):
             Predicted d14c value
         """
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        d_14_c = self.run_D_14_C_values(self.annual, self.time_oversample, burn_in[-1, :], box=box,
-                                        hemisphere=hemisphere, params=params)
+        d_14_c = self.run_D_14_C_values(self.annual, self.time_oversample, burn_in[-1, :], box=self.box,
+                                        hemisphere=self.hemisphere, params=params)
         d_14_c = d_14_c[self.mask]
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
-    def dc14_fine(self, box='Troposphere', hemisphere='north', params=()):
+    def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_grid_fine.
 
@@ -414,12 +437,25 @@ class SingleFitter(CarbonFitter):
             Predicted d14c value
         """
         burn_in = self.run(self.burn_in_time, self.steady_state_y0, params=params)
-        d_14_c = self.run_D_14_C_values(self.time_grid_fine, self.time_oversample, burn_in[-1, :],  box=box,
-                                        hemisphere=hemisphere, params=params)
+        d_14_c = self.run_D_14_C_values(self.time_grid_fine, self.time_oversample, burn_in[-1, :], box=self.box,
+                                        hemisphere=self.hemisphere, params=params)
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_miyake_fixed(self, params=()):
+    def log_prior_simple_sinusoid(self, params=()):
+        """
+        Computes the log prior likelihood of parameters of simple sinusoid model
+
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of simple sinusoid model
+
+        Returns
+        -------
+        float
+            log prior likelihood
+        """
         lp = 0
         lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
         lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
@@ -428,7 +464,20 @@ class SingleFitter(CarbonFitter):
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_miyake_flexible(self, params=()):
+    def log_prior_flexible_sinusoid(self, params=()):
+        """
+        Computes the log prior likelihood of parameters of flexible sinusoid model
+
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of flexible sinusoid model
+
+        Returns
+        -------
+        float
+            log prior likelihood
+        """
         lp = 0
         lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
         lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
@@ -438,15 +487,14 @@ class SingleFitter(CarbonFitter):
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_like(self, params=()):
+    def log_likelihood(self, params=()):
         """
-        Computes the gaussian log-likelihood for parameters of self.production, using the predicted
-        d14c values and observed d14c values.
+        Computes the gaussian log-likelihood of parameters of self.production
 
         Parameters
         ----------
         params : ndarray, optional
-            Parameters for self.production
+            Parameters of self.production
 
         Returns
         -------
@@ -458,36 +506,75 @@ class SingleFitter(CarbonFitter):
         return -0.5 * chi2
 
     @partial(jit, static_argnums=(0,))
-    def neg_log_like(self, params=()):
-        return -1 * self.log_like(params=params)
-
-    @partial(jit, static_argnums=(0,))
-    def log_prob_miyake_fixed(self, params=()):
-        lp = self.log_prior_miyake_fixed(params=params)
-        pos = self.log_like(params=params)
-        return lp + pos
-
-    @partial(jit, static_argnums=(0,))
-    def log_prob_miyake_flexible(self, params=()):
-        lp = self.log_prior_miyake_flexible(params=params)
-        pos = self.log_like(params=params)
-        return lp + pos
-
-    @partial(jit, static_argnums=(0,))
-    def neg_gp_log_likelihood(self, params):
+    def neg_log_likelihood(self, params=()):
         """
-        Computes the negative Gaussian Process log-likelihood for non-parametric inference
-        using control-points method.
+        Computes the negative gaussian log-likelihood of parameters of self.production
 
         Parameters
         ----------
-        params : ndarray
-            Control-points. First control point is also the mean of the Gaussian Process
+        params : ndarray, optional
+            Parameters of self.production
 
         Returns
         -------
         float
-            Negative Gaussian Process log-likelihood evaluated on 'params'
+            Negative gaussian log-likelihood
+        """
+        return -1 * self.log_likelihood(params=params)
+
+    @partial(jit, static_argnums=(0,))
+    def log_joint_simple_sinusoid(self, params=()):
+        """
+        Computes the log joint likelihood of parameters of simple sinusoid model
+
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of simple sinusoid model
+
+        Returns
+        -------
+        float
+            Log joint likelihood
+        """
+        lp = self.log_prior_simple_sinusoid(params=params)
+        pos = self.log_likelihood(params=params)
+        return lp + pos
+
+    @partial(jit, static_argnums=(0,))
+    def log_joint_flexible_sinusoid(self, params=()):
+        """
+        Computes the log joint likelihood of parameters of flexible sinusoid model
+
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of flexible sinusoid model
+
+        Returns
+        -------
+        float
+            Log joint likelihood
+        """
+        lp = self.log_prior_flexible_sinusoid(params=params)
+        pos = self.log_likelihood(params=params)
+        return lp + pos
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_likelihood_gp(self, params):
+        """
+        Computes the negative log-likelihood of a set of control points with respect to a Gaussian Process with
+        constant mean and Matern-3/2 kernel
+
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+
+        Returns
+        -------
+        float
+            Negative Gaussian Process log-likelihood
         """
         kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, mean=params[0])
@@ -495,7 +582,7 @@ class SingleFitter(CarbonFitter):
         return -gp.log_likelihood(params)
 
     @partial(jit, static_argnums=(0,))
-    def gp_log_likelihood(self, params):
+    def log_likelihood_gp(self, params):
         control_points = params
         mean = params[0]
         kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
@@ -504,25 +591,64 @@ class SingleFitter(CarbonFitter):
         return gp.log_likelihood(control_points)
 
     @partial(jit, static_argnums=(0,))
-    def gp_likelihood(self, params=()):
-        return self.log_like(params=params) + self.gp_log_likelihood(params)
-
-    @partial(jit, static_argnums=(0,))
-    def neg_gp_likelihood(self, params=()):
-        return self.neg_log_like(params=params) + self.neg_gp_log_likelihood(params)
-
-    @partial(jit, static_argnums=(0,))
-    def grad_neg_gp_likelihood(self, params=()):
-        return grad(self.neg_gp_likelihood)(params=params)
-
-    def fit_cp(self, low_bound=0):
+    def log_joint_gp(self, params=()):
         """
-        Optimization of control-points for non-parametric inference.
+        Computes the log joint likelihood of control-points for non-parametric inferences
+
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+
+        Returns
+        -------
+        float
+            Log joint likelihood
+        """
+        return self.log_likelihood(params=params) + self.log_likelihood_gp(params)
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_joint_gp(self, params=()):
+        """
+        Computes the negative log joint likelihood of control-points for non-parametric inferences
+
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+
+        Returns
+        -------
+        float
+            Negative log joint likelihood
+        """
+        return self.neg_log_likelihood(params=params) + self.neg_log_likelihood_gp(params)
+
+    @partial(jit, static_argnums=(0,))
+    def neg_grad_log_joint_gp(self, params=()):
+        """
+        Computes the negative gradient of the log joint likelihood of control-points
+
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+
+        Returns
+        -------
+        float
+            Negative gradient of log joint likelihood
+        """
+        return grad(self.neg_log_joint_gp)(params=params)
+
+    def fit_ControlPoints(self, low_bound=0):
+        """
+        Fits the control-points by minimizing the negative log joint likelihood
 
         Parameters
         ----------
         low_bound : int, optional
-            The minimum value each control-point can take
+            The minimum value each control-point can take. By default lower_bound = 0.
 
         Returns
         -------
@@ -533,10 +659,10 @@ class SingleFitter(CarbonFitter):
         bounds = tuple([(low_bound, None)] * len(initial))
 
         if self.gp:
-            soln = scipy.optimize.minimize(self.neg_gp_likelihood, initial, bounds=bounds,
+            soln = scipy.optimize.minimize(self.neg_log_joint_gp, initial, bounds=bounds,
                                            options={'maxiter': 20000})
         else:
-            soln = scipy.optimize.minimize(self.neg_log_like, initial, bounds=bounds,
+            soln = scipy.optimize.minimize(self.neg_log_likelihood, initial, bounds=bounds,
                                            method="L-BFGS-B", options={'maxiter': 20000})
         return soln
 
@@ -633,13 +759,26 @@ class MultiFitter(CarbonFitter):
 
     @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
+        """
+        Computes the ensemble log-likelihood of parameters of some parametric model, across multiple datasets
+
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of an parametric model
+
+        Returns
+        -------
+        float
+            Log-likelihood
+        """
         like = 0
         for sf in self.MultiFitter:
-            like += sf.log_like(params)
+            like += sf.log_likelihood(params)
         return like
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_miyake_fixed(self, params=()):
+    def log_prior_simple_sinusoid(self, params=()):
         lp = 0
         lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
         lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
@@ -648,7 +787,7 @@ class MultiFitter(CarbonFitter):
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_miyake_flexible(self, params=()):
+    def log_prior_flexible_sinusoid(self, params=()):
         lp = 0
         lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
         lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
@@ -658,16 +797,27 @@ class MultiFitter(CarbonFitter):
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_prob_miyake_fixed(self, params=()):
-        lp = self.log_prior_miyake_fixed(params=params)
+    def log_joint_simple_sinusoid(self, params=()):
+        lp = self.log_prior_simple_sinusoid(params=params)
         pos = self.multi_likelihood(params=params)
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def log_prob_miyake_flexible(self, params=()):
-        lp = self.log_prior_miyake_flexible(params=params)
+    def log_joint_flexible_sinusoid(self, params=()):
+        lp = self.log_prior_flexible_sinusoid(params=params)
         pos = self.multi_likelihood(params=params)
         return lp + pos
 
-    def add_SingleFitter(self, cf):
-        self.MultiFitter.append(cf)
+    def add_SingleFitter(self, sf):
+        """
+        Adds a SingleFitter Object to a Multifitter
+
+        Parameters
+        ----------
+        sf : SingleFitter
+            SingleFitter Object
+
+        Returns
+        -------
+        """
+        self.MultiFitter.append(sf)
