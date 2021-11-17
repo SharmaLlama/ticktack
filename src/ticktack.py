@@ -5,7 +5,8 @@ import jax.ops
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
-from jax import jit, partial
+from jax import jit
+from functools import partial 
 from jax.config import config
 import numpy as np
 import pkg_resources
