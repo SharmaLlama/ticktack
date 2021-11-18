@@ -688,7 +688,7 @@ class SingleFitter(CarbonFitter):
                      fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="noisy d14c")
         for i in tqdm(top_n):
             d14c = self.dc14_fine(params=chain[i, :])
-            ax1.plot(self.time_grid_fine, d14c, color="g", alpha=0.2)
+            ax1.plot(self.time_grid_fine[:-1], d14c, color="g", alpha=0.2)
             control_points_fine = self.production(self.time_grid_fine, (chain[i, :],))
             ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=0.2)
         control_points_fine = self.production(self.time_grid_fine, (mean,))
