@@ -5,7 +5,8 @@ import jax.ops
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
-from jax import jit, partial
+from jax import jit
+from functools import partial
 from jax.config import config
 import numpy as np
 import pkg_resources
@@ -652,7 +653,8 @@ class CarbonBoxModel:
         m = time_oversample // 12
         tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1, time_oversample))
         num = int((time_oversample // 12) * 12)
-        tiled = jax.ops.index_update(tiled, jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), 0)
+        # tiled = jax.ops.index_update(tiled, jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), 0)
+        tiled = jnp.where(jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), tiled, 0)
         tiled_full = jnp.resize(jnp.tile(tiled, (states.shape[1], int(time_out.shape[0] - 1))),
                                 (states.shape[1], states.shape[0]))
         states = jnp.transpose(tiled_full) * states
