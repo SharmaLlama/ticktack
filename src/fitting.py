@@ -723,11 +723,11 @@ class SingleFitter(CarbonFitter):
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         for s in chain[np.random.randint(len(chain), size=100)]:
             d_c_14_fine = self.dc14_fine(params=s)
-            ax1.plot(self.time_grid_fine, d_c_14_fine, alpha=0.2, color="g")
+            ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, alpha=0.2, color="g")
 
         d_c_14_coarse = self.dc14(params=mle)
         d_c_14_fine = self.dc14_fine(params=mle)
-        ax1.plot(self.time_grid_fine, d_c_14_fine, color="k")
+        ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, color="k")
 
         ax1.plot(self.time_data[:-1], d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7,
                  label="fitted $\Delta^{14}$C")
