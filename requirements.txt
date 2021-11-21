@@ -1,5 +1,4 @@
 astropy
-celerite
 celerite2
 chainconsumer
 emcee
@@ -13,3 +12,4 @@ pandas
 scipy
 seaborn
 tqdm
+jaxns

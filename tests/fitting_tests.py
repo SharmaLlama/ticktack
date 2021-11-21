@@ -38,11 +38,6 @@ def test_flexible_sinusoid(SingleFitter_creation):
     SingleFitter_creation.flexible_sinusoid(200, jnp.array([205., 1./12, jnp.pi/2., 81./12, 0.18]))
     assert True
 
-def test_grad_sum_interp_gp(SingleFitter_creation):
-    SingleFitter_creation.prepare_function(model="control_points")
-    SingleFitter_creation.grad_sum_interp_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
-    assert True
-
 def test_dc14(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="simple_sinusoid")
     SingleFitter_creation.dc14(params=jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]))
@@ -72,10 +67,6 @@ def test_log_prior_flexible_sinusoid(SingleFitter_creation):
 def test_log_likelihood(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="simple_sinusoid")
     SingleFitter_creation.log_likelihood(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]))
-    SingleFitter_creation.prepare_function(model="flexible_sinusoid")
-    SingleFitter_creation.log_likelihood(jnp.array([205., 1./12, jnp.pi/2., 81./12, 0.18]))
-    SingleFitter_creation.prepare_function(model="control_points")
-    SingleFitter_creation.log_likelihood(jnp.ones(SingleFitter_creation.control_points_time.size))
     assert True
 
 def test_log_joint_simple_sinusoid(SingleFitter_creation):
@@ -102,3 +93,22 @@ def test_fit_ControlPoints(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
     SingleFitter_creation.fit_ControlPoints(low_bound=0)
     assert True
+
+def test_MarkovChainSampler(SingleFitter_creation):
+    SingleFitter_creation.prepare_function(model="simple_sinusoid")
+    SingleFitter_creation.MarkovChainSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
+                                             SingleFitter_creation.log_joint_simple_sinusoid,
+                                             burnin=10,
+                                             production=10)
+    assert True
+
+def test_NestedSampler(SingleFitter_creation):
+    SingleFitter_creation.prepare_function(model="simple_sinusoid")
+    SingleFitter_creation.NestedSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
+                                        SingleFitter_creation.log_joint_simple_sinusoid,
+                                        low_bound=jnp.array([770., 0., -jnp.pi, 0.]),
+                                        high_bound = jnp.array([780., 5., jnp.pi, 15.])
+                                        )
+    assert True
+
+
