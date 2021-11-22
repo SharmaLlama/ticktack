@@ -103,7 +103,7 @@ class CarbonFitter():
         # summary(results)
         return results
 
-    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=True):
+    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False):
         """
         From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters
 
@@ -270,7 +270,6 @@ class CarbonFitter():
         else:
             fig = c.plotter.plot(figsize=(10, 10))
         return fig
-
 
 class SingleFitter(CarbonFitter):
     """
@@ -768,7 +767,7 @@ class SingleFitter(CarbonFitter):
         float
             Negative gradient of log joint likelihood
         """
-        return grad(self.neg_log_joint_gp)(params=params)
+        return grad(self.neg_log_joint_gp)(params)
 
     def fit_ControlPoints(self, low_bound=0):
         """
