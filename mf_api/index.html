@@ -10,18 +10,18 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.2.2, mkdocs-material-7.2.1">
+      <meta name="generator" content="mkdocs-1.2.3, mkdocs-material-7.3.6">
     
     
       
-        <title>CarbonBoxModel API Docs - ticktack for Radiocarbon Box Modelling</title>
+        <title>MultiFitter API Docs - ticktack for Radiocarbon Box Modelling</title>
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.1118c9be.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.a57b2b03.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ba0d045b.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.3f5d1f46.min.css">
         
       
     
@@ -63,7 +63,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#documentation-for-carbonboxmodel" class="md-skip">
+        <a href="#documentation-for-multifitter" class="md-skip">
           Skip to content
         </a>
       
@@ -72,7 +72,9 @@
       
     </div>
     
-      <header class="md-header" data-md-component="header">
+      
+
+<header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="ticktack for Radiocarbon Box Modelling" class="md-header__button md-logo" aria-label="ticktack for Radiocarbon Box Modelling" data-md-component="logo">
       
@@ -93,7 +95,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              CarbonBoxModel API Docs
+              MultiFitter API Docs
             
           </span>
         </div>
@@ -151,11 +153,14 @@
       </div>
     
   </nav>
+  
 </header>
     
     <div class="md-container" data-md-component="container">
       
       
+        
+          
         
       
       <main class="md-main" data-md-component="main">
@@ -223,10 +228,14 @@
       
         <input class="md-nav__toggle md-toggle" data-md-toggle="__nav_2" type="checkbox" id="__nav_2" >
       
-      <label class="md-nav__link" for="__nav_2">
-        Fitting a Carbon Box Model
-        <span class="md-nav__icon md-icon"></span>
-      </label>
+      
+      
+      
+        <label class="md-nav__link" for="__nav_2">
+          Fitting a Carbon Box Model
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
       <nav class="md-nav" aria-label="Fitting a Carbon Box Model" data-md-level="1">
         <label class="md-nav__title" for="__nav_2">
           <span class="md-nav__icon md-icon"></span>
@@ -235,18 +244,7 @@
         <ul class="md-nav__list" data-md-scrollfix>
           
             
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../notebooks/fitting/" class="md-nav__link">
-        Tutorial on fitting with ticktack and emcee
-      </a>
-    </li>
-  
-
-          
-            
+              
   
   
   
@@ -257,6 +255,21 @@
     </li>
   
 
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/02_Fitting/" class="md-nav__link">
+        Tutorial on fitting with ticktack and emcee
+      </a>
+    </li>
+  
+
+            
           
         </ul>
       </nav>
@@ -300,6 +313,36 @@
 
   
   
+  
+    <li class="md-nav__item">
+      <a href="../cf_api/" class="md-nav__link">
+        CarbonFitter API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sf_api/" class="md-nav__link">
+        SingleFitter API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
     
   
   
@@ -312,15 +355,17 @@
       
       
         <label class="md-nav__link md-nav__link--active" for="__toc">
-          CarbonBoxModel API Docs
+          MultiFitter API Docs
           <span class="md-nav__icon md-icon"></span>
         </label>
       
       <a href="./" class="md-nav__link md-nav__link--active">
-        CarbonBoxModel API Docs
+        MultiFitter API Docs
       </a>
       
         
+
+
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
   
   
@@ -335,22 +380,50 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#ticktack.ticktack.CarbonBoxModel" class="md-nav__link">
-    ticktack.ticktack.CarbonBoxModel
+  <a href="#ticktack.fitting.MultiFitter" class="md-nav__link">
+    ticktack.fitting.MultiFitter
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.ticktack.CarbonBoxModel.add_edges" class="md-nav__link">
-    add_edges()
+  <a href="#ticktack.fitting.MultiFitter.add_SingleFitter" class="md-nav__link">
+    add_SingleFitter()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.ticktack.CarbonBoxModel.add_nodes" class="md-nav__link">
-    add_nodes()
+  <a href="#ticktack.fitting.MultiFitter.log_joint_flexible_sinusoid" class="md-nav__link">
+    log_joint_flexible_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.log_joint_simple_sinusoid" class="md-nav__link">
+    log_joint_simple_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.log_prior_flexible_sinusoid" class="md-nav__link">
+    log_prior_flexible_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.log_prior_simple_sinusoid" class="md-nav__link">
+    log_prior_simple_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.multi_likelihood" class="md-nav__link">
+    multi_likelihood()
   </a>
   
 </li>
@@ -359,21 +432,6 @@
   
 </nav>
       
-    </li>
-  
-
-    
-      
-      
-      
-
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../cf_api/" class="md-nav__link">
-        CarbonFitter API Docs
-      </a>
     </li>
   
 
@@ -390,6 +448,8 @@
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
                     
+
+
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
   
   
@@ -404,22 +464,50 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#ticktack.ticktack.CarbonBoxModel" class="md-nav__link">
-    ticktack.ticktack.CarbonBoxModel
+  <a href="#ticktack.fitting.MultiFitter" class="md-nav__link">
+    ticktack.fitting.MultiFitter
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.ticktack.CarbonBoxModel.add_edges" class="md-nav__link">
-    add_edges()
+  <a href="#ticktack.fitting.MultiFitter.add_SingleFitter" class="md-nav__link">
+    add_SingleFitter()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.ticktack.CarbonBoxModel.add_nodes" class="md-nav__link">
-    add_nodes()
+  <a href="#ticktack.fitting.MultiFitter.log_joint_flexible_sinusoid" class="md-nav__link">
+    log_joint_flexible_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.log_joint_simple_sinusoid" class="md-nav__link">
+    log_joint_simple_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.log_prior_flexible_sinusoid" class="md-nav__link">
+    log_prior_flexible_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.log_prior_simple_sinusoid" class="md-nav__link">
+    log_prior_simple_sinusoid()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.MultiFitter.multi_likelihood" class="md-nav__link">
+    multi_likelihood()
   </a>
   
 </li>
@@ -436,17 +524,17 @@
             <article class="md-content__inner md-typeset">
               
                 
-                  <a href="https://github.com/SharmaLlama/ticktack/edit/master/docs/cbm_api.md" title="Edit this page" class="md-content__button md-icon">
+                  <a href="https://github.com/SharmaLlama/ticktack/edit/master/docs/mf_api.md" title="Edit this page" class="md-content__button md-icon">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20.71 7.04c.39-.39.39-1.04 0-1.41l-2.34-2.34c-.37-.39-1.02-.39-1.41 0l-1.84 1.83 3.75 3.75M3 17.25V21h3.75L17.81 9.93l-3.75-3.75L3 17.25z"/></svg>
                   </a>
                 
                 
-                <h1 id="documentation-for-carbonboxmodel">Documentation for <code>CarbonBoxModel</code></h1>
+                <h1 id="documentation-for-multifitter">Documentation for <code>MultiFitter</code></h1>
 
 
   <div class="doc doc-object doc-class">
 
-<a id="ticktack.ticktack.CarbonBoxModel"></a>
+<a id="ticktack.fitting.MultiFitter"></a>
     <div class="doc doc-contents first">
 
 
@@ -463,18 +551,20 @@
 
 
 
+
   <div class="doc doc-object doc-method">
 
 
 
-<h2 id="ticktack.ticktack.CarbonBoxModel.add_edges" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">add_edges</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">flow_objs</span><span class="p">)</span></code>
+<h2 id="ticktack.fitting.MultiFitter.add_SingleFitter" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">add_SingleFitter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sf</span><span class="p">)</span></code>
 
 
 </h2>
 
     <div class="doc doc-contents ">
 
+      <p>Adds a SingleFitter Object to a Multifitter Object</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -488,9 +578,9 @@
   </thead>
   <tbody>
       <tr>
-        <td><code>flow_objs</code></td>
-        <td><code>None</code></td>
-        <td></td>
+        <td><code>sf</code></td>
+        <td><code>SingleFitter</code></td>
+        <td><p>SingleFitter Object</p></td>
         <td><em>required</em></td>
       </tr>
   </tbody>
@@ -505,14 +595,15 @@
 
 
 
-<h2 id="ticktack.ticktack.CarbonBoxModel.add_nodes" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">add_nodes</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">nodes</span><span class="p">)</span></code>
+<h2 id="ticktack.fitting.MultiFitter.log_joint_flexible_sinusoid" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">log_joint_flexible_sinusoid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="p">())</span></code>
 
 
 </h2>
 
     <div class="doc doc-contents ">
 
+      <p>Computes the log joint likelihood of parameters of flexible sinusoid model</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -526,11 +617,26 @@
   </thead>
   <tbody>
       <tr>
-        <td><code>nodes</code></td>
-        <td><code>None</code></td>
-        <td></td>
-        <td><em>required</em></td>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Parameters of flexible sinusoid model</p></td>
+        <td><code>()</code></td>
       </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>Log joint likelihood</p></td>
+    </tr>
   </tbody>
 </table>
     </div>
@@ -539,8 +645,219 @@
 
 
 
+  <div class="doc doc-object doc-method">
 
 
+
+<h2 id="ticktack.fitting.MultiFitter.log_joint_simple_sinusoid" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">log_joint_simple_sinusoid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="p">())</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Computes the log joint likelihood of parameters of simple sinusoid model</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Parameters of simple sinusoid model</p></td>
+        <td><code>()</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>Log joint likelihood</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.MultiFitter.log_prior_flexible_sinusoid" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">log_prior_flexible_sinusoid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="p">())</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Computes the log prior likelihood of parameters of flexible sinusoid model</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Parameters of flexible sinusoid model</p></td>
+        <td><code>()</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>log prior likelihood</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.MultiFitter.log_prior_simple_sinusoid" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">log_prior_simple_sinusoid</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="p">())</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Computes the log prior likelihood of parameters of simple sinusoid model</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Parameters of simple sinusoid model</p></td>
+        <td><code>()</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>log prior likelihood</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.MultiFitter.multi_likelihood" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">multi_likelihood</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Computes the ensemble log-likelihood of parameters of some parametric model, across multiple d14c datasets</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Parameters of a parametric model</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>Log-likelihood</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
 
 
 
@@ -570,7 +887,7 @@
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
         
-        <a href="../flow_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Flow API Docs" rel="prev">
+        <a href="../sf_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: SingleFitter API Docs" rel="prev">
           <div class="md-footer__button md-icon">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
           </div>
@@ -579,26 +896,11 @@
               <span class="md-footer__direction">
                 Previous
               </span>
-              Flow API Docs
+              SingleFitter API Docs
             </div>
           </div>
         </a>
       
-      
-        
-        <a href="../cf_api/" class="md-footer__link md-footer__link--next" aria-label="Next: CarbonFitter API Docs" rel="next">
-          <div class="md-footer__title">
-            <div class="md-ellipsis">
-              <span class="md-footer__direction">
-                Next
-              </span>
-              CarbonFitter API Docs
-            </div>
-          </div>
-          <div class="md-footer__button md-icon">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11H4z"/></svg>
-          </div>
-        </a>
       
     </nav>
   
@@ -606,10 +908,12 @@
     <div class="md-footer-meta__inner md-grid">
       <div class="md-footer-copyright">
         
-        Made with
-        <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
-          Material for MkDocs
-        </a>
+        
+          Made with
+          <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+            Material for MkDocs
+          </a>
+        
         
       </div>
       
@@ -621,10 +925,10 @@
     <div class="md-dialog" data-md-component="dialog">
       <div class="md-dialog__inner md-typeset"></div>
     </div>
-    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.53c85856.min.js", "version": null}</script>
+    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.fcfe8b6d.min.js", "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.716f8af4.min.js"></script>
+      <script src="../assets/javascripts/bundle.b1047164.min.js"></script>
       
     
   </body>

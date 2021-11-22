@@ -10,7 +10,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.2.2, mkdocs-material-7.2.1">
+      <meta name="generator" content="mkdocs-1.2.3, mkdocs-material-7.3.6">
     
     
       
@@ -18,10 +18,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.1118c9be.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.a57b2b03.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ba0d045b.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.3f5d1f46.min.css">
         
       
     
@@ -72,7 +72,9 @@
       
     </div>
     
-      <header class="md-header" data-md-component="header">
+      
+
+<header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="ticktack for Radiocarbon Box Modelling" class="md-header__button md-logo" aria-label="ticktack for Radiocarbon Box Modelling" data-md-component="logo">
       
@@ -151,11 +153,14 @@
       </div>
     
   </nav>
+  
 </header>
     
     <div class="md-container" data-md-component="container">
       
       
+        
+          
         
       
       <main class="md-main" data-md-component="main">
@@ -223,10 +228,14 @@
       
         <input class="md-nav__toggle md-toggle" data-md-toggle="__nav_2" type="checkbox" id="__nav_2" >
       
-      <label class="md-nav__link" for="__nav_2">
-        Fitting a Carbon Box Model
-        <span class="md-nav__icon md-icon"></span>
-      </label>
+      
+      
+      
+        <label class="md-nav__link" for="__nav_2">
+          Fitting a Carbon Box Model
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
       <nav class="md-nav" aria-label="Fitting a Carbon Box Model" data-md-level="1">
         <label class="md-nav__title" for="__nav_2">
           <span class="md-nav__icon md-icon"></span>
@@ -235,18 +244,7 @@
         <ul class="md-nav__list" data-md-scrollfix>
           
             
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../notebooks/fitting/" class="md-nav__link">
-        Tutorial on fitting with ticktack and emcee
-      </a>
-    </li>
-  
-
-          
-            
+              
   
   
   
@@ -257,6 +255,21 @@
     </li>
   
 
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/02_Fitting/" class="md-nav__link">
+        Tutorial on fitting with ticktack and emcee
+      </a>
+    </li>
+  
+
+            
           
         </ul>
       </nav>
@@ -291,6 +304,8 @@
       </a>
       
         
+
+
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
   
   
@@ -312,6 +327,20 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ticktack.ticktack.Box.__str__" class="md-nav__link">
+    __str__()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.ticktack.Box.get_hemisphere" class="md-nav__link">
+    get_hemisphere()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#ticktack.ticktack.Box.get_name" class="md-nav__link">
     get_name()
   </a>
@@ -322,6 +351,19 @@
   <a href="#ticktack.ticktack.Box.get_production" class="md-nav__link">
     get_production()
   </a>
+  
+    <nav class="md-nav" aria-label="get_production()">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ticktack.ticktack.Box.get_production--returns" class="md-nav__link">
+    Returns
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -363,8 +405,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../cbm_api/" class="md-nav__link">
-        CarbonBoxModel API Docs
+      <a href="../cf_api/" class="md-nav__link">
+        CarbonFitter API Docs
       </a>
     </li>
   
@@ -378,8 +420,23 @@
   
   
     <li class="md-nav__item">
-      <a href="../cf_api/" class="md-nav__link">
-        CarbonFitter API Docs
+      <a href="../sf_api/" class="md-nav__link">
+        SingleFitter API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mf_api/" class="md-nav__link">
+        MultiFitter API Docs
       </a>
     </li>
   
@@ -397,6 +454,8 @@
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
                     
+
+
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
   
   
@@ -418,6 +477,20 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ticktack.ticktack.Box.__str__" class="md-nav__link">
+    __str__()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.ticktack.Box.get_hemisphere" class="md-nav__link">
+    get_hemisphere()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#ticktack.ticktack.Box.get_name" class="md-nav__link">
     get_name()
   </a>
@@ -428,6 +501,19 @@
   <a href="#ticktack.ticktack.Box.get_production" class="md-nav__link">
     get_production()
   </a>
+  
+    <nav class="md-nav" aria-label="get_production()">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ticktack.ticktack.Box.get_production--returns" class="md-nav__link">
+    Returns
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
   
 </li>
       
@@ -463,7 +549,45 @@
 <a id="ticktack.ticktack.Box"></a>
     <div class="doc doc-contents first">
 
+      <p>Box class which represents each individual box in the carbon model.</p>
 
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>name</code></td>
+        <td><code>None</code></td>
+        <td><p>name of the Box.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>reservoir</code></td>
+        <td><code>None</code></td>
+        <td><p>reservoir content of the Box.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>production_coefficient</code></td>
+        <td></td>
+        <td><p>production coefficient of the Box. Defaults to 0.</p></td>
+        <td><code>&#39;0.&#39;</code></td>
+      </tr>
+      <tr>
+        <td><code>hemisphere</code></td>
+        <td></td>
+        <td><p>hemisphere that this box is in. Defaults to None (i.e. this box is not part of an inter-hemispheric system).</p></td>
+        <td><code>&#39;None&#39;</code></td>
+      </tr>
+  </tbody>
+</table>
 
 
 
@@ -474,6 +598,81 @@
 
 
 
+
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.ticktack.Box.__str__" class="doc doc-heading">
+<code class="highlight language-python"><span class="fm">__str__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+  <span class="doc doc-properties">
+      <small class="doc doc-property doc-property-special"><code>special</code></small>
+  </span>
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Overrides the default string behaviour to display a user-friendly output.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>str</code></td>
+      <td><p>string representation of the Box Object returned in the following form -
+name:reservoir size:production coefficient</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.ticktack.Box.get_hemisphere" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_hemisphere</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the hemisphere of the Box Class.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>str</code></td>
+      <td><p>hemisphere the box is in.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
 
 
 
@@ -489,8 +688,23 @@
 
     <div class="doc doc-contents ">
 
-      <p>getter method for the name of the Box Class.</p>
+      <p>Getter method for the name of the Box Class.</p>
 
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>str</code></td>
+      <td><p>name of the Box.</p></td>
+    </tr>
+  </tbody>
+</table>
     </div>
 
   </div>
@@ -509,7 +723,10 @@
 
     <div class="doc doc-contents ">
 
-      <p>getter method for the reservoir content of the Box Class.</p>
+      <p>Getter method for the production coefficient of the Box Class.</p>
+<h4 id="ticktack.ticktack.Box.get_production--returns">Returns</h4>
+<p>float
+    production coefficient of the box.</p>
 
     </div>
 
@@ -529,8 +746,23 @@
 
     <div class="doc doc-contents ">
 
-      <p>getter method for the reservoir content of the Box Class.</p>
+      <p>Getter method for the reservoir content of the Box Class.</p>
 
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>reservoir content of the box.</p></td>
+    </tr>
+  </tbody>
+</table>
     </div>
 
   </div>
@@ -563,7 +795,7 @@
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
         
-        <a href="../notebooks/01_Injection_Recovery_ControlPoints/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Nonparametric Inference using Control Points" rel="prev">
+        <a href="../notebooks/02_Fitting/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Tutorial on fitting with ticktack and emcee" rel="prev">
           <div class="md-footer__button md-icon">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
           </div>
@@ -572,7 +804,7 @@
               <span class="md-footer__direction">
                 Previous
               </span>
-              Nonparametric Inference using Control Points
+              Tutorial on fitting with ticktack and emcee
             </div>
           </div>
         </a>
@@ -599,10 +831,12 @@
     <div class="md-footer-meta__inner md-grid">
       <div class="md-footer-copyright">
         
-        Made with
-        <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
-          Material for MkDocs
-        </a>
+        
+          Made with
+          <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+            Material for MkDocs
+          </a>
+        
         
       </div>
       
@@ -614,10 +848,10 @@
     <div class="md-dialog" data-md-component="dialog">
       <div class="md-dialog__inner md-typeset"></div>
     </div>
-    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.53c85856.min.js", "version": null}</script>
+    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.fcfe8b6d.min.js", "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.716f8af4.min.js"></script>
+      <script src="../assets/javascripts/bundle.b1047164.min.js"></script>
       
     
   </body>

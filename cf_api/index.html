@@ -10,7 +10,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="mkdocs-1.2.2, mkdocs-material-7.2.1">
+      <meta name="generator" content="mkdocs-1.2.3, mkdocs-material-7.3.6">
     
     
       
@@ -18,10 +18,10 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.1118c9be.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.a57b2b03.min.css">
       
         
-        <link rel="stylesheet" href="../assets/stylesheets/palette.ba0d045b.min.css">
+        <link rel="stylesheet" href="../assets/stylesheets/palette.3f5d1f46.min.css">
         
       
     
@@ -72,7 +72,9 @@
       
     </div>
     
-      <header class="md-header" data-md-component="header">
+      
+
+<header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="ticktack for Radiocarbon Box Modelling" class="md-header__button md-logo" aria-label="ticktack for Radiocarbon Box Modelling" data-md-component="logo">
       
@@ -151,11 +153,14 @@
       </div>
     
   </nav>
+  
 </header>
     
     <div class="md-container" data-md-component="container">
       
       
+        
+          
         
       
       <main class="md-main" data-md-component="main">
@@ -223,10 +228,14 @@
       
         <input class="md-nav__toggle md-toggle" data-md-toggle="__nav_2" type="checkbox" id="__nav_2" >
       
-      <label class="md-nav__link" for="__nav_2">
-        Fitting a Carbon Box Model
-        <span class="md-nav__icon md-icon"></span>
-      </label>
+      
+      
+      
+        <label class="md-nav__link" for="__nav_2">
+          Fitting a Carbon Box Model
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
       <nav class="md-nav" aria-label="Fitting a Carbon Box Model" data-md-level="1">
         <label class="md-nav__title" for="__nav_2">
           <span class="md-nav__icon md-icon"></span>
@@ -235,18 +244,7 @@
         <ul class="md-nav__list" data-md-scrollfix>
           
             
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../notebooks/fitting/" class="md-nav__link">
-        Tutorial on fitting with ticktack and emcee
-      </a>
-    </li>
-  
-
-          
-            
+              
   
   
   
@@ -257,6 +255,21 @@
     </li>
   
 
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/02_Fitting/" class="md-nav__link">
+        Tutorial on fitting with ticktack and emcee
+      </a>
+    </li>
+  
+
+            
           
         </ul>
       </nav>
@@ -300,21 +313,6 @@
 
   
   
-  
-    <li class="md-nav__item">
-      <a href="../cbm_api/" class="md-nav__link">
-        CarbonBoxModel API Docs
-      </a>
-    </li>
-  
-
-    
-      
-      
-      
-
-  
-  
     
   
   
@@ -336,6 +334,8 @@
       </a>
       
         
+
+
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
   
   
@@ -356,10 +356,75 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.MarkovChainSampler" class="md-nav__link">
+    MarkovChainSampler()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.NestedSampler" class="md-nav__link">
+    NestedSampler()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.chain_summary" class="md-nav__link">
+    chain_summary()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
+    plot_multiple_chains()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.scatter_plot" class="md-nav__link">
+    scatter_plot()
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
       
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sf_api/" class="md-nav__link">
+        SingleFitter API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mf_api/" class="md-nav__link">
+        MultiFitter API Docs
+      </a>
     </li>
   
 
@@ -376,6 +441,8 @@
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
                     
+
+
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
   
   
@@ -392,6 +459,41 @@
         <li class="md-nav__item">
   <a href="#ticktack.fitting.CarbonFitter" class="md-nav__link">
     ticktack.fitting.CarbonFitter
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.MarkovChainSampler" class="md-nav__link">
+    MarkovChainSampler()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.NestedSampler" class="md-nav__link">
+    NestedSampler()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.chain_summary" class="md-nav__link">
+    chain_summary()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
+    plot_multiple_chains()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.fitting.CarbonFitter.scatter_plot" class="md-nav__link">
+    scatter_plot()
   </a>
   
 </li>
@@ -421,6 +523,7 @@
 <a id="ticktack.fitting.CarbonFitter"></a>
     <div class="doc doc-contents first">
 
+      <p>Parent class of SingleFitter and MultiFitter. Does Monte Carlo sampling, plotting and more.</p>
 
 
 
@@ -435,8 +538,407 @@
 
 
 
+  <div class="doc doc-object doc-method">
 
 
+
+<h2 id="ticktack.fitting.CarbonFitter.MarkovChainSampler" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">MarkovChainSampler</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">,</span> <span class="n">likelihood</span><span class="p">,</span> <span class="n">burnin</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span> <span class="n">production</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Runs an affine-invariant MCMC sampler on an array of initial parameters, subject to some likelihood function.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Initial parameters for MC sampler</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>likelihood</code></td>
+        <td><code>callable</code></td>
+        <td><p>Log-likelihood function for params</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>burnin</code></td>
+        <td><code>int</code></td>
+        <td><p>Number of steps to run in burn-in period. 500 by default.</p></td>
+        <td><code>500</code></td>
+      </tr>
+      <tr>
+        <td><code>production</code></td>
+        <td><code>int</code></td>
+        <td><p>Number of steps to run in production period. 1000 by default.</p></td>
+        <td><code>1000</code></td>
+      </tr>
+      <tr>
+        <td><code>k</code></td>
+        <td><code>int</code></td>
+        <td><p>Determines the number of walkers of the sampler via:
+nwalkers = k * dim(params)
+2 by default.</p></td>
+        <td><code>2</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ndarray</code></td>
+      <td><p>A chain of MCMC walk</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.CarbonFitter.NestedSampler" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">NestedSampler</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">,</span> <span class="n">likelihood</span><span class="p">,</span> <span class="n">low_bound</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">high_bound</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">sampler_name</span><span class="o">=</span><span class="s1">&#39;multi_ellipsoid&#39;</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Runs Nested Sampling sampler on the parameter space of some model, subject to some likelihood function.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>params</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Example parameters for NS sampler</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>likelihood</code></td>
+        <td><code>callable</code></td>
+        <td><p>Log-likelihood function for the set of parameters to be sampled</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>low_bound</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Lower bound of params</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>high_bound</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>Upper bound of params</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>sampler_name</code></td>
+        <td><code>str</code></td>
+        <td><p>Name of sampling method. Take value in ['multi_ellipsoid', 'slice']. 'multi_ellipsoid' by default.</p></td>
+        <td><code>&#39;multi_ellipsoid&#39;</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>ndarray</code></td>
+      <td><p>A chain of MCMC walk</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.CarbonFitter.chain_summary" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">chain_summary</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">walkers</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dist</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">test_convergence</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>chain</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>A chain of MCMC walks</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>walker</code></td>
+        <td><code>int</code></td>
+        <td><p>The number of walkers for the chain</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>figsize</code></td>
+        <td><code>tuple</code></td>
+        <td><p>Output figure size</p></td>
+        <td><code>(10, 10)</code></td>
+      </tr>
+      <tr>
+        <td><code>labels</code></td>
+        <td><code>list[str]</code></td>
+        <td><p>A list of parameter names</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>plot_dist</code></td>
+        <td><code>bool</code></td>
+        <td><p>If True, only plot the marginal distributions of parameters</p></td>
+        <td><code>False</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>figure</code></td>
+      <td><p>plot of posterior surfaces or marginal distributions</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.CarbonFitter.plot_multiple_chains" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">plot_multiple_chains</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chains</span><span class="p">,</span> <span class="n">walker</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">params_names</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">colors</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">linewidths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dists</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Overplots posterior surfaces of parameters from multiple chains.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>chains</code></td>
+        <td><code>list</code></td>
+        <td><p>List of chains of MCMC walks</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>walker</code></td>
+        <td><code>int</code></td>
+        <td><p>The number of walkers for each chain in 'chains'</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>figsize</code></td>
+        <td><code>tuple</code></td>
+        <td><p>Output figure size</p></td>
+        <td><code>(10, 10)</code></td>
+      </tr>
+      <tr>
+        <td><code>params_names</code></td>
+        <td><code>list[str]</code></td>
+        <td><p>A list of parameter names</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>labels</code></td>
+        <td><code>list[str]</code></td>
+        <td><p>Labels that distinguish different chains</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>colors</code></td>
+        <td><code>list[str]</code></td>
+        <td><p>A list of color names, used to distinguish different chains</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>alpha</code></td>
+        <td><code>float</code></td>
+        <td><p>Parameter for blending, between 0-1.</p></td>
+        <td><code>0.5</code></td>
+      </tr>
+      <tr>
+        <td><code>linewidths</code></td>
+        <td><code>float</code></td>
+        <td><p>Line width, in points</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>plot_dist</code></td>
+        <td><code>bool</code></td>
+        <td><p>If True, only plot the marginal distributions of parameters</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>figure</code></td>
+      <td><p>plot of posterior surfaces or marginal distributions</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.fitting.CarbonFitter.scatter_plot" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">scatter_plot</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">array</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">square_size</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Makes an accessible heatmap.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>array</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>n x n matrix for the heatmap</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>figsize</code></td>
+        <td><code>int</code></td>
+        <td><p>Controls the size of the output figure. Should increase with the size of 'array'. 10 by default</p></td>
+        <td><code>10</code></td>
+      </tr>
+      <tr>
+        <td><code>square_size</code></td>
+        <td><code>int</code></td>
+        <td><p>Controls the size of squares in the heatmap. Should decrease with the size of 'array'. 100 by default</p></td>
+        <td><code>100</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>figure</code></td>
+      <td><p>heatmap</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
 
 
 
@@ -466,7 +968,7 @@
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
         
-        <a href="../cbm_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: CarbonBoxModel API Docs" rel="prev">
+        <a href="../flow_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Flow API Docs" rel="prev">
           <div class="md-footer__button md-icon">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
           </div>
@@ -475,11 +977,26 @@
               <span class="md-footer__direction">
                 Previous
               </span>
-              CarbonBoxModel API Docs
+              Flow API Docs
             </div>
           </div>
         </a>
       
+      
+        
+        <a href="../sf_api/" class="md-footer__link md-footer__link--next" aria-label="Next: SingleFitter API Docs" rel="next">
+          <div class="md-footer__title">
+            <div class="md-ellipsis">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              SingleFitter API Docs
+            </div>
+          </div>
+          <div class="md-footer__button md-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11H4z"/></svg>
+          </div>
+        </a>
       
     </nav>
   
@@ -487,10 +1004,12 @@
     <div class="md-footer-meta__inner md-grid">
       <div class="md-footer-copyright">
         
-        Made with
-        <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
-          Material for MkDocs
-        </a>
+        
+          Made with
+          <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+            Material for MkDocs
+          </a>
+        
         
       </div>
       
@@ -502,10 +1021,10 @@
     <div class="md-dialog" data-md-component="dialog">
       <div class="md-dialog__inner md-typeset"></div>
     </div>
-    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.53c85856.min.js", "version": null}</script>
+    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.fcfe8b6d.min.js", "version": null}</script>
     
     
-      <script src="../assets/javascripts/bundle.716f8af4.min.js"></script>
+      <script src="../assets/javascripts/bundle.b1047164.min.js"></script>
       
     
   </body>
