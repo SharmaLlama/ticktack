@@ -111,7 +111,7 @@ class CarbonFitter:
         ----------
         chain : ndarray
             A chain of MCMC walks
-        walker : int
+        walkers : int
             The number of walkers for the chain
         figsize : tuple, optional
             Output figure size
@@ -247,7 +247,7 @@ class CarbonFitter:
             Parameter for blending, between 0-1.
         linewidths : float, optional
             Line width, in points
-        plot_dist : bool, optional
+        plot_dists : bool, optional
             If True, only plot the marginal distributions of parameters
 
         Returns

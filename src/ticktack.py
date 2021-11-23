@@ -22,21 +22,22 @@ config.update("jax_enable_x64", True)
 
 
 class Box:
-    """ Box class which represents each individual box in the carbon model.
-
-    Parameters
-    ----------
-    name : str
-        name of the Box.
-    reservoir : float
-        reservoir content of the Box.
-    production_coefficient : float, optional
-        production coefficient of the Box. Defaults to 0.
-    hemisphere : str, optional
-        hemisphere that this box is in. Defaults to None (i.e. this box is not part of an inter-hemispheric system).
-    """
+    """ Box class which represents each individual box in the carbon model."""
 
     def __init__(self, name, reservoir, production_coefficient=0.0, hemisphere='None'):
+        """ init method to initialise object.
+
+        Parameters
+        ----------
+        name : str
+            name of the Box.
+        reservoir : float
+            reservoir content of the Box.
+        production_coefficient : float, optional
+            production coefficient of the Box. Defaults to 0.
+        hemisphere : str, optional
+            hemisphere that this box is in. Defaults to None (i.e. this box is not part of an inter-hemispheric system).
+        """
         self._name = name
         self._reservoir = reservoir
         self._production = production_coefficient
@@ -98,20 +99,20 @@ class Box:
 
 
 class Flow:
-    """ Flow class to imitate the fluxes between boxes in a carbon box model.
-
-    Parameters
-    ----------
-    source : Box
-        source of the flow.
-    destination : Box
-        destination the flow.
-    flux_rate : float
-        flux rate between the source and the destination. Flux must be a non-negative value.
-
-    """
+    """ Flow class to imitate the fluxes between boxes in a carbon box model."""
 
     def __init__(self, source, destination, flux_rate):
+        """ Init method to initialise object.
+
+        Parameters
+        ----------
+        source : Box
+            source of the flow.
+        destination : Box
+            destination the flow.
+        flux_rate : float
+            flux rate between the source and the destination. Flux must be a non-negative value.
+        """
         self._source = source
         self._destination = destination
         assert flux_rate >= 0
@@ -162,18 +163,18 @@ class Flow:
 
 
 class CarbonBoxModel:
-    """
-    Carbon Box Model class which represents the box model which is made up of Box Objects and Flux Objects.
-
-    Parameters
-    ----------
-    production_rate_units : str, optional
-        units for the production rate. Only valid units are 'kg/yr' or 'atoms/cm^2/s'.
-    flow_rate_units : str, optional
-        units for the flow rate. Only valid values are 'Gt/yr' or '1/yr'.
-    """
+    """Carbon Box Model class which represents the box model which is made up of Box Objects and Flux Objects."""
 
     def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
+        """ Init method for creating an object of this class.
+
+        Parameters
+        ----------
+        production_rate_units : str, optional
+            units for the production rate. Only valid units are 'kg/yr' or 'atoms/cm^2/s'.
+        flow_rate_units : str, optional
+            units for the flow rate. Only valid values are 'Gt/yr' or '1/yr'.
+        """
         self._non_hemisphere_model = False
         self._nodes = {}
         self._reverse_nodes = {}
@@ -218,8 +219,8 @@ class CarbonBoxModel:
                 raise ValueError("One/many of the input nodes are not of Box Class.")
 
     def add_edges(self, flow_objs):
-        """ Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list
-        are not an instance of Flow Class then it throws a ValueError.
+        """ Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list are
+            not an instance of Flow Class then it throws a ValueError.
 
         Parameters
         ----------
@@ -279,8 +280,8 @@ class CarbonBoxModel:
         return [self._nodes[j] for j in range(self._n_nodes)]
 
     def get_fluxes(self):
-        """ Getter method for the compiled fluxes in the units specified in the init_method. If the compile method
-        has not been run, then it will return None.
+        """ Getter method for the compiled fluxes in the units specified in the init_method. If the compile method has
+            not been run, then it will return None.
 
         Returns
         -------
@@ -292,7 +293,7 @@ class CarbonBoxModel:
 
     def get_converted_fluxes(self):
         """ Getter method for the fluxes when converted to 'Gt/yr' (this is the unit that the rest of the methods work
-        in internally). This returns None if the compile method has not been run.
+            in internally). This returns None if the compile method has not been run.
 
         Returns
         -------
@@ -744,8 +745,8 @@ class CarbonBoxModel:
         Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth in
         a certain month.
 
-         Parameters
-        -----------
+        Parameters
+        ----------
         months : list
             list of months in which growth occurs, the months must be in the following list: ['january',
             'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
