@@ -9,6 +9,7 @@ nav:
     - CarbonFitter API Docs: cf_api.md
     - SingleFitter API Docs: sf_api.md
     - MultiFitter API Docs: mf_api.md
+    - CarbonBox API Docs: cbm_api.md
 
 theme:
   name: "material"
