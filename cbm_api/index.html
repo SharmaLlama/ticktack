@@ -781,8 +781,8 @@
 
     <div class="doc doc-contents ">
 
-      <p>Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list are</p>
-<p>not an instance of Flow Class then it throws a ValueError.</p>
+      <p>Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list are not an instance of Flow Class then it</p>
+<p>throws a ValueError.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -836,8 +836,8 @@
 
     <div class="doc doc-contents ">
 
-      <p>Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list,</p>
-<p>then it is not added. If the node is not a Box Class Instance, then it raises a ValueError.</p>
+      <p>Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list, then it is not added. If the node is not a</p>
+<p>Box Class Instance, then it raises a ValueError.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -891,16 +891,17 @@
 
     <div class="doc doc-contents ">
 
-      <p>Method which compiles crucial parts of the model. If the model has not been compiled before then it</p>
-<p>compiles the following quantities:
-- 12C reservoir content of the nodes (in the order the nodes were added)
-- the fluxes (where fluxes at index (i,j) represents the flux from node[i] to node[j])
-- the decay matrix (matrix with decay constant along the diagonal)
-- production coefficients of the nodes.
-- the corrected fluxes (fluxes in unit 'Gt/yr')
-- the matrix of the coefficients for the ODEINT to solve.</p>
-<p>It also detects if the incoming and outgoing fluxes at every node is balanced and if not then throws ValueError
-along with which node is unbalanced.</p>
+      <p>Method which compiles crucial parts of the model. If the model has not been compiled before then it compiles the following quantities:</p>
+<ul>
+<li>12C reservoir content of the nodes (in the order the nodes were added)</li>
+<li>the fluxes (where fluxes at index (i,j) represents the flux from node[i] to node[j])</li>
+<li>the decay matrix (matrix with decay constant along the diagonal)</li>
+<li>production coefficients of the nodes.</li>
+<li>the corrected fluxes (fluxes in unit 'Gt/yr')</li>
+<li>the matrix of the coefficients for the ODEINT to solve.</li>
+<li>whether the carbon box model is hemispheric or non-hemispheric.</li>
+</ul>
+<p>It also detects if the incoming and outgoing fluxes at every node is balanced and if not then throws ValueError along with which node is unbalanced.</p>
 
 <p><strong>Exceptions:</strong></p>
 <table>
@@ -935,9 +936,8 @@ along with which node is unbalanced.</p>
 
     <div class="doc doc-contents ">
 
-      <p>Creates the growth season kernel based on the name of the months provided. Months can be given in any order.</p>
-<p>Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth in
-a certain month.</p>
+      <p>Creates the growth season kernel based on the name of the months provided. Months can be given in any order. Growth season kernel is a binary array</p>
+<p>where a 0 indicates no growth in that month and a 1 indicates growth in a certain month.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -953,9 +953,8 @@ a certain month.</p>
       <tr>
         <td><code>months</code></td>
         <td><code>list</code></td>
-        <td><p>list of months in which growth occurs, the months must be in the following list: ['january',
-'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
-'december']</p></td>
+        <td><p>list of months in which growth occurs, the months must be in the following list: ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+'august', 'september', 'october', 'november', 'december']</p></td>
         <td><em>required</em></td>
       </tr>
   </tbody>
@@ -978,9 +977,8 @@ a certain month.</p>
 
     <div class="doc doc-contents ">
 
-      <p>External equilibrate method which determines the appropriate result to return given a parameter. If</p>
-<p>neither parameter is given then it throws a ValueError. If both are specified, then it treats production_rate
-as None.</p>
+      <p>External equilibrate method which determines the appropriate result to return given a parameter. If neither parameter is given then it throws a</p>
+<p>ValueError. If both are specified, then it treats production_rate as None.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -1055,8 +1053,8 @@ as None.</p>
 
     <div class="doc doc-contents ">
 
-      <p>Getter method for the fluxes when converted to 'Gt/yr' (this is the unit that the rest of the methods work</p>
-<p>in internally). This returns None if the compile method has not been run.</p>
+      <p>Getter method for the fluxes when converted to 'Gt/yr' (this is the unit that the rest of the methods work in internally). This returns None if the</p>
+<p>compile method has not been run.</p>
 
 <p><strong>Returns:</strong></p>
 <table>
@@ -1162,8 +1160,7 @@ from node[i] to node[j].</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Getter method for the compiled fluxes in the units specified in the init_method. If the compile method has</p>
-<p>not been run, then it will return None.</p>
+      <p>Getter method for the compiled fluxes in the units specified in the init_method. If the compile method has  not been run, then it will return None.</p>
 
 <p><strong>Returns:</strong></p>
 <table>
@@ -1268,8 +1265,7 @@ from node[i] to node[j].</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Getter method for the normalised production coefficients of the nodes (Boxes). Returns None if compile method</p>
-<p>has not been called.</p>
+      <p>Getter method for the normalised production coefficients of the nodes (Boxes). Returns None if compile method has not been called.</p>
 
 <p><strong>Returns:</strong></p>
 <table>
@@ -1305,8 +1301,7 @@ nodes were added).</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Getter method for the 12C reservoir content of the nodes (Boxes).. Returns None if the compile method has</p>
-<p>not been called.</p>
+      <p>Getter method for the 12C reservoir content of the nodes (Boxes).. Returns None if the compile method has not been called.</p>
 
 <p><strong>Returns:</strong></p>
 <table>
@@ -1341,9 +1336,8 @@ nodes were added).</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>For the given production function, this calculates the C14 content of all the boxes within the carbon box</p>
-<p>model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
-if the compile() method has not been executed first.</p>
+      <p>For the given production function, this calculates the C14 content of all the boxes within the carbon box model at the specified time values. It</p>
+<p>does this by solving a linear system of ODEs. This method will not work if the compile() method has not been executed first.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -1371,8 +1365,7 @@ if the compile() method has not been executed first.</p>
       <tr>
         <td><code>y0</code></td>
         <td><code>list</code></td>
-        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
-of boxes.</p></td>
+        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number of boxes.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
@@ -1384,15 +1377,13 @@ of boxes.</p></td>
       <tr>
         <td><code>steady_state_production</code></td>
         <td><code>int</code></td>
-        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
-specified, this parameter is ignored.</p></td>
+        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is specified, this parameter is ignored.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
         <td><code>target_C_14</code></td>
         <td><code>int</code></td>
-        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
- specified, this parameter is ignored.</p></td>
+        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is specified, this parameter is ignored.</p></td>
         <td><code>None</code></td>
       </tr>
   </tbody>
@@ -1424,8 +1415,7 @@ If the production is not a callable function.</p></td>
   <tbody>
     <tr>
       <td><code>Union[list, list]</code></td>
-      <td><p>The value of each box in the carbon box at the specified time_values along with the steady state solution
-for the system.</p></td>
+      <td><p>The value of each box in the carbon box at the specified time_values along with the steady state solution for the system.</p></td>
     </tr>
   </tbody>
 </table>
@@ -1447,8 +1437,7 @@ for the system.</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Method which calculates the d14c values of the specified box. Calls the run_bin function to determine</p>
-<p>the binned box contents.</p>
+      <p>Method which calculates the d14c values of the specified box. Calls the run_bin function to determine the binned box contents.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -1482,8 +1471,7 @@ for the system.</p></td>
       <tr>
         <td><code>y0</code></td>
         <td><code>list</code></td>
-        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
-of boxes.</p></td>
+        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number of boxes.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
@@ -1495,22 +1483,20 @@ of boxes.</p></td>
       <tr>
         <td><code>steady_state_production</code></td>
         <td><code>int</code></td>
-        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
-specified, this parameter is ignored.</p></td>
+        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is specified, this parameter is ignored.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
         <td><code>target_C_14</code></td>
         <td><code>int</code></td>
-        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
- specified, this parameter is ignored.</p></td>
+        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is specified, this parameter is ignored.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
         <td><code>steady_state_solutions</code></td>
         <td><code>list</code></td>
-        <td><p>the solutions for the steady state, if it is different to the steady state solution calculated based on the
-y0, steady_state_production or target_C_14 parameters into the run function.</p></td>
+        <td><p>the solutions for the steady state, if it is different to the steady state solution calculated based on the y0, steady_state_production or
+target_C_14 parameters into the run function.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
@@ -1522,9 +1508,8 @@ y0, steady_state_production or target_C_14 parameters into the run function.</p>
       <tr>
         <td><code>hemisphere</code></td>
         <td><code>str</code></td>
-        <td><p>If the carbon box model is hemispheric, then the hemisphere can be specified to determine the d14c in either
-the northern or the southern box. Defaults to North but this is parameter is ignored if the carbon box model
-is non-hemispheric.</p></td>
+        <td><p>If the carbon box model is hemispheric, then the hemisphere can be specified to determine the d14c in either the northern or the southern box.
+Defaults to North but this is parameter is ignored if the carbon box model is non-hemispheric.</p></td>
         <td><code>&#39;north&#39;</code></td>
       </tr>
   </tbody>
@@ -1540,8 +1525,7 @@ is non-hemispheric.</p></td>
   <tbody>
       <tr>
         <td><code>ValueError</code></td>
-        <td><p>If there is no valid box in the carbon box model that can be used to calculate the d14c for according to the
-specified box parameters.</p></td>
+        <td><p>If there is no valid box in the carbon box model that can be used to calculate the d14c for according to the specified box parameters.</p></td>
       </tr>
   </tbody>
 </table>
@@ -1613,8 +1597,7 @@ specified box parameters.</p></td>
       <tr>
         <td><code>y0</code></td>
         <td><code>list</code></td>
-        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
-of boxes.</p></td>
+        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number  of boxes.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
@@ -1626,15 +1609,13 @@ of boxes.</p></td>
       <tr>
         <td><code>steady_state_production</code></td>
         <td><code>int</code></td>
-        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
-specified, this parameter is ignored.</p></td>
+        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is specified, this parameter is ignored.</p></td>
         <td><code>None</code></td>
       </tr>
       <tr>
         <td><code>target_C_14</code></td>
         <td><code>int</code></td>
-        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
- specified, this parameter is ignored.</p></td>
+        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is specified, this parameter is ignored.</p></td>
         <td><code>None</code></td>
       </tr>
   </tbody>
@@ -1650,8 +1631,7 @@ specified, this parameter is ignored.</p></td>
   <tbody>
     <tr>
       <td><code>Union[list, list]</code></td>
-      <td><p>The binned contents of each box in the carbon box at the specified time_values along with the steady state
-solution for the system.</p></td>
+      <td><p>The binned contents of each box in the carbon box at the specified time_values along with the steady state solution for the system.</p></td>
     </tr>
   </tbody>
 </table>
