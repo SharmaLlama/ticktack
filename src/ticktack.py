@@ -883,76 +883,76 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
 
 
 
-
-
-cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
-# cbm.define_growth_season(['april', 'may', 'june', 'july', 'august', 'september'])
-cbm.compile()
-import matplotlib.pyplot as plt
-
-start = 760
-resolution = 1000
-burn_in_time = np.linspace(760 - 1000, 760, resolution)
-steady_state_burn_in = cbm.equilibrate(target_C_14=707)
-burn_in_solutions = cbm.equilibrate(production_rate=steady_state_burn_in)
-d_14_time_series_fine = np.linspace(760, 788, 2700)
-d_14_time_series_coarse = np.arange(760, 788)
-
-
-def sg(t, start_time, duration, area):
-    middle = start_time + duration / 2.
-    height = area / duration
-    return height * jnp.exp(- ((t - middle) / (1. / 1.88349 * duration)) ** 8.)
-
-
-def miyake_event(t, start_time, duration, phase, area):
-    height = sg(t, start_time, duration, area)
-    prod = steady_state_burn_in + 0.18 * steady_state_burn_in * jnp.sin(2 * np.pi / 11 * t + phase) + height
-    return prod
-
-
-burn_in, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-                     y0=burn_in_solutions)
-prod = miyake_event(d_14_time_series_fine, 775, 1 / 12, np.pi / 2, 81 / 12)
-
-event, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-                   y0=burn_in[-1, :])
-d_14_c = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
-                               args=(775, 1 / 12, np.pi / 2, 81 / 12),
-                               y0=burn_in[-1, :], steady_state_solutions=burn_in_solutions)
-
-cbm.define_growth_season(['october', 'november', 'december', 'january', 'february', 'march'])
+#
+#
+# cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
+# # cbm.define_growth_season(['april', 'may', 'june', 'july', 'august', 'september'])
 # cbm.compile()
-
-burn_in2, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-                      y0=burn_in_solutions)
-
-event2, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-                    y0=burn_in2[-1, :])
-d_14_c2 = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
-                                args=(775, 1 / 12, np.pi / 2, 81 / 12),
-                                y0=burn_in2[-1, :], steady_state_solutions=burn_in_solutions)
-
-vals = [-21.63, -22.28, -22.64, -23.83, -22.20, -22.99, -20.73, -21.59, -25.32, -25.6, -25.70, -24.00, -23.73,
-        -21.91, -23.44, -9.335, -6.46, -9.70, -11.17, -10.31, -11.10, -10.72, -10.67, -8.63, -9.68, -9.31,
-        -12.33, -14.44]
-
-val2 = [-22.20, -22.99, -20.73, -21.59, -25.32, -26.46, -24.74, -25.70, -24.00, -23.73,
-        -21.91, -23.44, -11.62]
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.0, 6.0))
-ax1.plot(d_14_time_series_fine, event[:, 1], 'ro')
-ax1.plot(d_14_time_series_fine, event2[:, 1], 'bo')
-# ax1.plot(d_14_time_series_coarse, d_14_c, 'ro')
-# ax1.plot(d_14_time_series_coarse, vals, 'ro')
-# ax1.plot(d_14_time_series_coarse, d_14_c2 - 22.64846153846154, 'bo')
-ax1.legend(["Guttler Data", "nothern hemisphere"])
-ax2.plot(d_14_time_series_fine, prod)
-ax1.set_xlim(770, 777)
-plt.axvline(775)
-plt.axvline(775 + 1 / 12)
-# ax2.set_ylim(0,5)
-
-plt.ticklabel_format(useOffset=False)
-
-plt.show()
+# import matplotlib.pyplot as plt
+#
+# start = 760
+# resolution = 1000
+# burn_in_time = np.linspace(760 - 1000, 760, resolution)
+# steady_state_burn_in = cbm.equilibrate(target_C_14=707)
+# burn_in_solutions = cbm.equilibrate(production_rate=steady_state_burn_in)
+# d_14_time_series_fine = np.linspace(760, 788, 2700)
+# d_14_time_series_coarse = np.arange(760, 788)
+#
+#
+# def sg(t, start_time, duration, area):
+#     middle = start_time + duration / 2.
+#     height = area / duration
+#     return height * jnp.exp(- ((t - middle) / (1. / 1.88349 * duration)) ** 8.)
+#
+#
+# def miyake_event(t, start_time, duration, phase, area):
+#     height = sg(t, start_time, duration, area)
+#     prod = steady_state_burn_in + 0.18 * steady_state_burn_in * jnp.sin(2 * np.pi / 11 * t + phase) + height
+#     return prod
+#
+#
+# burn_in, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+#                      y0=burn_in_solutions)
+# prod = miyake_event(d_14_time_series_fine, 775, 1 / 12, np.pi / 2, 81 / 12)
+#
+# event, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+#                    y0=burn_in[-1, :])
+# d_14_c = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
+#                                args=(775, 1 / 12, np.pi / 2, 81 / 12),
+#                                y0=burn_in[-1, :], steady_state_solutions=burn_in_solutions)
+#
+# cbm.define_growth_season(['october', 'november', 'december', 'january', 'february', 'march'])
+# # cbm.compile()
+#
+# burn_in2, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+#                       y0=burn_in_solutions)
+#
+# event2, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+#                     y0=burn_in2[-1, :])
+# d_14_c2 = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
+#                                 args=(775, 1 / 12, np.pi / 2, 81 / 12),
+#                                 y0=burn_in2[-1, :], steady_state_solutions=burn_in_solutions)
+#
+# vals = [-21.63, -22.28, -22.64, -23.83, -22.20, -22.99, -20.73, -21.59, -25.32, -25.6, -25.70, -24.00, -23.73,
+#         -21.91, -23.44, -9.335, -6.46, -9.70, -11.17, -10.31, -11.10, -10.72, -10.67, -8.63, -9.68, -9.31,
+#         -12.33, -14.44]
+#
+# val2 = [-22.20, -22.99, -20.73, -21.59, -25.32, -26.46, -24.74, -25.70, -24.00, -23.73,
+#         -21.91, -23.44, -11.62]
+#
+# fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.0, 6.0))
+# ax1.plot(d_14_time_series_fine, event[:, 1], 'ro')
+# ax1.plot(d_14_time_series_fine, event2[:, 1], 'bo')
+# # ax1.plot(d_14_time_series_coarse, d_14_c, 'ro')
+# # ax1.plot(d_14_time_series_coarse, vals, 'ro')
+# # ax1.plot(d_14_time_series_coarse, d_14_c2 - 22.64846153846154, 'bo')
+# ax1.legend(["Guttler Data", "nothern hemisphere"])
+# ax2.plot(d_14_time_series_fine, prod)
+# ax1.set_xlim(770, 777)
+# plt.axvline(775)
+# plt.axvline(775 + 1 / 12)
+# # ax2.set_ylim(0,5)
+#
+# plt.ticklabel_format(useOffset=False)
+#
+# plt.show()
