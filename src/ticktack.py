@@ -189,6 +189,7 @@ class CarbonBoxModel:
         self._corrected_fluxes = None
         self._matrix = None
         self._growth_kernel = jnp.array([1] * 12)
+        self._growth_seasons = False
 
     def add_nodes(self, nodes):
         """ Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list,
@@ -635,7 +636,7 @@ class CarbonBoxModel:
                                     steady_state_production=steady_state_production)
         m = time_oversample // 12
         tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1, time_oversample))
-        if jnp.sum(self._growth_kernel) == 12:
+        if not self._growth_seasons:
             shifted_index = 0
         else:
             shifted_index = (jnp.where(jnp.roll(self._growth_kernel, 1) == 1)[0][0] - 1) % 12
@@ -755,6 +756,12 @@ class CarbonBoxModel:
                                'october', 'november', 'december'])
         months = np.array(months)
         self._growth_kernel = jnp.array([1] * 12)
+
+        if len(months) != 12:
+            self._growth_seasons = True
+        else:
+            self._growth_seasons = False
+
         self._growth_kernel = self._growth_kernel.at[np.in1d(month_list, months, invert=True)].set(0)
 
 
