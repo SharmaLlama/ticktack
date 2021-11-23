@@ -313,6 +313,21 @@
 
   
   
+  
+    <li class="md-nav__item">
+      <a href="../cbm_api/" class="md-nav__link">
+        CarbonBox API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
     
   
   
@@ -350,42 +365,42 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter" class="md-nav__link">
-    ticktack.fitting.CarbonFitter
+  <a href="#fitting.CarbonFitter" class="md-nav__link">
+    fitting.CarbonFitter
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.MarkovChainSampler" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.MarkovChainSampler" class="md-nav__link">
     MarkovChainSampler()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.NestedSampler" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.NestedSampler" class="md-nav__link">
     NestedSampler()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.chain_summary" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.chain_summary" class="md-nav__link">
     chain_summary()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
     plot_multiple_chains()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.scatter_plot" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.scatter_plot" class="md-nav__link">
     scatter_plot()
   </a>
   
@@ -457,42 +472,42 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter" class="md-nav__link">
-    ticktack.fitting.CarbonFitter
+  <a href="#fitting.CarbonFitter" class="md-nav__link">
+    fitting.CarbonFitter
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.MarkovChainSampler" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.MarkovChainSampler" class="md-nav__link">
     MarkovChainSampler()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.NestedSampler" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.NestedSampler" class="md-nav__link">
     NestedSampler()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.chain_summary" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.chain_summary" class="md-nav__link">
     chain_summary()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
     plot_multiple_chains()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#ticktack.fitting.CarbonFitter.scatter_plot" class="md-nav__link">
+  <a href="#fitting.CarbonFitter.scatter_plot" class="md-nav__link">
     scatter_plot()
   </a>
   
@@ -520,7 +535,7 @@
 
   <div class="doc doc-object doc-class">
 
-<a id="ticktack.fitting.CarbonFitter"></a>
+<a id="fitting.CarbonFitter"></a>
     <div class="doc doc-contents first">
 
       <p>Parent class of SingleFitter and MultiFitter. Does Monte Carlo sampling, plotting and more.</p>
@@ -542,7 +557,7 @@
 
 
 
-<h2 id="ticktack.fitting.CarbonFitter.MarkovChainSampler" class="doc doc-heading">
+<h2 id="fitting.CarbonFitter.MarkovChainSampler" class="doc doc-heading">
 <code class="highlight language-python"><span class="n">MarkovChainSampler</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">,</span> <span class="n">likelihood</span><span class="p">,</span> <span class="n">burnin</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span> <span class="n">production</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">2</span><span class="p">)</span></code>
 
 
@@ -622,7 +637,7 @@ nwalkers = k * dim(params)
 
 
 
-<h2 id="ticktack.fitting.CarbonFitter.NestedSampler" class="doc doc-heading">
+<h2 id="fitting.CarbonFitter.NestedSampler" class="doc doc-heading">
 <code class="highlight language-python"><span class="n">NestedSampler</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">params</span><span class="p">,</span> <span class="n">likelihood</span><span class="p">,</span> <span class="n">low_bound</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">high_bound</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">sampler_name</span><span class="o">=</span><span class="s1">&#39;multi_ellipsoid&#39;</span><span class="p">)</span></code>
 
 
@@ -700,8 +715,8 @@ nwalkers = k * dim(params)
 
 
 
-<h2 id="ticktack.fitting.CarbonFitter.chain_summary" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">chain_summary</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">walkers</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dist</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">test_convergence</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span></code>
+<h2 id="fitting.CarbonFitter.chain_summary" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">chain_summary</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">walkers</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dist</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">test_convergence</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
 
 
 </h2>
@@ -778,7 +793,7 @@ nwalkers = k * dim(params)
 
 
 
-<h2 id="ticktack.fitting.CarbonFitter.plot_multiple_chains" class="doc doc-heading">
+<h2 id="fitting.CarbonFitter.plot_multiple_chains" class="doc doc-heading">
 <code class="highlight language-python"><span class="n">plot_multiple_chains</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chains</span><span class="p">,</span> <span class="n">walker</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">params_names</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">colors</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">linewidths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dists</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
 
 
@@ -880,7 +895,7 @@ nwalkers = k * dim(params)
 
 
 
-<h2 id="ticktack.fitting.CarbonFitter.scatter_plot" class="doc doc-heading">
+<h2 id="fitting.CarbonFitter.scatter_plot" class="doc doc-heading">
 <code class="highlight language-python"><span class="n">scatter_plot</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">array</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">square_size</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span></code>
 
 
@@ -968,7 +983,7 @@ nwalkers = k * dim(params)
     <nav class="md-footer__inner md-grid" aria-label="Footer">
       
         
-        <a href="../flow_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Flow API Docs" rel="prev">
+        <a href="../cbm_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: CarbonBox API Docs" rel="prev">
           <div class="md-footer__button md-icon">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
           </div>
@@ -977,7 +992,7 @@ nwalkers = k * dim(params)
               <span class="md-footer__direction">
                 Previous
               </span>
-              Flow API Docs
+              CarbonBox API Docs
             </div>
           </div>
         </a>

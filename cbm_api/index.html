@@ -1,0 +1,1724 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.2.3, mkdocs-material-7.3.6">
+    
+    
+      
+        <title>CarbonBox API Docs - ticktack for Radiocarbon Box Modelling</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.a57b2b03.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.3f5d1f46.min.css">
+        
+      
+    
+    
+    
+      
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,400,400i,700%7CRoboto+Mono&display=fallback">
+        <style>:root{--md-text-font-family:"Roboto";--md-code-font-family:"Roboto Mono"}</style>
+      
+    
+    
+    
+      <link rel="stylesheet" href="../assets/_mkdocstrings.css">
+    
+    
+      
+
+
+    
+    
+  </head>
+  
+  
+    
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="" data-md-color-primary="none" data-md-color-accent="none">
+  
+    
+    <script>function __prefix(e){return new URL("..",location).pathname+"."+e}function __get(e,t=localStorage){return JSON.parse(t.getItem(__prefix(e)))}</script>
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#documentation-for-carbonboxmodel" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="ticktack for Radiocarbon Box Modelling" class="md-header__button md-logo" aria-label="ticktack for Radiocarbon Box Modelling" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54z"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            ticktack for Radiocarbon Box Modelling
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              CarbonBox API Docs
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+    
+      <label class="md-header__button md-icon" for="__search">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5z"/></svg>
+      </label>
+      
+<div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.516 6.516 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5z"/></svg>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" aria-label="Clear" tabindex="-1">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+    
+    
+      <div class="md-header__source">
+        
+<a href="https://github.com/SharmaLlama/ticktack/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><path d="M439.55 236.05 244 40.45a28.87 28.87 0 0 0-40.81 0l-40.66 40.63 51.52 51.52c27.06-9.14 52.68 16.77 43.39 43.68l49.66 49.66c34.23-11.8 61.18 31 35.47 56.69-26.49 26.49-70.21-2.87-56-37.34L240.22 199v121.85c25.3 12.54 22.26 41.85 9.08 55a34.34 34.34 0 0 1-48.55 0c-17.57-17.6-11.07-46.91 11.25-56v-123c-20.8-8.51-24.6-30.74-18.64-45L142.57 101 8.45 235.14a28.86 28.86 0 0 0 0 40.81l195.61 195.6a28.86 28.86 0 0 0 40.8 0l194.69-194.69a28.86 28.86 0 0 0 0-40.81z"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="ticktack for Radiocarbon Box Modelling" class="md-nav__button md-logo" aria-label="ticktack for Radiocarbon Box Modelling" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54z"/></svg>
+
+    </a>
+    ticktack for Radiocarbon Box Modelling
+  </label>
+  
+    <div class="md-nav__source">
+      
+<a href="https://github.com/SharmaLlama/ticktack/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><path d="M439.55 236.05 244 40.45a28.87 28.87 0 0 0-40.81 0l-40.66 40.63 51.52 51.52c27.06-9.14 52.68 16.77 43.39 43.68l49.66 49.66c34.23-11.8 61.18 31 35.47 56.69-26.49 26.49-70.21-2.87-56-37.34L240.22 199v121.85c25.3 12.54 22.26 41.85 9.08 55a34.34 34.34 0 0 1-48.55 0c-17.57-17.6-11.07-46.91 11.25-56v-123c-20.8-8.51-24.6-30.74-18.64-45L142.57 101 8.45 235.14a28.86 28.86 0 0 0 0 40.81l195.61 195.6a28.86 28.86 0 0 0 40.8 0l194.69-194.69a28.86 28.86 0 0 0 0-40.81z"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        Home
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+      
+        <input class="md-nav__toggle md-toggle" data-md-toggle="__nav_2" type="checkbox" id="__nav_2" >
+      
+      
+      
+      
+        <label class="md-nav__link" for="__nav_2">
+          Fitting a Carbon Box Model
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <nav class="md-nav" aria-label="Fitting a Carbon Box Model" data-md-level="1">
+        <label class="md-nav__title" for="__nav_2">
+          <span class="md-nav__icon md-icon"></span>
+          Fitting a Carbon Box Model
+        </label>
+        <ul class="md-nav__list" data-md-scrollfix>
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/01_Injection_Recovery_ControlPoints/" class="md-nav__link">
+        Nonparametric Inference using Control Points
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/02_Fitting/" class="md-nav__link">
+        Tutorial on fitting with ticktack and emcee
+      </a>
+    </li>
+  
+
+            
+          
+        </ul>
+      </nav>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../box_api/" class="md-nav__link">
+        Box API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../flow_api/" class="md-nav__link">
+        Flow API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+    
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" data-md-toggle="toc" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          CarbonBox API Docs
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        CarbonBox API Docs
+      </a>
+      
+        
+
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel" class="md-nav__link">
+    ticktack.CarbonBoxModel
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.add_edges" class="md-nav__link">
+    add_edges()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.add_nodes" class="md-nav__link">
+    add_nodes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.compile" class="md-nav__link">
+    compile()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.define_growth_season" class="md-nav__link">
+    define_growth_season()
+  </a>
+  
+    <nav class="md-nav" aria-label="define_growth_season()">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.define_growth_season--parameters" class="md-nav__link">
+    Parameters
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.equilibrate" class="md-nav__link">
+    equilibrate()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_converted_fluxes" class="md-nav__link">
+    get_converted_fluxes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_edges" class="md-nav__link">
+    get_edges()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_edges_objects" class="md-nav__link">
+    get_edges_objects()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_fluxes" class="md-nav__link">
+    get_fluxes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_nodes" class="md-nav__link">
+    get_nodes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_nodes_objects" class="md-nav__link">
+    get_nodes_objects()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_production_coefficients" class="md-nav__link">
+    get_production_coefficients()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_reservoir_contents" class="md-nav__link">
+    get_reservoir_contents()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.run" class="md-nav__link">
+    run()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.run_D_14_C_values" class="md-nav__link">
+    run_D_14_C_values()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.run_bin" class="md-nav__link">
+    run_bin()
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cf_api/" class="md-nav__link">
+        CarbonFitter API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../sf_api/" class="md-nav__link">
+        SingleFitter API Docs
+      </a>
+    </li>
+  
+
+    
+      
+      
+      
+
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mf_api/" class="md-nav__link">
+        MultiFitter API Docs
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel" class="md-nav__link">
+    ticktack.CarbonBoxModel
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.add_edges" class="md-nav__link">
+    add_edges()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.add_nodes" class="md-nav__link">
+    add_nodes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.compile" class="md-nav__link">
+    compile()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.define_growth_season" class="md-nav__link">
+    define_growth_season()
+  </a>
+  
+    <nav class="md-nav" aria-label="define_growth_season()">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.define_growth_season--parameters" class="md-nav__link">
+    Parameters
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.equilibrate" class="md-nav__link">
+    equilibrate()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_converted_fluxes" class="md-nav__link">
+    get_converted_fluxes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_edges" class="md-nav__link">
+    get_edges()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_edges_objects" class="md-nav__link">
+    get_edges_objects()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_fluxes" class="md-nav__link">
+    get_fluxes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_nodes" class="md-nav__link">
+    get_nodes()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_nodes_objects" class="md-nav__link">
+    get_nodes_objects()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_production_coefficients" class="md-nav__link">
+    get_production_coefficients()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.get_reservoir_contents" class="md-nav__link">
+    get_reservoir_contents()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.run" class="md-nav__link">
+    run()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.run_D_14_C_values" class="md-nav__link">
+    run_D_14_C_values()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.run_bin" class="md-nav__link">
+    run_bin()
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          <div class="md-content" data-md-component="content">
+            <article class="md-content__inner md-typeset">
+              
+                
+                  <a href="https://github.com/SharmaLlama/ticktack/edit/master/docs/cbm_api.md" title="Edit this page" class="md-content__button md-icon">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20.71 7.04c.39-.39.39-1.04 0-1.41l-2.34-2.34c-.37-.39-1.02-.39-1.41 0l-1.84 1.83 3.75 3.75M3 17.25V21h3.75L17.81 9.93l-3.75-3.75L3 17.25z"/></svg>
+                  </a>
+                
+                
+                <h1 id="documentation-for-carbonboxmodel">Documentation for <code>CarbonBoxModel</code></h1>
+
+
+  <div class="doc doc-object doc-class">
+
+<a id="ticktack.CarbonBoxModel"></a>
+    <div class="doc doc-contents first">
+
+      <p>Carbon Box Model class which represents the box model which is made up of Box Objects and Flux Objects.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>production_rate_units</code></td>
+        <td><code>str</code></td>
+        <td><p>units for the production rate. Only valid units are 'kg/yr' or 'atoms/cm^2/s'.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>flow_rate_units</code></td>
+        <td><code>str</code></td>
+        <td><p>units for the flow rate. Only valid values are 'Gt/yr' or '1/yr'.</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
+
+
+
+  <div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.add_edges" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">add_edges</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">flow_objs</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list</p>
+<p>are not an instance of Flow Class then it throws a ValueError.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>flow_objs</code></td>
+        <td><code>list</code></td>
+        <td><p>list of Flow objects to add to the Carbon Box Model.</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Exceptions:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>ValueError</code></td>
+        <td><p>If any of the objects in the list are not of type Flow.</p></td>
+      </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.add_nodes" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">add_nodes</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">nodes</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list,</p>
+<p>then it is not added. If the node is not a Box Class Instance, then it raises a ValueError.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>nodes</code></td>
+        <td><code>list</code></td>
+        <td><p>list of nodes of Type Box to add to the carbon box model.</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Exceptions:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>ValueError</code></td>
+        <td><p>If any of the objects in the list are not of type Box.</p></td>
+      </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.compile" class="doc doc-heading">
+<code class="highlight language-python"><span class="nb">compile</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Method which compiles crucial parts of the model. If the model has not been compiled before then it</p>
+<p>compiles the following quantities:
+- 12C reservoir content of the nodes (in the order the nodes were added)
+- the fluxes (where fluxes at index (i,j) represents the flux from node[i] to node[j])
+- the decay matrix (matrix with decay constant along the diagonal)
+- production coefficients of the nodes.
+- the corrected fluxes (fluxes in unit 'Gt/yr')
+- the matrix of the coefficients for the ODEINT to solve.</p>
+<p>It also detects if the incoming and outgoing fluxes at every node is balanced and if not then throws ValueError
+along with which node is unbalanced.</p>
+
+<p><strong>Exceptions:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>ValueError</code></td>
+        <td><p>If the incoming flux and outgoing flux at every Box is not balanced.</p></td>
+      </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.define_growth_season" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">define_growth_season</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">months</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Creates the growth season kernel based on the name of the months provided. Months can be given in any order.</p>
+<p>Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth in
+a certain month.</p>
+<h4 id="ticktack.CarbonBoxModel.define_growth_season--parameters">Parameters</h4>
+<p>months : list
+    list of months in which growth occurs, the months must be in the following list: ['january',
+    'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
+    'december']</p>
+
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.equilibrate" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">equilibrate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">target_C_14</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">production_rate</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>External equilibrate method which determines the appropriate result to return given a parameter. If</p>
+<p>neither parameter is given then it throws a ValueError. If both are specified, then it treats production_rate
+as None.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>target_C_14</code></td>
+        <td><code>float</code></td>
+        <td><p>target C14 with which to equilibrate with. Defaults to None.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>production_rate</code></td>
+        <td><code>float</code></td>
+        <td><p>production rate with which to equilibrate to. Defaults to None.</p></td>
+        <td><code>None</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Exceptions:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>ValueError</code></td>
+        <td><p>If the both arguments are specified as None.</p></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>float</code></td>
+      <td><p>the initial production rate if the target C14 is specified.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_converted_fluxes" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_converted_fluxes</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the fluxes when converted to 'Gt/yr' (this is the unit that the rest of the methods work</p>
+<p>in internally). This returns None if the compile method has not been run.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jax.numpy.array</code></td>
+      <td><p>2D jax numpy array which contains the unit-corrected fluxes where index (i,j) indicates the 'Gt/yr' flux
+from node[i] to node[j].</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_edges" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_edges</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the name of edges.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>list</code></td>
+      <td><p>list of the edges (given in their string representations i.e. str(source) --&gt; str(destination):flux_value).</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_edges_objects" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_edges_objects</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the edge objects themselves.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>list</code></td>
+      <td><p>list of Flow Objects that have been added so far to the Class Object.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_fluxes" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_fluxes</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the compiled fluxes in the units specified in the init_method. If the compile method</p>
+<p>has not been run, then it will return None.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jax.numpy.array</code></td>
+      <td><p>2D jax numpy array which contains the fluxes where index (i,j) indicates the flux from node[i] to node[j].</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_nodes" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_nodes</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the name of the nodes in the order they were added to the Carbon Box Model Object.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>list</code></td>
+      <td><p>list of node names in the order they were inserted.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_nodes_objects" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_nodes_objects</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the node objects in the order they were inserted.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>list</code></td>
+      <td><p>list of the node objects in the order they were inserted.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_production_coefficients" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_production_coefficients</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the normalised production coefficients of the nodes (Boxes). Returns None if compile method</p>
+<p>has not been called.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jax.numpy.array</code></td>
+      <td><p>jax array containing the normalised production coefficients of the nodes (returned in the order the
+nodes were added).</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.get_reservoir_contents" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">get_reservoir_contents</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Getter method for the 12C reservoir content of the nodes (Boxes).. Returns None if the compile method has</p>
+<p>not been called.</p>
+
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>jax.numpy.array</code></td>
+      <td><p>jax numpy array containing the reservoir content of the nodes (returned in the order the nodes were added).</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.run" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">run</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">time_values</span><span class="p">,</span> <span class="n">production</span><span class="p">,</span> <span class="n">y0</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(),</span> <span class="n">target_C_14</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">steady_state_production</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>For the given production function, this calculates the C14 content of all the boxes within the carbon box</p>
+<p>model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
+if the compile() method has not been executed first.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>time_values</code></td>
+        <td><code>list</code></td>
+        <td><p>the time values at which to calculate the content of all the boxes.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>production</code></td>
+        <td><code>callable</code></td>
+        <td><p>the production function which determines the contents of the boxes.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>y0</code></td>
+        <td><code>list</code></td>
+        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
+of boxes.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>args</code></td>
+        <td><code>tuple</code></td>
+        <td><p>optional arguments to pass into the production function.</p></td>
+        <td><code>()</code></td>
+      </tr>
+      <tr>
+        <td><code>steady_state_production</code></td>
+        <td><code>int</code></td>
+        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
+specified, this parameter is ignored.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>target_C_14</code></td>
+        <td><code>int</code></td>
+        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
+ specified, this parameter is ignored.</p></td>
+        <td><code>None</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Exceptions:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>ValueError</code></td>
+        <td><p>If neither the target C-14 nor production rate is specified.
+If the production is not a callable function.</p></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Union[list, list]</code></td>
+      <td><p>The value of each box in the carbon box at the specified time_values along with the steady state solution
+for the system.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.run_D_14_C_values" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">run_D_14_C_values</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">time_out</span><span class="p">,</span> <span class="n">time_oversample</span><span class="p">,</span> <span class="n">production</span><span class="p">,</span> <span class="n">y0</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(),</span> <span class="n">target_C_14</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">steady_state_production</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">steady_state_solutions</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">box</span><span class="o">=</span><span class="s1">&#39;Troposphere&#39;</span><span class="p">,</span> <span class="n">hemisphere</span><span class="o">=</span><span class="s1">&#39;north&#39;</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Method which calculates the d14c values of the specified box. Calls the run_bin function to determine</p>
+<p>the binned box contents.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>time_out</code></td>
+        <td><code>list[int]</code></td>
+        <td><p>the values at which to bin the box contents. Must be whole year intervals otherwise method will not work.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>time_oversample</code></td>
+        <td><code>int</code></td>
+        <td><p>number of times to sample over time. This is the total number of samples for entire time output.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>production</code></td>
+        <td><code>callable</code></td>
+        <td><p>the production function which determines the contents of the boxes.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>y0</code></td>
+        <td><code>list</code></td>
+        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
+of boxes.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>args</code></td>
+        <td><code>tuple</code></td>
+        <td><p>optional arguments to pass into the production function.</p></td>
+        <td><code>()</code></td>
+      </tr>
+      <tr>
+        <td><code>steady_state_production</code></td>
+        <td><code>int</code></td>
+        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
+specified, this parameter is ignored.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>target_C_14</code></td>
+        <td><code>int</code></td>
+        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
+ specified, this parameter is ignored.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>steady_state_solutions</code></td>
+        <td><code>list</code></td>
+        <td><p>the solutions for the steady state, if it is different to the steady state solution calculated based on the
+y0, steady_state_production or target_C_14 parameters into the run function.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>box</code></td>
+        <td><code>str</code></td>
+        <td><p>the specific box at which to calculate the d14c. Defaults to troposphere as that is the most common use.</p></td>
+        <td><code>&#39;Troposphere&#39;</code></td>
+      </tr>
+      <tr>
+        <td><code>hemisphere</code></td>
+        <td><code>str</code></td>
+        <td><p>If the carbon box model is hemispheric, then the hemisphere can be specified to determine the d14c in either
+the northern or the southern box. Defaults to North but this is parameter is ignored if the carbon box model
+is non-hemispheric.</p></td>
+        <td><code>&#39;north&#39;</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Exceptions:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>ValueError</code></td>
+        <td><p>If there is no valid box in the carbon box model that can be used to calculate the d14c for according to the
+specified box parameters.</p></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>list</code></td>
+      <td><p>the binned d14c data of the specified box.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.run_bin" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">run_bin</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">time_out</span><span class="p">,</span> <span class="n">time_oversample</span><span class="p">,</span> <span class="n">production</span><span class="p">,</span> <span class="n">y0</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">args</span><span class="o">=</span><span class="p">(),</span> <span class="n">target_C_14</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">steady_state_production</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Method which bins the C14 content of all the boxes according to Schulman's convention for radiocarbon dating</p>
+<p>......TO BE CONTINUED....</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>time_out</code></td>
+        <td><code>list[int]</code></td>
+        <td><p>the values at which to bin the box contents. Must be whole year intervals otherwise method will not work.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>time_oversample</code></td>
+        <td><code>int</code></td>
+        <td><p>number of times to sample over time. This is the total number of samples for entire time output.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>production</code></td>
+        <td><code>callable</code></td>
+        <td><p>the production function which determines the contents of the boxes.</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>y0</code></td>
+        <td><code>list</code></td>
+        <td><p>the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
+of boxes.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>args</code></td>
+        <td><code>tuple</code></td>
+        <td><p>optional arguments to pass into the production function.</p></td>
+        <td><code>()</code></td>
+      </tr>
+      <tr>
+        <td><code>steady_state_production</code></td>
+        <td><code>int</code></td>
+        <td><p>the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
+specified, this parameter is ignored.</p></td>
+        <td><code>None</code></td>
+      </tr>
+      <tr>
+        <td><code>target_C_14</code></td>
+        <td><code>int</code></td>
+        <td><p>target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
+ specified, this parameter is ignored.</p></td>
+        <td><code>None</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>Union[list, list]</code></td>
+      <td><p>The binned contents of each box in the carbon box at the specified time_values along with the steady state
+solution for the system.</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+
+
+  </div>
+
+    </div>
+
+  </div>
+                
+              
+              
+                
+
+
+              
+            </article>
+          </div>
+        </div>
+        
+      </main>
+      
+        
+<footer class="md-footer">
+  
+    <nav class="md-footer__inner md-grid" aria-label="Footer">
+      
+        
+        <a href="../flow_api/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Flow API Docs" rel="prev">
+          <div class="md-footer__button md-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11h12z"/></svg>
+          </div>
+          <div class="md-footer__title">
+            <div class="md-ellipsis">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              Flow API Docs
+            </div>
+          </div>
+        </a>
+      
+      
+        
+        <a href="../cf_api/" class="md-footer__link md-footer__link--next" aria-label="Next: CarbonFitter API Docs" rel="next">
+          <div class="md-footer__title">
+            <div class="md-ellipsis">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              CarbonFitter API Docs
+            </div>
+          </div>
+          <div class="md-footer__button md-icon">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11H4z"/></svg>
+          </div>
+        </a>
+      
+    </nav>
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-footer-copyright">
+        
+        
+          Made with
+          <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+            Material for MkDocs
+          </a>
+        
+        
+      </div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    <script id="__config" type="application/json">{"base": "..", "features": [], "translations": {"clipboard.copy": "Copy to clipboard", "clipboard.copied": "Copied to clipboard", "search.config.lang": "en", "search.config.pipeline": "trimmer, stopWordFilter", "search.config.separator": "[\\s\\-]+", "search.placeholder": "Search", "search.result.placeholder": "Type to start searching", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.term.missing": "Missing", "select.version.title": "Select version"}, "search": "../assets/javascripts/workers/search.fcfe8b6d.min.js", "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.b1047164.min.js"></script>
+      
+    
+  </body>
+</html>
