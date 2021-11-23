@@ -357,6 +357,13 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.__init__" class="md-nav__link">
+    __init__()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#ticktack.CarbonBoxModel.add_edges" class="md-nav__link">
     add_edges()
   </a>
@@ -381,19 +388,6 @@
   <a href="#ticktack.CarbonBoxModel.define_growth_season" class="md-nav__link">
     define_growth_season()
   </a>
-  
-    <nav class="md-nav" aria-label="define_growth_season()">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#ticktack.CarbonBoxModel.define_growth_season--parameters" class="md-nav__link">
-    Parameters
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
@@ -569,6 +563,13 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#ticktack.CarbonBoxModel.__init__" class="md-nav__link">
+    __init__()
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#ticktack.CarbonBoxModel.add_edges" class="md-nav__link">
     add_edges()
   </a>
@@ -593,19 +594,6 @@
   <a href="#ticktack.CarbonBoxModel.define_growth_season" class="md-nav__link">
     define_growth_season()
   </a>
-  
-    <nav class="md-nav" aria-label="define_growth_season()">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#ticktack.CarbonBoxModel.define_growth_season--parameters" class="md-nav__link">
-    Parameters
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
   
 </li>
       
@@ -720,6 +708,36 @@
 
       <p>Carbon Box Model class which represents the box model which is made up of Box Objects and Flux Objects.</p>
 
+
+
+
+  <div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
+<h2 id="ticktack.CarbonBoxModel.__init__" class="doc doc-heading">
+<code class="highlight language-python"><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">production_rate_units</span><span class="o">=</span><span class="s1">&#39;kg/yr&#39;</span><span class="p">,</span> <span class="n">flow_rate_units</span><span class="o">=</span><span class="s1">&#39;Gt/yr&#39;</span><span class="p">)</span></code>
+
+  <span class="doc doc-properties">
+      <small class="doc doc-property doc-property-special"><code>special</code></small>
+  </span>
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Init method for creating an object of this class.</p>
+
 <p><strong>Parameters:</strong></p>
 <table>
   <thead>
@@ -735,27 +753,19 @@
         <td><code>production_rate_units</code></td>
         <td><code>str</code></td>
         <td><p>units for the production rate. Only valid units are 'kg/yr' or 'atoms/cm^2/s'.</p></td>
-        <td><em>required</em></td>
+        <td><code>&#39;kg/yr&#39;</code></td>
       </tr>
       <tr>
         <td><code>flow_rate_units</code></td>
         <td><code>str</code></td>
         <td><p>units for the flow rate. Only valid values are 'Gt/yr' or '1/yr'.</p></td>
-        <td><em>required</em></td>
+        <td><code>&#39;Gt/yr&#39;</code></td>
       </tr>
   </tbody>
 </table>
+    </div>
 
-
-
-  <div class="doc doc-children">
-
-
-
-
-
-
-
+  </div>
 
 
 
@@ -771,8 +781,8 @@
 
     <div class="doc doc-contents ">
 
-      <p>Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list</p>
-<p>are not an instance of Flow Class then it throws a ValueError.</p>
+      <p>Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list are</p>
+<p>not an instance of Flow Class then it throws a ValueError.</p>
 
 <p><strong>Parameters:</strong></p>
 <table>
@@ -928,12 +938,28 @@ along with which node is unbalanced.</p>
       <p>Creates the growth season kernel based on the name of the months provided. Months can be given in any order.</p>
 <p>Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth in
 a certain month.</p>
-<h4 id="ticktack.CarbonBoxModel.define_growth_season--parameters">Parameters</h4>
-<p>months : list
-    list of months in which growth occurs, the months must be in the following list: ['january',
-    'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
-    'december']</p>
 
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>months</code></td>
+        <td><code>list</code></td>
+        <td><p>list of months in which growth occurs, the months must be in the following list: ['january',
+'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
+'december']</p></td>
+        <td><em>required</em></td>
+      </tr>
+  </tbody>
+</table>
     </div>
 
   </div>
@@ -1136,8 +1162,8 @@ from node[i] to node[j].</p></td>
 
     <div class="doc doc-contents ">
 
-      <p>Getter method for the compiled fluxes in the units specified in the init_method. If the compile method</p>
-<p>has not been run, then it will return None.</p>
+      <p>Getter method for the compiled fluxes in the units specified in the init_method. If the compile method has</p>
+<p>not been run, then it will return None.</p>
 
 <p><strong>Returns:</strong></p>
 <table>
