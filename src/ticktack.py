@@ -348,7 +348,7 @@ class CarbonBoxModel:
         return corrected_fluxes
 
     def compile(self):
-        """  Method which compiles crucial parts of the model. If the model has not been compiled before then it
+        """ Method which compiles crucial parts of the model. If the model has not been compiled before then it
         compiles the following quantities:
         - 12C reservoir content of the nodes (in the order the nodes were added)
         - the fluxes (where fluxes at index (i,j) represents the flux from node[i] to node[j])
@@ -356,6 +356,7 @@ class CarbonBoxModel:
         - production coefficients of the nodes.
         - the corrected fluxes (fluxes in unit 'Gt/yr')
         - the matrix of the coefficients for the ODEINT to solve.
+
 
         It also detects if the incoming and outgoing fluxes at every node is balanced and if not then throws ValueError
         along with which node is unbalanced.
