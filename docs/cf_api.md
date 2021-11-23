@@ -5,11 +5,11 @@
     selection:
       members:
         - CarbonFitter
-        - load_data
-        - prepare_function
-        - sampling
-        - corner_plot
-        - plot_samples
+        - MarkovChainSampler
+        - NestedSampler
+        - chain_summary
+        - scatter_plot
+        - plot_multiple_chains
     rendering:
       show_root_heading: false
       show_source: false
