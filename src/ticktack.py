@@ -647,7 +647,7 @@ class CarbonBoxModel:
         states = jnp.pad(states[shifted_index * m:, :], ((0, shifted_index * m), (0, 0)))
 
         binned_data = (jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1]))\
-                       .sum(2).sum(0) / jnp.sum(tiled))[:-1, :]
+                       .sum(2).sum(0) / jnp.sum(tiled))[:-2, :]
 
         return binned_data, solution
 
