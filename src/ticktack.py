@@ -745,7 +745,7 @@ class CarbonBoxModel:
         a certain month.
 
          Parameters
-        ----------
+        -----------
         months : list
             list of months in which growth occurs, the months must be in the following list: ['january',
             'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',

@@ -21,7 +21,7 @@ from jaxns.utils import summary
 rcParams['figure.figsize'] = (16.0, 8.0)
 
 
-class CarbonFitter():
+class CarbonFitter:
     """
     Parent class of SingleFitter and MultiFitter. Does Monte Carlo sampling, plotting and more.
     """
