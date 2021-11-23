@@ -6,10 +6,10 @@ nav:
         - fitting-with-mcmc: notebooks/02_Fitting.ipynb
     - Box API Docs: box_api.md
     - Flow API Docs: flow_api.md
+    - CarbonBox API Docs: cbm_api.md
     - CarbonFitter API Docs: cf_api.md
     - SingleFitter API Docs: sf_api.md
     - MultiFitter API Docs: mf_api.md
-    - CarbonBox API Docs: cbm_api.md
 
 theme:
   name: "material"
@@ -23,6 +23,9 @@ plugins:
         python:
           selection:
             docstring_style: "numpy"
+          setup_commands:
+            - import sys
+            - sys.path.append("src")
           rendering:
             show_source: false
       custom_templates: templates
