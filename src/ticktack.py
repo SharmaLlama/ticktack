@@ -26,17 +26,17 @@ class Box:
 
     Parameters
     ----------
-    name
+    name : str
         name of the Box.
-    reservoir
+    reservoir : float
         reservoir content of the Box.
-    production_coefficient : (optional)
+    production_coefficient : float, optional
         production coefficient of the Box. Defaults to 0.
-    hemisphere : (optional)
+    hemisphere : str, optional
         hemisphere that this box is in. Defaults to None (i.e. this box is not part of an inter-hemispheric system).
     """
 
-    def __init__(self, name: str, reservoir: float, production_coefficient: float = 0.0, hemisphere: str = 'None'):
+    def __init__(self, name, reservoir, production_coefficient=0.0, hemisphere='None'):
         self._name = name
         self._reservoir = reservoir
         self._production = production_coefficient
@@ -52,7 +52,6 @@ class Box:
         -------
         str
             hemisphere the box is in.
-
         """
         return self._hemisphere
 
@@ -63,33 +62,30 @@ class Box:
         -------
         str
             name of the Box.
-
         """
         return self._name
 
-    def get_reservoir_content(self) -> float:
+    def get_reservoir_content(self):
         """ Getter method for the reservoir content of the Box Class.
 
         Returns
         -------
         float
             reservoir content of the box.
-
         """
         return self._reservoir
 
-    def get_production(self) -> float:
+    def get_production(self):
         """ Getter method for the production coefficient of the Box Class.
 
         Returns
         -------
          float
             production coefficient of the box.
-
         """
         return self._production
 
-    def __str__(self) -> str:
+    def __str__(self):
         """ Overrides the default string behaviour to display a user-friendly output.
 
         Returns
@@ -97,7 +93,6 @@ class Box:
         str
             string representation of the Box Object returned in the following form -
             name:reservoir size:production coefficient
-
         """
         return self._name + ":" + str(self._reservoir) + ":" + str(self._production)
 
@@ -107,22 +102,22 @@ class Flow:
 
     Parameters
     ----------
-    source
+    source : Box
         source of the flow.
-    destination
+    destination : Box
         destination the flow.
-    flux_rate
+    flux_rate : float
         flux rate between the source and the destination. Flux must be a non-negative value.
 
     """
 
-    def __init__(self, source: Box, destination: Box, flux_rate: float):
+    def __init__(self, source, destination, flux_rate):
         self._source = source
         self._destination = destination
         assert flux_rate >= 0
         self._flux = flux_rate
 
-    def get_source(self) -> Box:
+    def get_source(self):
         """ Getter method for the source node of the Flow Class.
 
         Returns
@@ -133,7 +128,7 @@ class Flow:
         """
         return self._source
 
-    def get_destination(self) -> Box:
+    def get_destination(self):
         """ Getter method for the destination node of the Flow Class.
 
         Returns
@@ -144,18 +139,17 @@ class Flow:
         """
         return self._destination
 
-    def get_flux(self) -> float:
+    def get_flux(self):
         """ Getter method for the flux rate of the Flow Class.
 
         Returns
         -------
         float
             flux of the flow object.
-
         """
         return self._flux
 
-    def __str__(self) -> str:
+    def __str__(self):
         """ Overrides the default string behaviour to display a user-friendly output.
 
         Returns
@@ -163,7 +157,6 @@ class Flow:
         str
             string representation of the Flow Object returned in the following form -
             str(source)-->str(destination):flux_value
-
         """
         return str(self._source) + " --> " + str(self._destination) + " : " + str(self._flux)
 
@@ -174,14 +167,13 @@ class CarbonBoxModel:
 
     Parameters
     ----------
-    production_rate_units
+    production_rate_units : str, optional
         units for the production rate. Only valid units are 'kg/yr' or 'atoms/cm^2/s'.
-    flow_rate_units
+    flow_rate_units : str, optional
         units for the flow rate. Only valid values are 'Gt/yr' or '1/yr'.
-
     """
 
-    def __init__(self, production_rate_units: str = 'kg/yr', flow_rate_units: str = 'Gt/yr'):
+    def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
         self._non_hemisphere_model = False
         self._nodes = {}
         self._reverse_nodes = {}
@@ -198,20 +190,19 @@ class CarbonBoxModel:
         self._matrix = None
         self._growth_kernel = jnp.array([1] * 12)
 
-    def add_nodes(self, nodes: list) -> None:
+    def add_nodes(self, nodes):
         """ Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list,
         then it is not added. If the node is not a Box Class Instance, then it raises a ValueError.
 
         Parameters
         ----------
-        nodes
+        nodes : list
             list of nodes of Type Box to add to the carbon box model.
 
         Raises
         ------
         ValueError
             If any of the objects in the list are not of type Box.
-
         """
         for node in nodes:
             if isinstance(node, Box):
@@ -225,38 +216,36 @@ class CarbonBoxModel:
             else:
                 raise ValueError("One/many of the input nodes are not of Box Class.")
 
-    def add_edges(self, flow_objs: list) -> None:
+    def add_edges(self, flow_objs):
         """ Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list
         are not an instance of Flow Class then it throws a ValueError.
 
         Parameters
         ----------
-        flow_objs
+        flow_objs : list
             list of Flow objects to add to the Carbon Box Model.
 
         Raises
         ------
         ValueError
             If any of the objects in the list are not of type Flow.
-
         """
         for flow_obj in flow_objs:
             if not isinstance(flow_obj, Flow):
                 raise ValueError("One/many of the input edge are not of Flow Class.")
             self._edges.append(flow_obj)
 
-    def get_edges(self) -> list:
+    def get_edges(self):
         """ Getter method for the name of edges.
 
         Returns
         -------
         list
             list of the edges (given in their string representations i.e. str(source) --> str(destination):flux_value).
-
         """
         return list(map(str, self._edges))
 
-    def get_edges_objects(self) -> list:
+    def get_edges_objects(self):
         """ Getter method for the edge objects themselves.
 
         Returns
@@ -267,7 +256,7 @@ class CarbonBoxModel:
         """
         return self._edges
 
-    def get_nodes(self) -> list:
+    def get_nodes(self):
         """ Getter method for the name of the nodes in the order they were added to the Carbon Box Model Object.
 
         Returns
@@ -278,18 +267,17 @@ class CarbonBoxModel:
         """
         return [self._nodes[j].get_name() for j in range(self._n_nodes)]
 
-    def get_nodes_objects(self) -> list:
+    def get_nodes_objects(self):
         """ Getter method for the node objects in the order they were inserted.
 
         Returns
         -------
         list
             list of the node objects in the order they were inserted.
-
         """
         return [self._nodes[j] for j in range(self._n_nodes)]
 
-    def get_fluxes(self) -> jax.numpy.array:
+    def get_fluxes(self):
         """ Getter method for the compiled fluxes in the units specified in the init_method. If the compile method
         has not been run, then it will return None.
 
@@ -301,7 +289,7 @@ class CarbonBoxModel:
         """
         return self._fluxes
 
-    def get_converted_fluxes(self) -> jax.numpy.array:
+    def get_converted_fluxes(self):
         """ Getter method for the fluxes when converted to 'Gt/yr' (this is the unit that the rest of the methods work
         in internally). This returns None if the compile method has not been run.
 
@@ -310,11 +298,10 @@ class CarbonBoxModel:
         jax.numpy.array
             2D jax numpy array which contains the unit-corrected fluxes where index (i,j) indicates the 'Gt/yr' flux
             from node[i] to node[j].
-
         """
         return self._corrected_fluxes
 
-    def get_reservoir_contents(self) -> jax.numpy.array:
+    def get_reservoir_contents(self):
         """ Getter method for the 12C reservoir content of the nodes (Boxes).. Returns None if the compile method has
         not been called.
 
@@ -322,11 +309,10 @@ class CarbonBoxModel:
         -------
         jax.numpy.array
             jax numpy array containing the reservoir content of the nodes (returned in the order the nodes were added).
-
         """
         return self._reservoir_content
 
-    def get_production_coefficients(self) -> jax.numpy.array:
+    def get_production_coefficients(self):
         """ Getter method for the normalised production coefficients of the nodes (Boxes). Returns None if compile method
         has not been called.
 
@@ -341,12 +327,6 @@ class CarbonBoxModel:
 
     @partial(jit, static_argnums=0)
     def _convert_production_rate(self, production_rate):
-        # """
-        # internal method to convert the production rate from 'atoms/cm^2/s' to 'kg/yr' (or leave it as 'kg/yr' if that
-        # is what the model specified).
-        #
-        # :return: the converted production rate.
-        # """
         if self._production_rate_units == 'atoms/cm^2/s':
             new_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536. / 1.e5
         elif self._production_rate_units == 'kg/yr':
@@ -356,13 +336,6 @@ class CarbonBoxModel:
         return new_rate
 
     def _convert_flux_rate(self, fluxes):
-        #
-        # """
-        # internal method to convert the flux rate from '1/yr' to 'Gt/yr' (or leave it as 'Gt/yr' if that
-        # is what the model specified).
-        #
-        # :return: the converted flux rate.
-        # """
         if self._flow_rate_units == 'Gt/yr':
             corrected_fluxes = self._fluxes
         elif self._flow_rate_units == '1/yr':
@@ -372,7 +345,7 @@ class CarbonBoxModel:
             raise ValueError('Flow rate units must be either Gt/yr or 1/yr!')
         return corrected_fluxes
 
-    def compile(self) -> None:
+    def compile(self):
         """  Method which compiles crucial parts of the model. If the model has not been compiled before then it
         compiles the following quantities:
         - 12C reservoir content of the nodes (in the order the nodes were added)
@@ -389,7 +362,6 @@ class CarbonBoxModel:
         ------
         ValueError
             If the incoming flux and outgoing flux at every Box is not balanced.
-
         """
 
         if self._fluxes is None:
@@ -398,10 +370,9 @@ class CarbonBoxModel:
                 [[self._nodes[j].get_reservoir_content() for j in range(self._n_nodes)]])
             self._fluxes = jnp.zeros((self._n_nodes, self._n_nodes))
             for flow in self._edges:
-                self._fluxes = jax.ops.index_update(self._fluxes,
-                                                    jax.ops.index[self._reverse_nodes[flow.get_source()],
-                                                                  self._reverse_nodes[flow.get_destination()]],
-                                                    flow.get_flux())
+                self._fluxes = self._fluxes.at[jax.ops.index[self._reverse_nodes[flow.get_source()],
+                                                             self._reverse_nodes[flow.get_destination()]]].set(
+                    flow.get_flux())
 
             self._decay_matrix = jnp.diag(jnp.array([self._decay_constant] * self._n_nodes))
             self._production_coefficients = jnp.array([self._nodes[j].get_production() for j in range(self._n_nodes)])
@@ -426,27 +397,11 @@ class CarbonBoxModel:
                                          '"north" or "south"')
 
     def _equilibrate_brehm(self, production_rate):
-        # """
-        # Internal method which equilibrates the system with respect to a given production rate.
-        #
-        # :param production_rate: production rate with which to equilibrate to.
-        #
-        # :return: 14C reservoir contents of the nodes at the given production rate.
-        # """
         production_rate = self._convert_production_rate(production_rate)
         solution = jnp.linalg.solve(self._matrix, -1 * self._production_coefficients * production_rate)
         return solution
 
     def _equilibrate_guttler(self, target_C_14):
-        # """
-        # internal method which determines the production rate so that the tropospheric content is as close to
-        # target_C_14 as possible.
-        #
-        # :param target_C_14: target 14C content with which to equilibrate.
-        #
-        # :return: production rate which minimises the difference between the target_C_14 and the tropospheric 14C at the
-        # specified production rate.
-        # """
         troposphere_index = None
         for index, node in self._nodes.items():
             if node.get_name() == 'Troposphere':
@@ -457,15 +412,17 @@ class CarbonBoxModel:
 
         @jit
         def objective_function(production_rate):
-            """
+            """ Function which calculates the difference between the current tropospheric C14 content and the target
+            tropospheric C14 content.
 
             Parameters
             ----------
-            production_rate
+            production_rate : float
 
             Returns
             -------
-
+            float
+                The difference between the target and the equilibrium production.
             """
             equilibrium = self._equilibrate_brehm(production_rate)
             return (equilibrium[troposphere_index] - target_C_14) ** 2
@@ -475,32 +432,33 @@ class CarbonBoxModel:
                                                         jac=grad_obj)
         return final_production_rate.x[0]
 
-    def equilibrate(self, target_C_14: float = None, production_rate: float = None) -> Union[list, float]:
+    def equilibrate(self, target_C_14=None, production_rate=None):
         """  External equilibrate method which determines the appropriate result to return given a parameter. If
         neither parameter is given then it throws a ValueError. If both are specified, then it treats production_rate
         as None.
 
         Parameters
         ----------
-        target_C_14
+        target_C_14 : float
+            target C14 with which to equilibrate with. Defaults to None.
             
-        production_rate
+        production_rate : float
+            production rate with which to equilibrate to. Defaults to None.
 
         Returns
         -------
         float
-            if the target_C_14 is not None then
+            the initial production rate if the target C14 is specified.
+
+        List
+            C14 reservoir content of all the boxes if the production_rate is specified.
+
+        Raises
+        ------
+        ValueError
+            If the both arguments are specified as None.
 
         """
-        """
-       
-
-        :param target_C_14: 
-        :param production_rate: production rate with which to equilibrate to.
-
-        :return: either the 14C reservoir contents or the production rate (depends on argument passed in).
-        """
-
         if target_C_14 is not None:
             return self._equilibrate_guttler(target_C_14)
 
@@ -511,20 +469,44 @@ class CarbonBoxModel:
             raise ValueError("Must give either target C-14 or production rate.")
 
     def run(self, time_values, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
-        """
+        """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
+        model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
+        if the compile() method has not been executed first.
 
         Parameters
         ----------
-        time_values
-        production
-        y0
-        args
-        target_C_14
-        steady_state_production
+        time_values : list
+            the time values at which to calculate the content of all the boxes.
+
+        production : callable
+            the production function which determines the contents of the boxes.
+
+        y0 : list, optional
+            the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
+            of boxes.
+
+        args : tuple, optional
+            optional arguments to pass into the production function.
+
+        steady_state_production : int, optional
+            the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
+            specified, this parameter is ignored.
+
+        target_C_14 : int, optional
+            target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
+             specified, this parameter is ignored.
 
         Returns
         -------
+        Union[list, list]
+            The value of each box in the carbon box at the specified time_values along with the steady state solution
+            for the system.
 
+        Raises
+        ------
+        ValueError
+            If neither the target C-14 nor production rate is specified.
+            If the production is not a callable function.
         """
 
         @jit
@@ -612,60 +594,118 @@ class CarbonBoxModel:
 
     def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                 steady_state_production=None):
-        """
+        """ Method which bins the C14 content of all the boxes according to Schulman's convention for radiocarbon dating
+        ......TO BE CONTINUED....
 
         Parameters
         ----------
-        time_out
-        time_oversample
-        production
-        y0
-        args
-        target_C_14
-        steady_state_production
+        time_out : list[int]
+            the values at which to bin the box contents. Must be whole year intervals otherwise method will not work.
+
+        time_oversample : int
+            number of times to sample over time. This is the total number of samples for entire time output.
+
+        production : callable
+            the production function which determines the contents of the boxes.
+
+        y0 : list, optional
+            the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
+            of boxes.
+
+        args : tuple, optional
+            optional arguments to pass into the production function.
+
+        steady_state_production : int, optional
+            the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
+            specified, this parameter is ignored.
+
+        target_C_14 : int, optional
+            target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
+             specified, this parameter is ignored.
 
         Returns
         -------
-
+        Union[list, list]
+            The binned contents of each box in the carbon box at the specified time_values along with the steady state
+            solution for the system.
         """
-        # time_out = jnp.array(time_out)
-        # # time_step = time_out[1] - time_out[0]
-        # t = jnp.linspace(jnp.min(time_out), jnp.max(time_out), (time_out.shape[0] - 1) * time_oversample)
-        # states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
-        #                             steady_state_production=steady_state_production)
-        # m = int(1 / time_step * time_oversample // 12)
-        # tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1,  int(time_oversample / time_step)))
-        # num = int(time_oversample // (time_step * 12) * 12)
-        # tiled = jax.ops.index_update(tiled, jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), 0)
-        # tiled_full = jnp.resize(jnp.tile(tiled, (states.shape[1], int((time_out.shape[0] - 1) * time_step))),
-        #                         (states.shape[1], states.shape[0]))
-        # # print(tiled_full.shape)
-        # # print(states)
-        # states = jnp.transpose(tiled_full) * states
-        # # print(jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])).sum(2))
-        # binned_data = jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
-        #                   .sum(2).sum(0) / jnp.sum(tiled) / time_step
-
         time_out = jnp.array(time_out)
-        t = jnp.linspace(jnp.min(time_out), jnp.max(time_out), (time_out.shape[0] - 1) * time_oversample)
+        t = jnp.linspace(jnp.min(time_out), jnp.max(time_out) + 2, (time_out.shape[0] + 1) * time_oversample)
         states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
                                     steady_state_production=steady_state_production)
         m = time_oversample // 12
         tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1, time_oversample))
-        num = int((time_oversample // 12) * 12)
-        # tiled = jax.ops.index_update(tiled, jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), 0)
-        tiled = jnp.where(jnp.array([[False] * num + [True] * (tiled.shape[1] - num)]), tiled, 0)
+        if jnp.sum(self._growth_kernel) == 12:
+            shifted_index = 0
+        else:
+            shifted_index = (jnp.where(jnp.roll(self._growth_kernel, 1) == 1)[0][0] - 1) % 12
+
         tiled_full = jnp.resize(jnp.tile(tiled, (states.shape[1], int(time_out.shape[0] - 1))),
                                 (states.shape[1], states.shape[0]))
-        states = jnp.transpose(tiled_full) * states
-        binned_data = jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1])) \
-                          .sum(2).sum(0) / jnp.sum(tiled)
+        states = jnp.multiply(jnp.transpose(tiled_full), states)
+        states = jnp.pad(states[shifted_index * m:, :], ((0, shifted_index * m), (0, 0)))
+
+        binned_data = (jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1]))\
+                       .sum(2).sum(0) / jnp.sum(tiled))[:-1, :]
 
         return binned_data, solution
 
     def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
                           steady_state_production=None, steady_state_solutions=None, box='Troposphere',
                           hemisphere='north'):
+
+        """ Method which calculates the d14c values of the specified box. Calls the run_bin function to determine
+        the binned box contents.
+
+        Parameters
+        ----------
+        time_out : list[int]
+            the values at which to bin the box contents. Must be whole year intervals otherwise method will not work.
+
+        time_oversample : int
+            number of times to sample over time. This is the total number of samples for entire time output.
+
+        production : callable
+            the production function which determines the contents of the boxes.
+
+        y0 : list, optional
+            the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
+            of boxes.
+
+        args : tuple, optional
+            optional arguments to pass into the production function.
+
+        steady_state_production : int, optional
+            the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
+            specified, this parameter is ignored.
+
+        target_C_14 : int, optional
+            target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
+             specified, this parameter is ignored.
+
+        steady_state_solutions : list, optional
+            the solutions for the steady state, if it is different to the steady state solution calculated based on the
+            y0, steady_state_production or target_C_14 parameters into the run function.
+
+        box : str, optional
+            the specific box at which to calculate the d14c. Defaults to troposphere as that is the most common use.
+
+        hemisphere : str, optional
+            If the carbon box model is hemispheric, then the hemisphere can be specified to determine the d14c in either
+            the northern or the southern box. Defaults to North but this is parameter is ignored if the carbon box model
+            is non-hemispheric.
+
+        Returns
+        -------
+        list
+            the binned d14c data of the specified box.
+
+        Raises
+        ------
+        ValueError
+            If there is no valid box in the carbon box model that can be used to calculate the d14c for according to the
+            specified box parameters.
+        """
 
         time_out = jnp.array(time_out)
         data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
@@ -695,44 +735,45 @@ class CarbonBoxModel:
                         break
 
         if box_steady_state is None:
-            raise ValueError('there is currently no valid node to calculate d_14_c!')
+            raise ValueError('there is currently no valid box to calculate d_14_c!')
         return d_14_c
 
     def define_growth_season(self, months):
-        """
-        creates the growth season kernel based on the name of the months provided. Months can be given in any order.
-        Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth.
+        """ Creates the growth season kernel based on the name of the months provided. Months can be given in any order.
+        Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth in
+        a certain month.
 
-        :param months: list of months in which growth occurs, the months must be in the following list: ['january',
-        'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'].
+         Parameters
+        ----------
+        months : list
+            list of months in which growth occurs, the months must be in the following list: ['january',
+            'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
+            'december']
         """
+
         month_list = np.array(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september',
                                'october', 'november', 'december'])
         months = np.array(months)
-        self._growth_kernel = jax.ops.index_update(self._growth_kernel, np.in1d(month_list, months,
-                                                                                invert=True), 0)
+        self._growth_kernel = jnp.array([1] * 12)
+        self._growth_kernel = self._growth_kernel.at[np.in1d(month_list, months, invert=True)].set(0)
 
 
 def save_model(carbon_box_model, filename):
-    """
+    """ Saves the Carbon Box Model in a hd5 format with the specified filename. If the first parameter is not of Type
+    CarbonBoxModel, then it throws a ValueError.
 
     Parameters
     ----------
-    carbon_box_model
-    filename
+    carbon_box_model : CarbonBoxModel
+        the model to save.
 
-    Returns
-    -------
+    filename : str
+        file name and location where Carbon Box Model needs to be saved. Must have a a '.hd5' at end of filename.
 
-    """
-    """
-    saves the Carbon Box Model in a hd5 format with the specified filename. If the first parameter is not of Type
-    CarbonBoxModel, then it throws a ValueError.
-
-    :param carbon_box_model: model to save, which is an instance of the CarbonBoxModel Class.
-    :param filename: file name where Carbon Box Model needs to be saved. Must have a a '.hd5' at end of filename.
-
-
+    Raises
+    ------
+    ValueError
+        If the first parameter is not of type CarbonBoxModel.
     """
     file = h5py.File(filename, 'a')
     file.clear()  # overwrites if it already exists
@@ -750,16 +791,31 @@ def save_model(carbon_box_model, filename):
 
 
 def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    """
-    Loads the saved Carbon Box Model from the relevant filename. Units for both production rate and flow rate can be
+    """ Loads the saved Carbon Box Model from the relevant filename. Units for both production rate and flow rate can be
     specified as parameters. filename must be specified with the .hd5 extension.
 
-    :param filename: the name of the file where the Carbon Box Model is saved.
-    :param production_rate_units: production rate units that of the model. Can be either 'kg/yr' or 'atoms/cm^2/s'.
-    :param flow_rate_units: flow rate units of the model. Can be either 'Gt/yr' or '1/yr'.
+    Parameters
+    ----------
+    filename : str
+        the name and location (in one string) of the file where the Carbon Box Model is saved.
 
-    :return: Carbon Box Model which is generated from the file.
+    production_rate_units : str, optional
+        the production rate of the model to be loaded. Defaults to 'kg/yr'.
+
+    flow_rate_units : str, optional
+        the production rate of the model to be loaded. Defaults to 'Gt/yr'.
+
+    Returns
+    -------
+    CarbonBoxModel
+        Carbon Box Model which is generated from the file.
+
+    Raises
+    ------
+    ValueError
+        If the flow rate units are not either 'Gt/yr' or '1/yr'.
     """
+
     file = h5py.File(filename, 'r')
     metadata = dict(hdfdict.load(file))
     nodes = metadata['nodes']
@@ -791,16 +847,30 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
 
 
 def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
-    """
-    loads a pre-saved, commonly used model based on the research papers linked below. The model must be one of the
+    """ Loads a pre-saved, commonly used model based on the research papers linked below. The model must be one of the
     following: Miyake17, Brehm21, Guttler14, Buntgen18. Loads the model based on the the units for production rate
     and flow rate specified.
 
-    :param model: model to load.
-    :param production_rate_units: production rate units that of the model. Can be either 'kg/yr' or 'atoms/cm^2/s'.
-    :param flow_rate_units: flow rate units of the model. Can be either 'Gt/yr' or '1/yr'.
+    Parameters
+    ----------
+    model : str
+        the name of the model to load. Must be one in [Miyake17, Brehm21, Guttler14, Buntgen18].
 
-    :return: Carbon Box Model which is generated from the pre-saved file.
+    production_rate_units : str, optional
+        the production rate of the model to be loaded. Defaults to 'kg/yr'.
+
+    flow_rate_units : str, optional
+        the production rate of the model to be loaded. Defaults to 'Gt/yr'.
+
+    Returns
+    -------
+    CarbonBoxModel
+        Carbon Box Model which is generated from the pre-saved file.
+
+    Raises
+    ------
+    ValueError
+        If the specified model parameter is not in the required list.
     """
     if model in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
         file = 'data/' + model + '.hd5'
@@ -809,3 +879,80 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
         return carbonmodel
     else:
         raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyake17, Buntgen18')
+
+
+
+
+
+
+cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
+# cbm.define_growth_season(['april', 'may', 'june', 'july', 'august', 'september'])
+cbm.compile()
+import matplotlib.pyplot as plt
+
+start = 760
+resolution = 1000
+burn_in_time = np.linspace(760 - 1000, 760, resolution)
+steady_state_burn_in = cbm.equilibrate(target_C_14=707)
+burn_in_solutions = cbm.equilibrate(production_rate=steady_state_burn_in)
+d_14_time_series_fine = np.linspace(760, 788, 2700)
+d_14_time_series_coarse = np.arange(760, 788)
+
+
+def sg(t, start_time, duration, area):
+    middle = start_time + duration / 2.
+    height = area / duration
+    return height * jnp.exp(- ((t - middle) / (1. / 1.88349 * duration)) ** 8.)
+
+
+def miyake_event(t, start_time, duration, phase, area):
+    height = sg(t, start_time, duration, area)
+    prod = steady_state_burn_in + 0.18 * steady_state_burn_in * jnp.sin(2 * np.pi / 11 * t + phase) + height
+    return prod
+
+
+burn_in, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                     y0=burn_in_solutions)
+prod = miyake_event(d_14_time_series_fine, 775, 1 / 12, np.pi / 2, 81 / 12)
+
+event, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                   y0=burn_in[-1, :])
+d_14_c = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
+                               args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                               y0=burn_in[-1, :], steady_state_solutions=burn_in_solutions)
+
+cbm.define_growth_season(['october', 'november', 'december', 'january', 'february', 'march'])
+# cbm.compile()
+
+burn_in2, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                      y0=burn_in_solutions)
+
+event2, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                    y0=burn_in2[-1, :])
+d_14_c2 = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
+                                args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                                y0=burn_in2[-1, :], steady_state_solutions=burn_in_solutions)
+
+vals = [-21.63, -22.28, -22.64, -23.83, -22.20, -22.99, -20.73, -21.59, -25.32, -25.6, -25.70, -24.00, -23.73,
+        -21.91, -23.44, -9.335, -6.46, -9.70, -11.17, -10.31, -11.10, -10.72, -10.67, -8.63, -9.68, -9.31,
+        -12.33, -14.44]
+
+val2 = [-22.20, -22.99, -20.73, -21.59, -25.32, -26.46, -24.74, -25.70, -24.00, -23.73,
+        -21.91, -23.44, -11.62]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.0, 6.0))
+ax1.plot(d_14_time_series_fine, event[:, 1], 'ro')
+ax1.plot(d_14_time_series_fine, event2[:, 1], 'bo')
+# ax1.plot(d_14_time_series_coarse, d_14_c, 'ro')
+# ax1.plot(d_14_time_series_coarse, vals, 'ro')
+# ax1.plot(d_14_time_series_coarse, d_14_c2 - 22.64846153846154, 'bo')
+ax1.legend(["Guttler Data", "nothern hemisphere"])
+ax2.plot(d_14_time_series_fine, prod)
+ax1.set_xlim(770, 777)
+plt.axvline(775)
+plt.axvline(775 + 1 / 12)
+# ax2.set_ylim(0,5)
+
+plt.ticklabel_format(useOffset=False)
+
+plt.show()
