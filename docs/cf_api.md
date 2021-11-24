@@ -8,7 +8,7 @@
         - MarkovChainSampler
         - NestedSampler
         - chain_summary
-        - scatter_plot
+        - correlation_plot
         - plot_multiple_chains
     rendering:
       show_root_heading: false
