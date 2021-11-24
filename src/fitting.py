@@ -26,7 +26,7 @@ class CarbonFitter:
     Parent class of SingleFitter and MultiFitter. Does Monte Carlo sampling, plotting and more.
     """
 
-    def MarkovChainSampler(self, params, likelihood, burnin=500, production=1000, k=2):
+    def MarkovChainSampler(self, params, likelihood, burnin=500, production=1000, k=2, args=()):
         """
         Runs an affine-invariant MCMC sampler on an array of initial parameters, subject to some likelihood function.
 
@@ -52,7 +52,7 @@ class CarbonFitter:
         """
         initial = params
         ndim, nwalkers = len(initial), k * len(initial)
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood)
+        sampler = emcee.EnsembleSampler(nwalkers, ndim, likelihood, args=args)
 
         print("Running burn-in...")
         p0 = initial + 1e-5 * np.random.rand(nwalkers, ndim)
@@ -554,7 +554,7 @@ class SingleFitter(CarbonFitter):
         return d_14_c + self.offset
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_simple_sinusoid(self, params=()):
+    def log_prior_simple_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log prior likelihood of parameters of simple sinusoid model
 
@@ -562,6 +562,10 @@ class SingleFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of simple sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
@@ -569,14 +573,14 @@ class SingleFitter(CarbonFitter):
             log prior likelihood
         """
         lp = 0
-        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
-        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
-        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
-        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
+        lp += ((params[0] < low_bounds[0]) | (params[0] > high_bounds[0])) * -jnp.inf
+        lp += ((params[1] < low_bounds[1]) | (params[1] > high_bounds[1])) * -jnp.inf
+        lp += ((params[2] < low_bounds[2]) | (params[2] > high_bounds[2])) * -jnp.inf
+        lp += ((params[3] < low_bounds[3]) | (params[3] > high_bounds[3])) * -jnp.inf
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_flexible_sinusoid(self, params=()):
+    def log_prior_flexible_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log prior likelihood of parameters of flexible sinusoid model
 
@@ -584,6 +588,10 @@ class SingleFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of flexible sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
@@ -591,11 +599,11 @@ class SingleFitter(CarbonFitter):
             log prior likelihood
         """
         lp = 0
-        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
-        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
-        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
-        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
-        lp += ((params[4] < 0.) | (params[4] > 2)) * -jnp.inf
+        lp += ((params[0] < low_bounds[0]) | (params[0] > high_bounds[0])) * -jnp.inf
+        lp += ((params[1] < low_bounds[1]) | (params[1] > high_bounds[1])) * -jnp.inf
+        lp += ((params[2] < low_bounds[2]) | (params[2] > high_bounds[2])) * -jnp.inf
+        lp += ((params[3] < low_bounds[3]) | (params[3] > high_bounds[3])) * -jnp.inf
+        lp += ((params[4] < low_bounds[4]) | (params[4] > high_bounds[4])) * -jnp.inf
         return lp
 
     @partial(jit, static_argnums=(0,))
@@ -635,7 +643,7 @@ class SingleFitter(CarbonFitter):
         return -1 * self.log_likelihood(params=params)
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_simple_sinusoid(self, params=()):
+    def log_joint_simple_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log joint likelihood of parameters of simple sinusoid model
 
@@ -643,18 +651,22 @@ class SingleFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of simple sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
         float
             Log joint likelihood
         """
-        lp = self.log_prior_simple_sinusoid(params=params)
+        lp = self.log_prior_simple_sinusoid(params, low_bounds, high_bounds)
         pos = self.log_likelihood(params=params)
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_flexible_sinusoid(self, params=()):
+    def log_joint_flexible_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log joint likelihood of parameters of flexible sinusoid model
 
@@ -662,13 +674,17 @@ class SingleFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of flexible sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
         float
             Log joint likelihood
         """
-        lp = self.log_prior_flexible_sinusoid(params=params)
+        lp = self.log_prior_flexible_sinusoid(params, low_bounds, high_bounds)
         pos = self.log_likelihood(params=params)
         return lp + pos
 
@@ -929,7 +945,7 @@ class MultiFitter(CarbonFitter):
         return like
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_simple_sinusoid(self, params=()):
+    def log_prior_simple_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log prior likelihood of parameters of simple sinusoid model
 
@@ -937,6 +953,10 @@ class MultiFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of simple sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
@@ -944,14 +964,14 @@ class MultiFitter(CarbonFitter):
             log prior likelihood
         """
         lp = 0
-        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
-        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
-        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
-        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
+        lp += ((params[0] < low_bounds[0]) | (params[0] > high_bounds[0])) * -jnp.inf
+        lp += ((params[1] < low_bounds[1]) | (params[1] > high_bounds[1])) * -jnp.inf
+        lp += ((params[2] < low_bounds[2]) | (params[2] > high_bounds[2])) * -jnp.inf
+        lp += ((params[3] < low_bounds[3]) | (params[3] > high_bounds[3])) * -jnp.inf
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_flexible_sinusoid(self, params=()):
+    def log_prior_flexible_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log prior likelihood of parameters of flexible sinusoid model
 
@@ -959,6 +979,10 @@ class MultiFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of flexible sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
@@ -966,15 +990,15 @@ class MultiFitter(CarbonFitter):
             log prior likelihood
         """
         lp = 0
-        lp += ((params[0] < 770.) | (params[0] > 780.)) * -jnp.inf
-        lp += ((params[1] < 0.) | (params[1] > 5.)) * -jnp.inf
-        lp += ((params[2] < -jnp.pi) | (params[2] > jnp.pi)) * -jnp.inf
-        lp += ((params[3] < 0.) | (params[3] > 15.)) * -jnp.inf
-        lp += ((params[4] < 0.) | (params[4] > 2)) * -jnp.inf
+        lp += ((params[0] < low_bounds[0]) | (params[0] > high_bounds[0])) * -jnp.inf
+        lp += ((params[1] < low_bounds[1]) | (params[1] > high_bounds[1])) * -jnp.inf
+        lp += ((params[2] < low_bounds[2]) | (params[2] > high_bounds[2])) * -jnp.inf
+        lp += ((params[3] < low_bounds[3]) | (params[3] > high_bounds[3])) * -jnp.inf
+        lp += ((params[4] < low_bounds[4]) | (params[4] > high_bounds[4])) * -jnp.inf
         return lp
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_simple_sinusoid(self, params=()):
+    def log_joint_simple_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log joint likelihood of parameters of simple sinusoid model
 
@@ -982,18 +1006,22 @@ class MultiFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of simple sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
         float
             Log joint likelihood
         """
-        lp = self.log_prior_simple_sinusoid(params=params)
+        lp = self.log_prior_simple_sinusoid(params, low_bounds, high_bounds)
         pos = self.multi_likelihood(params=params)
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_flexible_sinusoid(self, params=()):
+    def log_joint_flexible_sinusoid(self, params, low_bounds, high_bounds):
         """
         Computes the log joint likelihood of parameters of flexible sinusoid model
 
@@ -1001,13 +1029,17 @@ class MultiFitter(CarbonFitter):
         ----------
         params : ndarray
             Parameters of flexible sinusoid model
+        low_bounds : ndarray
+            Lower bounds for 'params'
+        high_bounds : ndarray
+            Upper bounds for 'params'
 
         Returns
         -------
         float
             Log joint likelihood
         """
-        lp = self.log_prior_flexible_sinusoid(params=params)
+        lp = self.log_prior_flexible_sinusoid(params, low_bounds, high_bounds)
         pos = self.multi_likelihood(params=params)
         return lp + pos
 
