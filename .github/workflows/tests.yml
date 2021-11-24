@@ -23,6 +23,7 @@ jobs:
             python -m pip install --upgrade pip
             pip install pytest
             pip install -r requirements.txt
+            sudo apt-get install texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended dvipng cm-super
               
         - run:
             python setup.py install
