@@ -147,12 +147,12 @@ def test_dc14(SingleFitter_creation):
     c = SingleFitter_creation.dc14(params=jnp.ones(SingleFitter_creation.control_points_time.size))
     assert jnp.all(
         jnp.array([
-            jnp.allclose(a, [1.53796943, 1.50055152, 0.97640999, 0.13198755, -0.7645682,
-                             -1.42855475, -1.64912179, -1.35622635, -0.64287515]),
-            jnp.allclose(b, [1.53796943, 1.50055152, 0.97640999, 0.13198755, -0.7645682,
-                             -1.42855475, -1.64912179, -1.35622635, -0.64287515]),
-            jnp.allclose(c, [-125.53269265, -125.56971761, -125.62058337, -125.67101689,
-                             -125.72267541, -125.77372637, -125.82646874, -125.87120292, -125.96980777])
+            jnp.allclose(a, jnp.array([1.53796943, 1.50055152, 0.97640999, 0.13198755, -0.7645682,
+                             -1.42855475, -1.64912179, -1.35622635, -0.64287515])),
+            jnp.allclose(b, jnp.array([1.53796943, 1.50055152, 0.97640999, 0.13198755, -0.7645682,
+                             -1.42855475, -1.64912179, -1.35622635, -0.64287515])),
+            jnp.allclose(c, jnp.array([-125.53269265, -125.56971761, -125.62058337, -125.67101689,
+                             -125.72267541, -125.77372637, -125.82646874, -125.87120292, -125.96980777]))
         ])
     )
 
@@ -165,12 +165,12 @@ def test_dc14_fine(SingleFitter_creation):
     c = SingleFitter_creation.dc14_fine(params=jnp.ones(SingleFitter_creation.control_points_time.size))[-9:]
     assert jnp.all(
         jnp.array([
-            jnp.allclose(a, [0.95999231, 1.00453728, 1.04784445, 1.08986208, 1.13054003,
-                             1.16982976, 1.20768432, 1.24405849, 1.27890888]),
-            jnp.allclose(b, [0.95999231, 1.00453728, 1.04784445, 1.08986208, 1.13054003,
-                             1.16982976, 1.20768432, 1.24405849, 1.27890888]),
-            jnp.allclose(c, [-127.53537869, -127.62682645, -127.72037002, -127.81595568,
-                             -127.91352902, -128.01303496, -128.11441803, -128.21762246, -128.32259232])
+            jnp.allclose(a, jnp.array([0.95999231, 1.00453728, 1.04784445, 1.08986208, 1.13054003,
+                             1.16982976, 1.20768432, 1.24405849, 1.27890888])),
+            jnp.allclose(b, jnp.array([0.95999231, 1.00453728, 1.04784445, 1.08986208, 1.13054003,
+                             1.16982976, 1.20768432, 1.24405849, 1.27890888])),
+            jnp.allclose(c, jnp.array([-127.53537869, -127.62682645, -127.72037002, -127.81595568,
+                             -127.91352902, -128.01303496, -128.11441803, -128.21762246, -128.32259232]))
         ])
     )
 
@@ -222,8 +222,8 @@ def test_log_joint_gp(SingleFitter_creation):
 def test_neg_grad_log_joint_gp(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
     out = SingleFitter_creation.neg_grad_log_joint_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
-    assert jnp.allclose(out, [39097.58324264, 579.20894195, 428.80250487, 368.67443377, 297.74144928, 238.13667954,
-                              178.53660702, 113.40072485, 55.81188067])
+    assert jnp.allclose(out, jnp.array([39097.58324264, 579.20894195, 428.80250487, 368.67443377, 297.74144928, 238.13667954,
+                              178.53660702, 113.40072485, 55.81188067]))
 
 def test_fit_ControlPoints(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
