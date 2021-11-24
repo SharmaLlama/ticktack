@@ -1830,7 +1830,7 @@ all data points</p></td>
 
 
 <h2 id="fitting.SingleFitter.plot_recovery" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">plot_recovery</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">time_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">true_production</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+<code class="highlight language-python"><span class="n">plot_recovery</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">time_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">true_production</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.2</span><span class="p">)</span></code>
 
 
 </h2>
@@ -1869,6 +1869,18 @@ all data points</p></td>
         <td><p>True production rates on 'time_data'</p></td>
         <td><code>None</code></td>
       </tr>
+      <tr>
+        <td><code>size</code></td>
+        <td><code>int</code></td>
+        <td><p>The number of samples randomly chosen from 'chain'</p></td>
+        <td><code>100</code></td>
+      </tr>
+      <tr>
+        <td><code>alpha</code></td>
+        <td><code>float</code></td>
+        <td><p>Parameter for blending, between 0-1.</p></td>
+        <td><code>0.2</code></td>
+      </tr>
   </tbody>
 </table>
 <p><strong>Returns:</strong></p>
@@ -1897,7 +1909,7 @@ all data points</p></td>
 
 
 <h2 id="fitting.SingleFitter.plot_samples" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">plot_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">nwalkers</span><span class="p">)</span></code>
+<code class="highlight language-python"><span class="n">plot_samples</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chain</span><span class="p">,</span> <span class="n">nwalkers</span><span class="p">,</span> <span class="n">size</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.2</span><span class="p">)</span></code>
 
 
 </h2>
@@ -1929,6 +1941,18 @@ all data points</p></td>
         <td><code>int</code></td>
         <td><p>Number of walkers of 'chain'</p></td>
         <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>size</code></td>
+        <td><code>int</code></td>
+        <td><p>The number of samples randomly chosen from 'chain'</p></td>
+        <td><code>100</code></td>
+      </tr>
+      <tr>
+        <td><code>alpha</code></td>
+        <td><code>float</code></td>
+        <td><p>Parameter for blending, between 0-1.</p></td>
+        <td><code>0.2</code></td>
       </tr>
   </tbody>
 </table>

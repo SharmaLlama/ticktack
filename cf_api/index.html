@@ -393,15 +393,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
-    plot_multiple_chains()
+  <a href="#fitting.CarbonFitter.correlation_plot" class="md-nav__link">
+    correlation_plot()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#fitting.CarbonFitter.scatter_plot" class="md-nav__link">
-    scatter_plot()
+  <a href="#fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
+    plot_multiple_chains()
   </a>
   
 </li>
@@ -500,15 +500,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
-    plot_multiple_chains()
+  <a href="#fitting.CarbonFitter.correlation_plot" class="md-nav__link">
+    correlation_plot()
   </a>
   
 </li>
       
         <li class="md-nav__item">
-  <a href="#fitting.CarbonFitter.scatter_plot" class="md-nav__link">
-    scatter_plot()
+  <a href="#fitting.CarbonFitter.plot_multiple_chains" class="md-nav__link">
+    plot_multiple_chains()
   </a>
   
 </li>
@@ -793,6 +793,72 @@ nwalkers = k * dim(params)
 
 
 
+<h2 id="fitting.CarbonFitter.correlation_plot" class="doc doc-heading">
+<code class="highlight language-python"><span class="n">correlation_plot</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">array</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">square_size</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span></code>
+
+
+</h2>
+
+    <div class="doc doc-contents ">
+
+      <p>Makes an accessible heatmap for visualizing correlation/covariance matrix.</p>
+
+<p><strong>Parameters:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Type</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+      <tr>
+        <td><code>array</code></td>
+        <td><code>ndarray</code></td>
+        <td><p>n x n matrix for the heatmap</p></td>
+        <td><em>required</em></td>
+      </tr>
+      <tr>
+        <td><code>figsize</code></td>
+        <td><code>int</code></td>
+        <td><p>Controls the size of the output figure. Should increase with the size of 'array'. 10 by default</p></td>
+        <td><code>10</code></td>
+      </tr>
+      <tr>
+        <td><code>square_size</code></td>
+        <td><code>int</code></td>
+        <td><p>Controls the size of squares in the heatmap. Should decrease with the size of 'array'. 100 by default</p></td>
+        <td><code>100</code></td>
+      </tr>
+  </tbody>
+</table>
+<p><strong>Returns:</strong></p>
+<table>
+  <thead>
+    <tr>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>figure</code></td>
+      <td><p>heatmap</p></td>
+    </tr>
+  </tbody>
+</table>
+    </div>
+
+  </div>
+
+
+
+  <div class="doc doc-object doc-method">
+
+
+
 <h2 id="fitting.CarbonFitter.plot_multiple_chains" class="doc doc-heading">
 <code class="highlight language-python"><span class="n">plot_multiple_chains</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">chains</span><span class="p">,</span> <span class="n">walker</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">params_names</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">colors</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">linewidths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dists</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
 
@@ -882,72 +948,6 @@ nwalkers = k * dim(params)
     <tr>
       <td><code>figure</code></td>
       <td><p>plot of posterior surfaces or marginal distributions</p></td>
-    </tr>
-  </tbody>
-</table>
-    </div>
-
-  </div>
-
-
-
-  <div class="doc doc-object doc-method">
-
-
-
-<h2 id="fitting.CarbonFitter.scatter_plot" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">scatter_plot</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">array</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">square_size</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span></code>
-
-
-</h2>
-
-    <div class="doc doc-contents ">
-
-      <p>Makes an accessible heatmap.</p>
-
-<p><strong>Parameters:</strong></p>
-<table>
-  <thead>
-    <tr>
-      <th>Name</th>
-      <th>Type</th>
-      <th>Description</th>
-      <th>Default</th>
-    </tr>
-  </thead>
-  <tbody>
-      <tr>
-        <td><code>array</code></td>
-        <td><code>ndarray</code></td>
-        <td><p>n x n matrix for the heatmap</p></td>
-        <td><em>required</em></td>
-      </tr>
-      <tr>
-        <td><code>figsize</code></td>
-        <td><code>int</code></td>
-        <td><p>Controls the size of the output figure. Should increase with the size of 'array'. 10 by default</p></td>
-        <td><code>10</code></td>
-      </tr>
-      <tr>
-        <td><code>square_size</code></td>
-        <td><code>int</code></td>
-        <td><p>Controls the size of squares in the heatmap. Should decrease with the size of 'array'. 100 by default</p></td>
-        <td><code>100</code></td>
-      </tr>
-  </tbody>
-</table>
-<p><strong>Returns:</strong></p>
-<table>
-  <thead>
-    <tr>
-      <th>Type</th>
-      <th>Description</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><code>figure</code></td>
-      <td><p>heatmap</p></td>
     </tr>
   </tbody>
 </table>
