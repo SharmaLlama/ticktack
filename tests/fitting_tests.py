@@ -74,6 +74,15 @@ def test_NestedSampler(SingleFitter_creation):
                                         )
     assert True
 
+def test_correlation_plot():
+    cf = fitting.CarbonFitter()
+    mat = jnp.array([[0.50777277, 0.83949556, 0.28273227, 0.65313255],
+                     [0.97509577, 0.06402038, 0.88118395, 0.18990772],
+                     [0.87250517, 0.59221863, 0.80177601, 0.77286119],
+                     [0.66751632, 0.39030823, 0.3096194 , 0.38781154]])
+    cf.correlation_plot(mat)
+    assert True
+
 def test_interp_gp(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
     SingleFitter_creation.interp_gp(201, jnp.ones(SingleFitter_creation.control_points_time.size))

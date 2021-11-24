@@ -146,9 +146,9 @@ class CarbonFitter:
             fig = c.plotter.plot(figsize=figsize)
         return fig
 
-    def scatter_plot(self, array, figsize=10, square_size=100):
+    def correlation_plot(self, array, figsize=10, square_size=100):
         """
-        Makes an accessible heatmap.
+        Makes an accessible heatmap for visualizing correlation/covariance matrix.
 
         Parameters
         ----------
@@ -794,7 +794,7 @@ class SingleFitter(CarbonFitter):
                                            method="L-BFGS-B", options={'maxiter': 20000})
         return soln
 
-    def plot_recovery(self, chain, time_data=None, true_production=None):
+    def plot_recovery(self, chain, time_data=None, true_production=None, size=100, alpha=0.2):
         """
         Takes a chain of Markov Chain Monte Carlo walks and the true production rates, plots the predicted production
         rate from different samples of the chain against the true production rates.
@@ -807,6 +807,10 @@ class SingleFitter(CarbonFitter):
             Array of time sampling on which production rates will be evaluated
         true_production : ndarray, optional
             True production rates on 'time_data'
+        size : int, optional
+            The number of samples randomly chosen from 'chain'
+        alpha : float, optional
+            Parameter for blending, between 0-1.
 
         Returns
         -------
@@ -815,15 +819,14 @@ class SingleFitter(CarbonFitter):
         """
         mean = np.mean(chain, axis=0)
         fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 10), sharex=True)
-        n = 100
-        top_n = np.random.permutation(len(chain))[:n]
+        top_n = np.random.permutation(len(chain))[:size]
         ax1.errorbar(self.time_data[:-1], self.d14c_data[:-1], yerr=self.d14c_data_error[:-1],
                      fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="noisy d14c")
         for i in tqdm(top_n):
             d14c = self.dc14_fine(params=chain[i, :])
-            ax1.plot(self.time_grid_fine[:-1], d14c, color="g", alpha=0.2)
+            ax1.plot(self.time_grid_fine[:-1], d14c, color="g", alpha=alpha)
             control_points_fine = self.production(self.time_grid_fine, (chain[i, :],))
-            ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=0.2)
+            ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=alpha)
         control_points_fine = self.production(self.time_grid_fine, (mean,))
         ax2.plot(self.time_grid_fine, control_points_fine, "r", label="sample mean production rate")
         ax1.set_ylabel("$\Delta^{14}$C (‰)");
@@ -834,7 +837,7 @@ class SingleFitter(CarbonFitter):
         ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.13), fancybox=True);
         ax1.legend();
 
-    def plot_samples(self, chain, nwalkers):
+    def plot_samples(self, chain, nwalkers, size=100, alpha=0.2):
         """
         Takes a chain of Markov Chain Monte Carlo walks and plots the predicted production rate from different samples
         of the chain.
@@ -845,6 +848,10 @@ class SingleFitter(CarbonFitter):
             A chain of MCMC walks
         nwalkers : int
             Number of walkers of 'chain'
+        size : int, optional
+            The number of samples randomly chosen from 'chain'
+        alpha : float, optional
+            Parameter for blending, between 0-1.
 
         Returns
         -------
@@ -857,9 +864,9 @@ class SingleFitter(CarbonFitter):
             mle.append(lst[1])
 
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-        for s in chain[np.random.randint(len(chain), size=100)]:
+        for s in chain[np.random.randint(len(chain), size=size)]:
             d_c_14_fine = self.dc14_fine(params=s)
-            ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, alpha=0.2, color="g")
+            ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, alpha=alpha, color="g")
 
         d_c_14_coarse = self.dc14(params=mle)
         d_c_14_fine = self.dc14_fine(params=mle)
