@@ -382,6 +382,8 @@ class SingleFitter(CarbonFitter):
                 self.control_points_time = jnp.arange(self.start, self.end)
                 self.production = self.interp_gp
                 self.gp = True
+            else:
+                raise NameError("Model is not valid")
         except:
             pass
 
