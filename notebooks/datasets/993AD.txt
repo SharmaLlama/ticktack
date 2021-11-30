@@ -1,9 +1,0 @@
-Büntgen18_ALT02.csv
-Büntgen18_CHI01.csv
-Büntgen18_DAR01_AD993.csv
-Büntgen18_MON05.csv
-Büntgen18_PAT03_AD993.csv
-Büntgen18_SWE01.csv
-Büntgen18_SWE02_AD993.csv
-Büntgen18_SWE03.csv
-Büntgen18_SWE04.csv

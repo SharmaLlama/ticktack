@@ -1,4 +1,0 @@
-brehm21_5259_alpine_larch.csv
-brehm21_5259_bristlecone.csv
-brehm21_5259_irish_oak.csv
-brehm21_5259_sibirian_larch.csv

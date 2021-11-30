@@ -15,8 +15,7 @@ import scipy
 import seaborn as sns
 from jaxns.nested_sampling import NestedSampler
 from jaxns.prior_transforms import PriorChain, UniformPrior
-from jaxns.plotting import plot_cornerplot, plot_diagnostics
-from jaxns.utils import summary
+import os
 
 rcParams['figure.figsize'] = (16.0, 8.0)
 
@@ -122,8 +121,6 @@ class CarbonFitter:
 
         Returns
         -------
-        figure
-            plot of posterior surfaces or marginal distributions
         """
         if labels:
             c = ChainConsumer().add_chain(chain, walkers=walkers, parameters=labels)
@@ -144,7 +141,6 @@ class CarbonFitter:
         else:
             c.configure(spacing=0.0)
             fig = c.plotter.plot(figsize=figsize)
-        return fig
 
     def correlation_plot(self, array, figsize=10, square_size=100):
         """
@@ -349,16 +345,14 @@ class SingleFitter(CarbonFitter):
         self.annual = jnp.arange(self.start, self.end + 1)
         self.mask = jnp.in1d(self.annual, self.time_data)[:-1]
 
-    def prepare_function(self, **kwargs):
+    def prepare_function(self, model=None):
         """
         Specifies the production rate function
 
         Parameters
         ----------
-        f : callable, optional
-            A function that takes scalar/vector input and outputs a scalar
-        model : str, optional
-            Specifies a built-in model. The 'model' parameter can take value in ['simple_sinusoid',
+        model : str | callable, optional
+            Specifies a built-in model or a custom model. Currently supported built-in models include ['simple_sinusoid',
             'flexible_sinusoid', 'control_points']
 
         Returns
@@ -366,26 +360,18 @@ class SingleFitter(CarbonFitter):
         """
         self.production = None
         self.gp = None
-
-        try:
-            self.production = kwargs['f']
-        except:
-            pass
-
-        try:
-            model = kwargs['model']
-            if model == "simple_sinusoid":
-                self.production = self.simple_sinusoid
-            elif model == "flexible_sinusoid":
-                self.production = self.flexible_sinusoid
-            elif model == "control_points":
-                self.control_points_time = jnp.arange(self.start, self.end)
-                self.production = self.interp_gp
-                self.gp = True
-            else:
-                raise NameError("Model is not valid")
-        except:
-            pass
+        if callable(model):
+            self.production = model
+        elif model == "simple_sinusoid":
+            self.production = self.simple_sinusoid
+        elif model == "flexible_sinusoid":
+            self.production = self.flexible_sinusoid
+        elif model == "control_points":
+            self.control_points_time = jnp.arange(self.start, self.end)
+            self.production = self.interp_gp
+            self.gp = True
+        else:
+            raise ValueError("model is not a callable, or does not take value from the following: simple_sinusoid, 'flexible_sinusoid', 'control_points'")
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
@@ -503,11 +489,53 @@ class SingleFitter(CarbonFitter):
 
     @partial(jit, static_argnums=(0,))
     def run(self, time_values, y0, params=()):
+        """
+        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+
+        Parameters
+        ----------
+        time_values : ndarray
+            Time values
+        y0 : ndarray, optional
+            The initial contents of all boxes
+        params : ndarray, optional
+            Parameters for self.production
+
+        Returns
+        -------
+        ndarray
+            The value of each box in the carbon box at the specified time_values along with the steady state solution
+            for the system
+        """
         burn_in, _ = self.cbm.run(time_values, production=self.production, args=params, y0=y0)
         return burn_in
 
     @partial(jit, static_argnums=(0, 2, 4, 5))
     def run_D_14_C_values(self, time_out, time_oversample, y0, box='Troposphere', hemisphere='north', params=()):
+        """
+        Calculates the d14c values of the specified box. Calls the run_bin function to determine
+        the binned box contents.
+
+        Parameters
+        ----------
+        time_out : list[int]
+            the values at which to bin the box contents
+        time_oversample : int
+            number of times to sample over time
+        y0 : list, optional
+            the initial contents of all boxes
+        box : str, optional
+            the specific box at which to calculate the d14c
+        hemisphere : str, optional
+            For hemispheric carbon box model 'hemisphere' specifies the d14c in either the northern or the southern box
+        params : ndarray, optional
+            Parameters for self.production
+
+        Returns
+        -------
+        list
+            the binned d14c data of the specified box.
+        """
         d_14_c = self.cbm.run_D_14_C_values(time_out, time_oversample,
                                             production=self.production, args=params, y0=y0,
                                             steady_state_solutions=self.steady_state_y0, box=box,
@@ -1058,3 +1086,116 @@ class MultiFitter(CarbonFitter):
         -------
         """
         self.MultiFitter.append(sf)
+
+    def get_time_period(self):
+        start = jnp.min(jnp.array([sf.start for sf in self.MultiFitter]))
+        end = jnp.max(jnp.array([sf.end for sf in self.MultiFitter]))
+        return start, end
+
+def get_data(path=None, event=None):
+    if path:
+        file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+    elif event in ['660BCE', '775AD', '993AD', '5259BCE', '5410BCE', '7176BCE']:
+        file = 'data/datasets/' + event
+        path = os.path.join(os.path.dirname(__file__), file)
+        file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
+    else:
+        raise ValueError("Invalid path, or event is not from: '660BCE', '775AD', '993AD', '5259BCE', '5410BCE', '7176BCE'")
+    return file_names
+
+def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', burnin=500, production=1000,
+                 params=(), low_bounds=None, high_bounds=None):
+    start, end = mf.get_time_period()
+    if sampler == 'MCMC':
+        if production_model == 'simple_sinusoid':
+            default_params = np.array([year, 1./12, np.pi/2., 81./12])
+            result = mf.MarkovChainSampler(default_params,
+                                            likelihood = mf.log_joint_simple_sinusoid,
+                                            burnin = burnin,
+                                            production = production,
+                                            args = (jnp.array([start, 0., -jnp.pi, 0.]),
+                                            jnp.array([end, 5., jnp.pi, 15.]))
+                                           )
+        elif production_model == 'flexible_sinusoid':
+            default_params = np.array([year, 1./12, np.pi/2., 81./12, 0.18])
+            result = mf.MarkovChainSampler(default_params,
+                                            likelihood = mf.log_joint_flexible_sinusoid,
+                                            burnin = burnin,
+                                            production = production,
+                                            args = (jnp.array([start, 0., -jnp.pi, 0., 0.]),
+                                            jnp.array([end, 5., jnp.pi, 15., 2.]))
+                                           )
+        elif callable(production_model):
+            def log_joint_likelihood(params, low_bounds, high_bounds):
+                lp = 0
+                lp += jnp.all(
+                    (params < low_bounds) | (params > high_bounds)
+                ) * -jnp.inf
+                pos = mf.multi_likelihood(params=params)
+                return lp + pos
+            result = mf.MarkovChainSampler(params,
+                                            likelihood = log_joint_likelihood,
+                                            burnin = burnin,
+                                            production = production,
+                                           args = (low_bounds, high_bounds)
+                                           )
+        else:
+            raise ValueError("Invalid production model")
+    elif sampler == 'NS':
+        print("Running Nested Sampling...")
+        if production_model == 'simple_sinusoid':
+            default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
+            result = mf.NestedSampler(default_params,
+                                      likelihood=mf.multi_likelihood,
+                                      low_bound=jnp.array([start, 0., -jnp.pi, 0.]),
+                                      high_bound=jnp.array([end, 5., jnp.pi, 15.])
+                                      )
+        elif production_model == 'flexible_sinusoid':
+            default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
+            result = mf.NestedSampler(default_params,
+                                      likelihood=mf.multi_likelihood,
+                                      low_bound=jnp.array([start, 0., -jnp.pi, 0., 0.]),
+                                      high_bound=jnp.array([end, 5., jnp.pi, 15., 2.])
+                                      )
+        elif callable(production_model):
+            result = mf.NestedSampler(params,
+                                      likelihood=mf.multi_likelihood,
+                                      low_bound=low_bounds,
+                                      high_bound=high_bounds
+                                      )
+        else:
+            raise ValueError("Invalid production model")
+        print("Done")
+    else:
+        raise ValueError("Invalid sampler type. sampler must be one of the following: MCMC, NS")
+    return result
+
+def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Brehm21', box='Troposphere',
+              hemisphere='north', sampler=None, burnin=500, production=1000, params=(), low_bounds=None,
+              high_bounds=None):
+    mf = MultiFitter()
+    cbm = ticktack.load_presaved_model(cbm_model, production_rate_units='atoms/cm^2/s')
+    if event:
+        file_names = get_data(event=event)
+        print("Retrieving data...")
+        for file in tqdm(file_names):
+            file_name = 'data/datasets/' + event + '/' + file
+            sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
+            sf.load_data(os.path.join(os.path.dirname(__file__), file_name))
+            sf.prepare_function(model=production_model)
+            mf.add_SingleFitter(sf)
+    elif path:
+        file_names = get_data(path=path)
+        print("Retrieving data...")
+        for file_name in tqdm(file_names):
+            sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
+            sf.load_data(file_name)
+            sf.prepare_function(model=production_model)
+            mf.add_SingleFitter(sf)
+    if not sampler:
+        return mf
+    else:
+        return mf, sample_event(year, mf, sampler, params=params, burnin=burnin, production=production,
+                                production_model=production_model, low_bounds=low_bounds, high_bounds=high_bounds)
+
+
