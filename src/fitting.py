@@ -160,6 +160,7 @@ class CarbonFitter:
         figure
             heatmap
         """
+        assert array.shape[0] == array.shape[1], "array must be a square (n x n) matrix"
         n = array.shape[0]
         arr = array.reshape(-1)
         size = np.abs(arr)
@@ -218,7 +219,6 @@ class CarbonFitter:
         ax.set_xticks([])
         ax.set_yticks([color_min, (color_min + color_max) / 2, color_max])
         ax.yaxis.tick_right()
-        return
 
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), params_names=None, labels=None, colors=None,
                              alpha=0.5, linewidths=None, plot_dists=False):
@@ -287,7 +287,7 @@ class SingleFitter(CarbonFitter):
         target_C_14 : float, optional
             target 14C content for equilibration, 707 by default
         box : str, optional
-            'Troposphere' by default
+            The specific box at which to calculate the d14c. 'Troposphere' by default
         hemisphere : str, optional
             The hemisphere which the SingleFitter object will model, can take values in
             ['north', 'south']. 'north' by default
@@ -371,7 +371,7 @@ class SingleFitter(CarbonFitter):
             self.production = self.interp_gp
             self.gp = True
         else:
-            raise ValueError("model is not a callable, or does not take value from the following: simple_sinusoid, 'flexible_sinusoid', 'control_points'")
+            raise ValueError("model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, control_points")
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
@@ -948,11 +948,36 @@ class SingleFitter(CarbonFitter):
     #     return grad(self.sum_interp_gp)(*args)
 
 class MultiFitter(CarbonFitter):
+    """
+    A class for parametric inference of d14c data from a common time period using an ensemble of SingleFitter.
+    Does parameter fitting, likelihood evaluations, Monte Carlo sampling, plotting and more.
+    """
     def __init__(self, sf=None):
+        """
+        Initializes a MultiFitter object. If sf is not None it should be a list of SingleFitter objects.
+
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of a parametric model
+
+        Returns
+        -------
+        float
+            Log-likelihood
+        """
         if isinstance(sf, list):
-            self.MultiFitter = sf
-        else:
+            valid_sf = True
+            for object in sf:
+                valid_sf = valid_sf and isinstance(object, SingleFitter)
+            if valid_sf:
+                self.MultiFitter = sf
+            else:
+                raise ValueError("sf should be a list of SingleFitter objects")
+        elif sf is None:
             self.MultiFitter = []
+        else:
+            raise ValueError("Invalid sf. sf should be None or a list of SingleFitter objects")
 
     @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
@@ -1088,15 +1113,50 @@ class MultiFitter(CarbonFitter):
         self.MultiFitter.append(sf)
 
     def get_time_period(self):
+        """
+        Retrieves the earliest and the latest time sampling covered by the SingleFitters
+
+        Parameters
+        ----------
+
+        Returns
+        -------
+        tuple
+            the start and the end of the time sampling
+        """
         start = jnp.min(jnp.array([sf.start for sf in self.MultiFitter]))
         end = jnp.max(jnp.array([sf.end for sf in self.MultiFitter]))
         return start, end
 
-def get_data(path=None, event=None):
+def get_data(path=None, event=None, hemisphere='north'):
+    """
+    Retrieves the earliest and the latest time sampling covered by the SingleFitters.
+
+    Parameters
+    ----------
+    path : str, optional
+        When specified it is the relative path to the directory where the data is stored. Only one of path and event
+        should be specified at any time.
+    event : str, optional
+        Identifier of known Miyake events. When specified it takes values from: '660BCE', '775AD', '993AD', '5259BCE',
+        '5410BCE', '7176BCE'.
+    hemisphere : str, optional
+        hemispheric parameter for Carbon Box Model. Used to retrieve the correct data files when event is specified.
+
+    Returns
+    -------
+    list
+        A list of file names to be loaded into SingleFitter
+    """
     if path:
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
     elif event in ['660BCE', '775AD', '993AD', '5259BCE', '5410BCE', '7176BCE']:
-        file = 'data/datasets/' + event
+        if hemisphere == 'north':
+            file = 'data/datasets/' + event + '/NH'
+        elif hemisphere == 'south':
+            file = 'data/datasets/' + event + '/SH'
+        else:
+            raise ValueError("Invalid hemisphere, hemisphere must be from: 'north', 'south'")
         path = os.path.join(os.path.dirname(__file__), file)
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
     else:
@@ -1105,6 +1165,35 @@ def get_data(path=None, event=None):
 
 def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', burnin=500, production=1000,
                  params=(), low_bounds=None, high_bounds=None):
+    """
+    Runs Monte Carlo sampler on a Miyake event.
+
+    Parameters
+    ----------
+    year : float
+        The calender year which the Miyake event is supposed to have occurred.
+    mf : MultiFitter
+        MultiFitter object that enables likelihood function evaluations.
+    sampler : str, optional
+        Monte Carlo sampler. 'MCMC' for Markov Chain Monte Carlo, 'NS' for Nested Sampling. 'MCMC' by default.
+    production_model : str | callable, optional
+        The d14c production rate model of the SingleFitters. 'simple_sinusoid' by default.
+    burnin : int, optional
+        Number of burn-in steps for Markov Chain Monte Carlo, 500 by default.
+    production : int, optional
+        Number of production steps for Markov Chain Monte Carlo, 1000 by default.
+    params : ndarray, optional
+        Initial parameters for Monte Carlo samplers. Required when custom production rate model is used.
+    low_bounds : ndarray, optional
+        Lower bound for parameters. Required when custom production rate model is used.
+    high_bounds : ndarray, optional
+        Upper bound for parameters. Required when custom production rate model is used.
+
+    Returns
+    -------
+    result
+        MCMC sampler or NS sampler
+    """
     start, end = mf.get_time_period()
     if sampler == 'MCMC':
         if production_model == 'simple_sinusoid':
@@ -1172,14 +1261,62 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
 
 def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Brehm21', box='Troposphere',
               hemisphere='north', sampler=None, burnin=500, production=1000, params=(), low_bounds=None,
-              high_bounds=None):
-    mf = MultiFitter()
+              high_bounds=None, mf=None):
+    """
+    Fits a Miyake event.
+
+    Parameters
+    ----------
+    year : float
+        The calender year which the Miyake event is supposed to have occurred.
+    event : str, optional
+        Identifier of known Miyake events. When specified it takes values from: '660BCE', '775AD', '993AD', '5259BCE',
+        '5410BCE', '7176BCE'.
+    path : str, optional
+        When specified it is the relative path to the directory where the data is stored. Only one of path and event
+        should be specified at any time.
+    production_model : str | callable, optional
+        The d14c production rate model of the SingleFitters. 'simple_sinusoid' by default.
+    model : str, optional
+        Name of a Carbon Box Model. Must be one from: Miyake17, Brehm21, Guttler14, Buntgen18.
+    box : str, optional
+        The specific box at which to calculate the d14c. 'Troposphere' by default
+    hemisphere : str, optional
+        hemispheric parameter for Carbon Box Model. Used to retrieve the correct data files when event is specified.
+    sampler : str, optional
+        Monte Carlo sampler. 'MCMC' for Markov Chain Monte Carlo, 'NS' for Nested Sampling. 'MCMC' by default.
+    burnin : int, optional
+        Number of burn-in steps for Markov Chain Monte Carlo, 500 by default.
+    production : int, optional
+        Number of production steps for Markov Chain Monte Carlo, 1000 by default.
+    params : ndarray, optional
+        Initial parameters for Monte Carlo samplers. Required when custom production rate model is used.
+    low_bounds : ndarray, optional
+        Lower bound for parameters. Required when custom production rate model is used.
+    high_bounds : ndarray, optional
+        Upper bound for parameters. Required when custom production rate model is used.
+    mf : MultiFitter
+        MultiFitter object that enables likelihood function evaluations. If None, a new MultiFitter Object will be
+        initialized
+
+    Returns
+    -------
+    mf : MultiFitter
+        MultiFitter object that enables likelihood function evaluations.
+    result : ndrray | NestedSampler Object
+        MCMC sampler or NS sampler
+    """
+    if not mf:
+        mf = MultiFitter()
     cbm = ticktack.load_presaved_model(cbm_model, production_rate_units='atoms/cm^2/s')
     if event:
-        file_names = get_data(event=event)
+        file_names = get_data(event=event, hemisphere=hemisphere)
         print("Retrieving data...")
         for file in tqdm(file_names):
-            file_name = 'data/datasets/' + event + '/' + file
+            if hemisphere == 'north':
+                file_name = 'data/datasets/' + event + '/NH/' + file
+            else:
+                file_name = 'data/datasets/' + event + '/SH/' + file
             sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
             sf.load_data(os.path.join(os.path.dirname(__file__), file_name))
             sf.prepare_function(model=production_model)

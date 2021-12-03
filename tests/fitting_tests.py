@@ -33,6 +33,42 @@ def MultiFitter_creation(SingleFitter_creation):
     mf.add_SingleFitter(SingleFitter_creation)
     return mf
 
+def test_get_time_period(SingleFitter_creation):
+    mf = fitting.MultiFitter()
+    sf = SingleFitter_creation
+    mf.add_SingleFitter(sf)
+    sf.start = 199
+    sf.end = 209
+    mf.add_SingleFitter(sf)
+    start, end = mf.get_time_period()
+    assert jnp.allclose(jnp.array([start, end]), jnp.array([199, 209]))
+
+def test_get_data():
+    fitting.get_data(event="775AD", hemisphere="south")
+    fitting.get_data(event="775AD", hemisphere="north")
+    fitting.get_data(event="993AD", hemisphere="south")
+    fitting.get_data(event="993AD", hemisphere="north")
+    fitting.get_data(event="660BCE", hemisphere="north")
+    fitting.get_data(event="5259BCE", hemisphere="north")
+    fitting.get_data(event="5410BCE", hemisphere="north")
+    fitting.get_data(event="7176BCE", hemisphere="north")
+    assert True
+
+def test_fit_event():
+    fitting.fit_event(-660,
+                      event='660BCE',
+                      production_model='simple_sinusoid',
+                      sampler="MCMC",
+                      burnin=10,
+                      production=10)
+    mf = fitting.fit_event(-660,
+                           event='660BCE',
+                           sampler=None)
+    fitting.fit_event(-660,
+                      event='660BCE',
+                      sampler='MCMC', mf=mf)
+    assert True
+
 def test_chain_summary(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="simple_sinusoid")
     chain = SingleFitter_creation.MarkovChainSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
