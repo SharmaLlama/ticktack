@@ -475,7 +475,7 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-    @partial(jit, static_argnums=(0, 1,2, 4, 5, 6))
+   # @partial(jit, static_argnums=(0, 1,2, 4, 5, 6))
     def run(self, time_values, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box model at the specified time values. It
         does this by solving a linear system of ODEs. This method will not work if the compile() method has not been executed first.
