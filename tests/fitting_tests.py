@@ -19,10 +19,10 @@ def SingleFitter_creation():
     sf.resolution = 1000
     sf.burn_in_time = jnp.linspace(sf.start - 1000, sf.start, sf.resolution)
     sf.time_grid_fine = jnp.arange(sf.start, sf.end, 0.05)
-    sf.time_oversample = 1000
+    sf.time_oversample = 1008
     sf.offset = 0
     sf.annual = jnp.arange(sf.start, sf.end + 1)
-    sf.mask = jnp.in1d(sf.annual, sf.time_data)[:-1]
+    sf.mask = jnp.in1d(sf.annual, sf.time_data)
     return sf
 
 @pytest.fixture
@@ -98,7 +98,7 @@ def test_plot_multiple_chains(SingleFitter_creation):
 
 def test_multi_likelihood(MultiFitter_creation):
     out = MultiFitter_creation.multi_likelihood(params=jnp.array([205., 1. / 12, jnp.pi / 2., 81. / 12]))
-    assert jnp.allclose(out, -223756.46745182)
+    assert jnp.allclose(out, -272052.45881277)
 
 def test_mf_log_prior_simple_sinusoid(MultiFitter_creation):
     out = MultiFitter_creation.log_prior_simple_sinusoid(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
@@ -119,7 +119,7 @@ def test_mf_log_joint_simple_sinusoid(MultiFitter_creation):
                                                    jnp.array([200., 0., -jnp.pi, 0.]),
                                                    jnp.array([210., 5., jnp.pi, 15.])
                                                    )
-    assert jnp.allclose(out, -223756.46745182)
+    assert jnp.allclose(out, -272052.45881277)
 
 def test_mf_log_joint_flexible_sinusoid(SingleFitter_creation, MultiFitter_creation):
     mf = fitting.MultiFitter()
@@ -130,7 +130,7 @@ def test_mf_log_joint_flexible_sinusoid(SingleFitter_creation, MultiFitter_creat
                                                      jnp.array([200., 0., -jnp.pi, 0., 0.]),
                                                      jnp.array([210., 5., jnp.pi, 15., 2.])
                                                      )
-    assert jnp.allclose(out, -223756.46745182)
+    assert jnp.allclose(out, -272052.45881277)
 
 def test_MarkovChainSampler(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="simple_sinusoid")
@@ -183,12 +183,15 @@ def test_dc14(SingleFitter_creation):
     c = SingleFitter_creation.dc14(params=jnp.ones(SingleFitter_creation.control_points_time.size))
     assert jnp.all(
         jnp.array([
-            jnp.allclose(a, jnp.array([1.53796943, 1.50055152, 0.97640999, 0.13198755, -0.7645682,
-                             -1.42855475, -1.64912179, -1.35622635, -0.64287515])),
-            jnp.allclose(b, jnp.array([1.53796943, 1.50055152, 0.97640999, 0.13198755, -0.7645682,
-                             -1.42855475, -1.64912179, -1.35622635, -0.64287515])),
-            jnp.allclose(c, jnp.array([-125.53269265, -125.56971761, -125.62058337, -125.67101689,
-                             -125.72267541, -125.77372637, -125.82646874, -125.87120292, -125.96980777]))
+            jnp.allclose(a, jnp.array([ 2.02663583,  2.05373713,  1.58866043,  0.75720779,
+                                        -0.19198642, 10.32059596, 14.71941444, 15.62882696,
+                                        15.69838433, 15.55767994])),
+            jnp.allclose(b, jnp.array([ 2.02663583,  2.05373713,  1.58866043,  0.75720779,
+                                        -0.19198642, 10.32059596, 14.71941444, 15.62882696,
+                                        15.69838433, 15.55767994])),
+            jnp.allclose(c, jnp.array([-125.57659792, -125.60449947, -125.65646164, -125.70621563,
+                                       -125.75778369, -125.80939222, -125.85991583, -125.91398731,
+                                       -125.95339274, -126.37412093]))
         ])
     )
 
@@ -201,12 +204,15 @@ def test_dc14_fine(SingleFitter_creation):
     c = SingleFitter_creation.dc14_fine(params=jnp.ones(SingleFitter_creation.control_points_time.size))[-9:]
     assert jnp.all(
         jnp.array([
-            jnp.allclose(a, jnp.array([0.95999231, 1.00453728, 1.04784445, 1.08986208, 1.13054003,
-                             1.16982976, 1.20768432, 1.24405849, 1.27890888])),
-            jnp.allclose(b, jnp.array([0.95999231, 1.00453728, 1.04784445, 1.08986208, 1.13054003,
-                             1.16982976, 1.20768432, 1.24405849, 1.27890888])),
-            jnp.allclose(c, jnp.array([-127.53537869, -127.62682645, -127.72037002, -127.81595568,
-                             -127.91352902, -128.01303496, -128.11441803, -128.21762246, -128.32259232]))
+            jnp.allclose(a, jnp.array([15.5249451 , 15.51212831, 15.49885171, 15.48508867,
+                                       15.47081085, 15.45598851, 15.4405906 , 15.42458504,
+                                       15.40793869])),
+            jnp.allclose(b, jnp.array([15.5249451 , 15.51212831, 15.49885171, 15.48508867,
+                                       15.47081085, 15.45598851, 15.4405906 , 15.42458504,
+                                       15.40793869])),
+            jnp.allclose(c, jnp.array([-126.50727426, -126.56247561, -126.62035966, -126.68090697,
+                                       -126.7440939 , -126.80989303, -126.87827354, -126.94920134,
+                                       -127.02263934]))
         ])
     )
 
@@ -227,7 +233,7 @@ def test_log_prior_flexible_sinusoid(SingleFitter_creation):
 def test_log_likelihood(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="simple_sinusoid")
     out = SingleFitter_creation.log_likelihood(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]))
-    assert jnp.allclose(out, -111878.23372591)
+    assert jnp.allclose(out, -136026.22940639)
 
 def test_log_joint_simple_sinusoid(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="simple_sinusoid")
@@ -235,7 +241,7 @@ def test_log_joint_simple_sinusoid(SingleFitter_creation):
                                                     jnp.array([200., 0., -jnp.pi, 0.]),
                                                     jnp.array([210., 5., jnp.pi, 15.])
                                                     )
-    assert jnp.allclose(out, -111878.23372591)
+    assert jnp.allclose(out, -136026.22940639)
 
 def test_log_joint_flexible_sinusoid(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="flexible_sinusoid")
@@ -243,7 +249,7 @@ def test_log_joint_flexible_sinusoid(SingleFitter_creation):
                                                      jnp.array([200., 0., -jnp.pi, 0., 0.]),
                                                      jnp.array([210., 5., jnp.pi, 15., 2.])
                                                      )
-    assert jnp.allclose(out, -111878.23372591)
+    assert jnp.allclose(out, -136026.22940639)
 
 def test_neg_log_likelihood_gp(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
@@ -253,13 +259,14 @@ def test_neg_log_likelihood_gp(SingleFitter_creation):
 def test_log_joint_gp(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
     out = SingleFitter_creation.log_joint_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
-    assert jnp.allclose(out, -4835.77492731)
+    assert jnp.allclose(out, -5144.73323962)
 
 def test_neg_grad_log_joint_gp(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")
     out = SingleFitter_creation.neg_grad_log_joint_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
-    assert jnp.allclose(out, jnp.array([39097.58324264, 579.20894195, 428.80250487, 368.67443377, 297.74144928, 238.13667954,
-                              178.53660702, 113.40072485, 55.81188067]))
+    assert jnp.allclose(out, jnp.array([42388.87425578,   600.34169159,   452.92252801,
+                                        399.03381353,   334.53214683,   279.11980775,
+                                        227.05368143,   146.48346689,   134.61677252]))
 
 def test_fit_ControlPoints(SingleFitter_creation):
     SingleFitter_creation.prepare_function(model="control_points")

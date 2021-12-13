@@ -17,8 +17,6 @@ from jaxns.nested_sampling import NestedSampler
 from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
 
-rcParams['figure.figsize'] = (16.0, 8.0)
-
 
 class CarbonFitter:
     """
@@ -267,6 +265,18 @@ class CarbonFitter:
             fig = c.plotter.plot(figsize=(10, 10))
         return fig
 
+    def load_time_data(self, time_data):
+        self.time_data = jnp.array(time_data)
+        self.start = np.nanmin(self.time_data)
+        self.end = np.nanmax(self.time_data)
+        self.resolution = resolution
+        self.burn_in_time = jnp.linspace(self.start - 1000, self.start, self.resolution)
+        self.time_grid_fine = jnp.arange(self.start, self.end, fine_grid)
+        self.time_oversample = time_oversample
+        self.offset = jnp.mean(self.d14c_data[:num_offset])
+        self.annual = jnp.arange(self.start, self.end + 1)
+        self.mask = jnp.in1d(self.annual, self.time_data)
+
 class SingleFitter(CarbonFitter):
     """
     A class for parametric and non-parametric inference of d14c data using a Carbon Box Model (cbm).
@@ -310,7 +320,7 @@ class SingleFitter(CarbonFitter):
         self.box = box
         self.hemisphere = hemisphere
 
-    def load_data(self, file_name, resolution=1000, fine_grid=0.05, time_oversample=1000, num_offset=4):
+    def load_data(self, file_name, resolution=1000, fine_grid=0.05, time_oversample=1008, num_offset=4):
         """
         Loads d14c data from specified file
 
@@ -343,7 +353,7 @@ class SingleFitter(CarbonFitter):
         self.time_oversample = time_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
-        self.mask = jnp.in1d(self.annual, self.time_data)[:-1]
+        self.mask = jnp.in1d(self.annual, self.time_data)
 
     def prepare_function(self, model=None):
         """
@@ -652,7 +662,7 @@ class SingleFitter(CarbonFitter):
             Gaussian log-likelihood
         """
         d_14_c = self.dc14(params=params)
-        chi2 = jnp.sum(((self.d14c_data[:-1] - d_14_c) / self.d14c_data_error[:-1]) ** 2)
+        chi2 = jnp.sum(((self.d14c_data - d_14_c) / self.d14c_data_error) ** 2)
         return -0.5 * chi2
 
     @partial(jit, static_argnums=(0,))
@@ -866,11 +876,11 @@ class SingleFitter(CarbonFitter):
         mean = np.mean(chain, axis=0)
         fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 10), sharex=True)
         top_n = np.random.permutation(len(chain))[:size]
-        ax1.errorbar(self.time_data[:-1], self.d14c_data[:-1], yerr=self.d14c_data_error[:-1],
+        ax1.errorbar(self.time_data, self.d14c_data, yerr=self.d14c_data_error,
                      fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="noisy d14c")
         for i in tqdm(top_n):
             d14c = self.dc14_fine(params=chain[i, :])
-            ax1.plot(self.time_grid_fine[:-1], d14c, color="g", alpha=alpha)
+            ax1.plot(self.time_grid_fine, d14c, color="g", alpha=alpha)
             control_points_fine = self.production(self.time_grid_fine, (chain[i, :],))
             ax2.plot(self.time_grid_fine, control_points_fine, color="g", alpha=alpha)
         control_points_fine = self.production(self.time_grid_fine, (mean,))
@@ -912,13 +922,13 @@ class SingleFitter(CarbonFitter):
         fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         for s in chain[np.random.randint(len(chain), size=size)]:
             d_c_14_fine = self.dc14_fine(params=s)
-            ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, alpha=alpha, color="g")
+            ax1.plot(self.time_grid_fine, d_c_14_fine, alpha=alpha, color="g")
 
         d_c_14_coarse = self.dc14(params=mle)
         d_c_14_fine = self.dc14_fine(params=mle)
-        ax1.plot(self.time_grid_fine[:-1], d_c_14_fine, color="k")
+        ax1.plot(self.time_grid_fine, d_c_14_fine, color="k")
 
-        ax1.plot(self.time_data[:-1], d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7,
+        ax1.plot(self.time_data, d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7,
                  label="fitted $\Delta^{14}$C")
         ax1.errorbar(self.time_data, self.d14c_data,
                      yerr=self.d14c_data_error, fmt="o", color="k", fillstyle="full", capsize=3, markersize=7,
@@ -1202,8 +1212,8 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
                                             likelihood = mf.log_joint_simple_sinusoid,
                                             burnin = burnin,
                                             production = production,
-                                            args = (jnp.array([start, 0., -jnp.pi, 0.]),
-                                            jnp.array([end, 5., jnp.pi, 15.]))
+                                            args = (jnp.array([year-10, 0., -jnp.pi, 0.]),
+                                            jnp.array([year+10, 5., jnp.pi, 15.]))
                                            )
         elif production_model == 'flexible_sinusoid':
             default_params = np.array([year, 1./12, np.pi/2., 81./12, 0.18])
@@ -1277,7 +1287,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         should be specified at any time.
     production_model : str | callable, optional
         The d14c production rate model of the SingleFitters. 'simple_sinusoid' by default.
-    model : str, optional
+    cbm_model : str, optional
         Name of a Carbon Box Model. Must be one from: Miyake17, Brehm21, Guttler14, Buntgen18.
     box : str, optional
         The specific box at which to calculate the d14c. 'Troposphere' by default
@@ -1309,6 +1319,10 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
     if not mf:
         mf = MultiFitter()
     cbm = ticktack.load_presaved_model(cbm_model, production_rate_units='atoms/cm^2/s')
+    if hemisphere == 'north':
+        cbm.define_growth_season(['april', 'may', 'june', 'july', 'august', 'september'])
+    else:
+        cbm.define_growth_season(['october', 'november', 'december', 'january', 'february', 'march'])
     if event:
         file_names = get_data(event=event, hemisphere=hemisphere)
         print("Retrieving data...")
@@ -1318,7 +1332,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
             else:
                 file_name = 'data/datasets/' + event + '/SH/' + file
             sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
-            sf.load_data(os.path.join(os.path.dirname(__file__), file_name))
+            sf.load_data(os.path.join(os.path.dirname(__file__), file_name), time_oversample=1008)
             sf.prepare_function(model=production_model)
             mf.add_SingleFitter(sf)
     elif path:
@@ -1326,7 +1340,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         print("Retrieving data...")
         for file_name in tqdm(file_names):
             sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
-            sf.load_data(file_name)
+            sf.load_data(path + '/' + file_name, time_oversample=1008)
             sf.prepare_function(model=production_model)
             mf.add_SingleFitter(sf)
     if not sampler:
