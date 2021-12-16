@@ -218,7 +218,7 @@ def test_run_bin_october_march():
 
 
 def test_run_bin_april_september():
-    cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
+    cbm = ticktack.load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
     cbm.compile()
 
     dates = np.linspace(774, 776, 100)
