@@ -46,6 +46,7 @@ def flow_object_1_creation():
     box2 = ticktack.Box('marine surface', reservoir=150.14)
     return box1, box2, ticktack.Flow(box1, box2, 66.2)
 
+
 @pytest.fixture
 def flow_object_2_creation():
     box1 = ticktack.Box('troposphere', reservoir=100, production_coefficient=0.3)
@@ -179,3 +180,73 @@ def test_add_edge_not_flow_class2():
         cbm.add_edges([b1])
 
     assert True
+
+
+def test_run_bin_october_march():
+    cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
+    cbm.compile()
+
+    dates = np.linspace(774, 776, 100)
+    t = np.linspace(773, 777, 4 * 300)
+    binned = []
+    actual = []
+
+    def rebin(s):
+        start_month_bin_index = 3
+        time_out = [774, 775, 776]
+        binned_data = np.array([0.0] * 3)
+        oversample = 300
+
+        for i in range(len(time_out)):
+            chunk = s[(i + 1) * oversample - start_month_bin_index * oversample // 12:
+                      (i + 2) * oversample - start_month_bin_index * oversample // 12]
+
+            masked = np.linspace(0, 1, chunk.shape[0])
+            kernel = 1.0 * (masked < 0.5)
+            binned_data[i] = np.sum(chunk * kernel) / (np.sum(kernel))
+
+        return binned_data[1]
+
+    for date in dates:
+        step = 1.0 * (t > date)
+        a = rebin(step)
+        b = cbm.bin_data(step, 300, jnp.array([774, 775, 776]), jnp.array([1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1]))[1]
+        binned.append(a)
+        actual.append(b)
+
+    assert actual == binned
+
+
+def test_run_bin_april_september():
+    cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
+    cbm.compile()
+
+    dates = np.linspace(774, 776, 100)
+    t = np.linspace(773, 777, 4 * 300)
+    binned = []
+    actual = []
+
+    def rebin(s):
+        start_month_bin_index = 9
+        time_out = [774, 775, 776]
+        binned_data = np.array([0.0] * 3)
+        oversample = 300
+
+        for i in range(len(time_out)):
+            chunk = s[(i + 1) * oversample - start_month_bin_index * oversample // 12:
+                      (i + 2) * oversample - start_month_bin_index * oversample // 12]
+
+            masked = np.linspace(0, 1, chunk.shape[0])
+            kernel = 1.0 * (masked < 0.5)
+            binned_data[i] = np.sum(chunk * kernel) / (np.sum(kernel))
+
+        return binned_data[1]
+
+    for date in dates:
+        step = 1.0 * (t > date)
+        a = rebin(step)
+        b = cbm.bin_data(step, 300, jnp.array([774, 775, 776]), jnp.array([0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0]))[1]
+        binned.append(a)
+        actual.append(b)
+
+    assert actual == binned

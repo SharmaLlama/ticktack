@@ -11,6 +11,7 @@ from jax.config import config
 import numpy as np
 import pkg_resources
 from typing import Union
+from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 
 USE_JAX = True
 if USE_JAX:
@@ -189,8 +190,6 @@ class CarbonBoxModel:
         self._flow_rate_units = flow_rate_units
         self._corrected_fluxes = None
         self._matrix = None
-        self._growth_kernel = jnp.array([1] * 12)
-        self._growth_seasons = False
 
     def add_nodes(self, nodes):
         """ Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list,
@@ -471,15 +470,19 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-    def run(self, time_values, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
+    @partial(jit, static_argnums=(0, 2, 3, 5, 6, 7))
+    def run(self, time_out, oversample, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
 
         Parameters
         ----------
-        time_values : list
+        time_out : list
             the time values at which to calculate the content of all the boxes.
+
+        oversample : int
+            number of samples taken per year.
 
         production : callable
             the production function which determines the contents of the boxes.
@@ -514,24 +517,14 @@ class CarbonBoxModel:
 
         @jit
         def derivative(y, t):
-            """
-
-            Parameters
-            ----------
-            y
-            t
-
-            Returns
-            -------
-
-            """
             ans = jnp.matmul(self._matrix, y)
             production_rate_constant = production(t, *args)
             production_rate_constant = self._convert_production_rate(production_rate_constant)
             production_term = self._production_coefficients * production_rate_constant
             return ans + production_term
 
-        time_values = jnp.array(time_values)
+        time_out = jnp.array(time_out)
+        time_values = jnp.linspace(jnp.min(time_out) - 1, jnp.max(time_out) + 1, (time_out.shape[0] + 1) * oversample)
         solution = None
         if y0 is not None:
             y_initial = jnp.array(y0)
@@ -548,223 +541,56 @@ class CarbonBoxModel:
         if not callable(production):
             raise ValueError("incorrect object type for production")
 
-        if USE_JAX:
-            states = odeint(derivative, y_initial, time_values)
-        else:
-            states = odeint(derivative, y_initial, time_values)
+        states = odeint(derivative, y_initial, time_values)
         return states, solution
 
-    # @partial(jax.jit, static_argnums=(0, 5, 6, 7, 8))
-    # def production_rate_finder(self, data, time, steady_state_production, strat_re, trop_res, idx=0, prod=0.7, i=20):
-    #     stead_state2 = steady_state_production * jnp.ones_like(time)
-    #     time_step = time[1] - time[0]
-    #     initial_production_fn = (lambda x: jnp.interp(x, time, stead_state2))
-    #     initial_contents = self._forward_pass(time, initial_production_fn, steady_state_production)
-    #
-    #     # data = data/1000 * initial_contents[0, troposphere_index] + initial_contents[0, troposphere_index]
-    #     initial_contents = jax.ops.index_update(initial_contents, jax.ops.index[:, 1], data)
-    #     initial_contents = jax.ops.index_update(initial_contents, jax.ops.index[:, 0], data * strat_re / trop_res)
-    #     # initial_contents = jax.ops.index_update(initial_contents, jax.ops.index[:, 0:2], data)
-    #     reverse_pass = self._reverse_pass(initial_contents, time_step, prod, idx)
-    #     new_production_fn = (lambda x: jnp.interp(x, time[1:], reverse_pass))
-    #     new_contents = self._forward_pass(time, new_production_fn, steady_state_production)
-    #
-    #     for j in range(i):
-    #         print(j)
-    #         reverse_pass = self._reverse_pass(new_contents, time_step, prod, idx)
-    #         new_production_fn = (lambda x: jnp.interp(x, time[1:], reverse_pass))
-    #         new_contents = self._forward_pass(time, new_production_fn, steady_state_production)
-    #
-    #     return new_contents, reverse_pass
-    #
-    # def _reverse_pass(self, box_contents, time_step, production_coef=0.7, idx=0):
-    #     difference = (box_contents[1:, :] - box_contents[0:-1, :]) / time_step
-    #     production_terms = difference - jnp.transpose(jnp.matmul(self._matrix, jnp.transpose(box_contents)))[:-1, :]
-    #     # ans = jnp.transpose(jnp.matmul(self._matrix, jnp.transpose(box_contents)))[:-1, :]
-    #     # ans += production_terms
-    #     # print(ans - jnp.transpose(jnp.matmul(self._matrix, jnp.transpose(box_contents)))[:-1, :])
-    #
-    #     # production_terms /= production_coef
-    #     # print(production_terms)
-    #     production_terms = jnp.where(production_terms < 0, 0, production_terms)
-    #     production_term = jnp.sum(production_terms, axis=1)
-    #     # production_term = production_terms[:, idx]
-    #     return production_term
-    #
-    # def _forward_pass(self, time, production_function, steady_state):
-    #     new_box_contents = self.run(time, production_function, steady_state_production=steady_state)
-    #     return new_box_contents[0]
-
-    def run_bin(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
-                steady_state_production=None):
-        """ Method which bins the C14 content of all the boxes according to Schulman's convention for radiocarbon dating
-        ......TO BE CONTINUED....
+    @partial(jit, static_argnums=(0, 2))
+    def bin_data(self, data, time_oversample, time_out, growth):
+        """ Bins the data given based on the oversample and the growth season according to Schulman's convention.
+         Currently only handles two 6 month-long growth seasons which are in October - March or April - September.
 
         Parameters
         ----------
-        time_out : list[int]
-            the values at which to bin the box contents. Must be whole year intervals otherwise method will not work.
+        data : list
+            the data which to bin.
 
         time_oversample : int
-            number of times to sample over time. This is the total number of samples for entire time output.
+            number of samples taken per year.
 
-        production : callable
-            the production function which determines the contents of the boxes.
+        time_out : list
+            the time values at which to bin the data at.
 
-        y0 : list, optional
-            the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
-            of boxes.
+        growth : list
+            the growth season with which to bin the data with respect to.
 
-        args : tuple, optional
-            optional arguments to pass into the production function.
-
-        steady_state_production : int, optional
-            the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
-            specified, this parameter is ignored.
-
-        target_C_14 : int, optional
-            target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
-             specified, this parameter is ignored.
-
-        Returns
-        -------
-        Union[list, list]
-            The binned contents of each box in the carbon box at the specified time_values along with the steady state
-            solution for the system.
-        """
-        time_out = jnp.array(time_out)
-        t = jnp.linspace(jnp.min(time_out), jnp.max(time_out) + 2, (time_out.shape[0] + 1) * time_oversample)
-        states, solution = self.run(t, production, y0=y0, args=args, target_C_14=target_C_14,
-                                    steady_state_production=steady_state_production)
-        m = time_oversample // 12
-        tiled = jnp.resize(jnp.repeat(self._growth_kernel, m), (1, time_oversample))
-        if not self._growth_seasons:
-            shifted_index = 0
-        else:
-            shifted_index = (jnp.where(jnp.roll(self._growth_kernel, 1) == 1)[0][0] - 1) % 12
-
-        tiled_full = jnp.resize(jnp.tile(tiled, (states.shape[1], int(time_out.shape[0] - 1))),
-                                (states.shape[1], states.shape[0]))
-        states = jnp.multiply(jnp.transpose(tiled_full), states)
-        states = jnp.pad(states[shifted_index * m:, :], ((0, shifted_index * m), (0, 0)))
-
-        binned_data = (jnp.reshape(states, (-1, states.shape[0] // time_oversample, time_oversample, states.shape[1]))\
-                       .sum(2).sum(0) / jnp.sum(tiled))[:-2, :]
-
-        return binned_data, solution
-
-    def run_D_14_C_values(self, time_out, time_oversample, production, y0=None, args=(), target_C_14=None,
-                          steady_state_production=None, steady_state_solutions=None, box='Troposphere',
-                          hemisphere='north'):
-
-        """ Method which calculates the d14c values of the specified box. Calls the run_bin function to determine
-        the binned box contents.
-
-        Parameters
-        ----------
-        time_out : list[int]
-            the values at which to bin the box contents. Must be whole year intervals otherwise method will not work.
-
-        time_oversample : int
-            number of times to sample over time. This is the total number of samples for entire time output.
-
-        production : callable
-            the production function which determines the contents of the boxes.
-
-        y0 : list, optional
-            the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
-            of boxes.
-
-        args : tuple, optional
-            optional arguments to pass into the production function.
-
-        steady_state_production : int, optional
-            the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
-            specified, this parameter is ignored.
-
-        target_C_14 : int, optional
-            target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
-             specified, this parameter is ignored.
-
-        steady_state_solutions : list, optional
-            the solutions for the steady state, if it is different to the steady state solution calculated based on the
-            y0, steady_state_production or target_C_14 parameters into the run function.
-
-        box : str, optional
-            the specific box at which to calculate the d14c. Defaults to troposphere as that is the most common use.
-
-        hemisphere : str, optional
-            If the carbon box model is hemispheric, then the hemisphere can be specified to determine the d14c in either
-            the northern or the southern box. Defaults to North but this is parameter is ignored if the carbon box model
-            is non-hemispheric.
 
         Returns
         -------
         list
-            the binned d14c data of the specified box.
+            The final binned data accounting for both growth season and Schulman's convention.
 
         Raises
         ------
         ValueError
-            If there is no valid box in the carbon box model that can be used to calculate the d14c for according to the
-            specified box parameters.
+            If the data is not one-dimensional or in a single row.
         """
+        if data.ndim != 1:
+            raise ValueError("Data is not one-dimensional! Data must be contained in one row. ")
 
-        time_out = jnp.array(time_out)
-        data, soln = self.run_bin(time_out=time_out, time_oversample=time_oversample, production=production,
-                                  y0=y0, args=args, target_C_14=target_C_14,
-                                  steady_state_production=steady_state_production)
+        masked = jnp.linspace(0, 1, time_oversample)
+        kernel = (masked < 0.5)
+        shifted_index = cond(growth[0] == 0, lambda x: 9, lambda x: 3, growth)
+        binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
+        return binned_data
 
-        if steady_state_solutions is None:
-            solution = soln
-        else:
-            solution = steady_state_solutions
-
-        box_steady_state = None
-        d_14_c = None
-
-        if self._non_hemisphere_model:
-            for index, node in self._nodes.items():
-                if node.get_name() == box:
-                    box_steady_state = solution[index]
-                    d_14_c = (data[:, index] - box_steady_state) / box_steady_state * 1000
-                    break
-        else:
-            for index, node in self._nodes.items():
-                if node.get_name() == box:
-                    if node.get_hemisphere() == hemisphere:
-                        box_steady_state = solution[index]
-                        d_14_c = (data[:, index] - box_steady_state) / box_steady_state * 1000
-                        break
-
-        if box_steady_state is None:
-            raise ValueError('there is currently no valid box to calculate d_14_c!')
-        return d_14_c
-
-    def define_growth_season(self, months):
-        """ Creates the growth season kernel based on the name of the months provided. Months can be given in any order.
-        Growth season kernel is a binary array where a 0 indicates no growth in that month and a 1 indicates growth in
-        a certain month.
-
-        Parameters
-        ----------
-        months : list
-            list of months in which growth occurs, the months must be in the following list: ['january',
-            'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november',
-            'december']
-        """
-
-        month_list = np.array(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september',
-                               'october', 'november', 'december'])
-        months = np.array(months)
-        self._growth_kernel = jnp.array([1] * 12)
-
-        if len(months) != 12:
-            self._growth_seasons = True
-        else:
-            self._growth_seasons = False
-
-        self._growth_kernel = self._growth_kernel.at[np.in1d(month_list, months, invert=True)].set(0)
+    @partial(jit, static_argnums=(0, 3))
+    def _rebin1D(self, time_out, shifted_index, oversample, kernel, s):
+        binned_data = jnp.zeros((len(time_out),))
+        fun = lambda i, val: dynamic_update_slice(val, jnp.array([jnp.sum(jnp.multiply(dynamic_slice(
+            s, ((i + 1) * oversample - shifted_index * oversample // 12,), (oversample,)), kernel)) / (
+                                                                      jnp.sum(kernel))]), (i,))
+        binned_data = fori_loop(0, len(time_out), fun, binned_data)
+        return binned_data
 
 
 def save_model(carbon_box_model, filename):
@@ -890,78 +716,56 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
         raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyake17, Buntgen18')
 
 
+cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
+cbm.compile()
+
+start = 760
+resolution = 1000
+burn_in_time = np.linspace(760 - 1000, 760, resolution)
+steady_state_burn_in = cbm.equilibrate(target_C_14=707)
+burn_in_solutions = cbm.equilibrate(production_rate=steady_state_burn_in)
+d_14_time_series_fine = np.linspace(760, 788, 2700)
+d_14_time_series_coarse = np.arange(760, 788)
 
 
-#
-#
-# cbm = load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
-# # cbm.define_growth_season(['april', 'may', 'june', 'july', 'august', 'september'])
-# cbm.compile()
-# import matplotlib.pyplot as plt
-#
-# start = 760
-# resolution = 1000
-# burn_in_time = np.linspace(760 - 1000, 760, resolution)
-# steady_state_burn_in = cbm.equilibrate(target_C_14=707)
-# burn_in_solutions = cbm.equilibrate(production_rate=steady_state_burn_in)
-# d_14_time_series_fine = np.linspace(760, 788, 2700)
-# d_14_time_series_coarse = np.arange(760, 788)
-#
-#
-# def sg(t, start_time, duration, area):
-#     middle = start_time + duration / 2.
-#     height = area / duration
-#     return height * jnp.exp(- ((t - middle) / (1. / 1.88349 * duration)) ** 8.)
-#
-#
-# def miyake_event(t, start_time, duration, phase, area):
-#     height = sg(t, start_time, duration, area)
-#     prod = steady_state_burn_in + 0.18 * steady_state_burn_in * jnp.sin(2 * np.pi / 11 * t + phase) + height
-#     return prod
-#
-#
-# burn_in, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-#                      y0=burn_in_solutions)
-# prod = miyake_event(d_14_time_series_fine, 775, 1 / 12, np.pi / 2, 81 / 12)
-#
-# event, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-#                    y0=burn_in[-1, :])
-# d_14_c = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
-#                                args=(775, 1 / 12, np.pi / 2, 81 / 12),
-#                                y0=burn_in[-1, :], steady_state_solutions=burn_in_solutions)
-#
-# cbm.define_growth_season(['october', 'november', 'december', 'january', 'february', 'march'])
-# # cbm.compile()
-#
-# burn_in2, _ = cbm.run(burn_in_time, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-#                       y0=burn_in_solutions)
-#
-# event2, _ = cbm.run(d_14_time_series_fine, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
-#                     y0=burn_in2[-1, :])
-# d_14_c2 = cbm.run_D_14_C_values(d_14_time_series_coarse, 1000, production=miyake_event,
-#                                 args=(775, 1 / 12, np.pi / 2, 81 / 12),
-#                                 y0=burn_in2[-1, :], steady_state_solutions=burn_in_solutions)
-#
-# vals = [-21.63, -22.28, -22.64, -23.83, -22.20, -22.99, -20.73, -21.59, -25.32, -25.6, -25.70, -24.00, -23.73,
-#         -21.91, -23.44, -9.335, -6.46, -9.70, -11.17, -10.31, -11.10, -10.72, -10.67, -8.63, -9.68, -9.31,
-#         -12.33, -14.44]
-#
-# val2 = [-22.20, -22.99, -20.73, -21.59, -25.32, -26.46, -24.74, -25.70, -24.00, -23.73,
-#         -21.91, -23.44, -11.62]
-#
-# fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.0, 6.0))
-# ax1.plot(d_14_time_series_fine, event[:, 1], 'ro')
-# ax1.plot(d_14_time_series_fine, event2[:, 1], 'bo')
-# # ax1.plot(d_14_time_series_coarse, d_14_c, 'ro')
-# # ax1.plot(d_14_time_series_coarse, vals, 'ro')
-# # ax1.plot(d_14_time_series_coarse, d_14_c2 - 22.64846153846154, 'bo')
-# ax1.legend(["Guttler Data", "nothern hemisphere"])
-# ax2.plot(d_14_time_series_fine, prod)
-# ax1.set_xlim(770, 777)
-# plt.axvline(775)
-# plt.axvline(775 + 1 / 12)
-# # ax2.set_ylim(0,5)
-#
-# plt.ticklabel_format(useOffset=False)
-#
-# plt.show()
+def sg(t, start_time, duration, area):
+    middle = start_time + duration / 2.
+    height = area / duration
+    return height * jnp.exp(- ((t - middle) / (1. / 1.88349 * duration)) ** 8.)
+
+
+def miyake_event(t, start_time, duration, phase, area):
+    height = sg(t, start_time, duration, area)
+    prod = steady_state_burn_in + 0.18 * steady_state_burn_in * jnp.sin(2 * np.pi / 11 * t + phase) + height
+    return prod
+
+
+burn_in, _ = run(cbm, burn_in_time, 996, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+                 y0=burn_in_solutions)
+prod = miyake_event(d_14_time_series_fine, 775, 1 / 12, np.pi / 2, 81 / 12)
+event, _ = run(cbm, d_14_time_series_coarse, 996, production=miyake_event, args=(775, 1 / 12, np.pi / 2, 81 / 12),
+               y0=burn_in[-1, :])
+
+vals = rebin_data(cbm, event[:, 1], 996, d_14_time_series_coarse,
+                  growth=jnp.array([1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1]))
+
+vals2 = rebin_data(cbm, event[:, 1], 996, d_14_time_series_coarse,
+                   growth=jnp.array([0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0]))
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.0, 6.0))
+
+
+ax1.plot(d_14_time_series_coarse, vals, 'ro')
+ax1.plot(d_14_time_series_coarse, vals2, 'bo')
+ax1.legend(["northern hemisphere", "southern hemisphere"])
+ax2.plot(d_14_time_series_fine, event[:, 1], 'ro')
+# a = 774.75
+# plt.axvline(a)
+# plt.axvline(a + 0.5)
+# plt.axvline(a + 1)
+# # # ax2.set_ylim(0,5)
+# # ax2.set_xlim(774, 776)
+
+plt.ticklabel_format(useOffset=False)
+
+plt.show()
