@@ -310,7 +310,7 @@ class SingleFitter(CarbonFitter):
         self.box = box
         self.hemisphere = hemisphere
 
-    def load_data(self, file_name, resolution=1000, oversample=108, num_offset=4):
+    def load_data(self, file_name, oversample=1008, burnin_oversample=1, num_offset=4):
         """
         Loads d14c data from specified file
         Parameters
@@ -335,9 +335,9 @@ class SingleFitter(CarbonFitter):
         self.d14c_data_error = jnp.array(data["sig_d14c"])
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
-        self.resolution = resolution
-        self.burn_in_time = jnp.linspace(self.start - 1000, self.start, self.resolution)
+        self.burn_in_time = jnp.arange(self.start - 1000, self.start)
         self.oversample = oversample
+        self.burnin_oversample = burnin_oversample
         self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, int(self.oversample * (self.end - self.start + 2)))
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
@@ -497,7 +497,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.burn_in_time, self.oversample, self.production, y0=y0, args=params)
+        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
         return box_values
 
     @partial(jit, static_argnums=(0))

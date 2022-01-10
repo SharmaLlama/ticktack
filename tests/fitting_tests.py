@@ -16,10 +16,10 @@ def SingleFitter_creation():
                               -151.60492619, -151.60492619])
     sf.start = np.nanmin(sf.time_data)
     sf.end = np.nanmax(sf.time_data)
-    sf.resolution = 1000
-    sf.burn_in_time = jnp.linspace(sf.start - 1000, sf.start, sf.resolution)
-    sf.oversample = 108
+    sf.burn_in_time = jnp.arange(sf.start - 1000, sf.start)
+    sf.oversample = 1008
     sf.time_data_fine = jnp.linspace(sf.start - 1, sf.end + 1, int(sf.oversample * (sf.end - sf.start + 2)))
+    sf.burnin_oversample = 1
     sf.offset = 0
     sf.annual = jnp.arange(sf.start, sf.end + 1)
     sf.mask = jnp.in1d(sf.annual, sf.time_data)
@@ -36,28 +36,25 @@ def MultiFitter_creation(SingleFitter_creation):
     return mf
 
 def test_get_data():
-    fitting.get_data(event="775AD", hemisphere="south")
-    fitting.get_data(event="775AD", hemisphere="north")
     fitting.get_data(event="993AD", hemisphere="south")
     fitting.get_data(event="993AD", hemisphere="north")
-    fitting.get_data(event="660BCE", hemisphere="north")
     fitting.get_data(event="5259BCE", hemisphere="north")
     fitting.get_data(event="5410BCE", hemisphere="north")
     fitting.get_data(event="7176BCE", hemisphere="north")
     assert True
 
 def test_fit_event():
-    fitting.fit_event(-660,
-                      event='660BCE',
+    fitting.fit_event(993,
+                      event='993AD',
                       production_model='simple_sinusoid',
                       sampler="MCMC",
                       burnin=10,
                       production=10)
-    mf = fitting.fit_event(-660,
-                           event='660BCE',
+    mf = fitting.fit_event(993,
+                           event='993AD',
                            sampler=None)
-    fitting.fit_event(-660,
-                      event='660BCE',
+    fitting.fit_event(993,
+                      event='993AD',
                       sampler='MCMC', mf=mf)
     assert True
 
