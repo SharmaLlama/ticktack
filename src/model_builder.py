@@ -229,14 +229,14 @@ save_model(CBM, 'data/Buntgen18.hd5')
 
 
 # ------------- Miyake17 Model ------------- #
-strat = Box('Stratosphere', 112.5, 0.7)
-trop = Box('Troposphere', 637.5, 0.3)
+strat = Box('Stratosphere', 112.5, production_coefficient=0.7)
+trop = Box('Troposphere', 637.5, production_coefficient=0.3)
 MS = Box("Marine surface", 900)
 Bio = Box("Biosphere", 1600)
 f1 = Flow(strat, trop, 1 / 2)
 f2 = Flow(trop, MS, 1 / 11)
 f3 = Flow(trop, Bio, 1 / 23)
-CBM = CarbonBoxModel(flow_rate_units='1/yr')
+CBM = CarbonBoxModel(flow_rate_units='1/yr',production_rate_units='atoms/cm^2/s')
 CBM.add_nodes([strat, trop, MS, Bio])
 CBM.add_edges([f1, f2, f3])
 CBM.compile()
