@@ -541,7 +541,7 @@ class CarbonBoxModel:
         if not callable(production):
             raise ValueError("incorrect object type for production")
 
-        states = odeint(derivative, y_initial, time_values)
+        states = odeint(derivative, y_initial, time_values,  atol=1e-15, rtol=1e-15)
         return states, solution
 
     @partial(jit, static_argnums=(0, 2))
