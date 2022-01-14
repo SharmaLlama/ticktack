@@ -305,15 +305,25 @@ class SingleFitter(CarbonFitter):
                 raise ValueError('Must be a valid CBM model')
         self.cbm = cbm
         self.cbm.compile()
+        self.box = box
+        if hemisphere in ['south', 'north']:
+            self.hemisphere = hemisphere
+        else:
+            raise ValueError("'hemisphere' be one of the following: south, north")
+        self.cbm_model = cbm_model
+
         if cbm_model in ['Brehm21', 'Buntgen18']:
             self.steady_state_production = 1.76
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=1.76)
+            for i, node in enumerate(cbm.get_nodes_objects()):
+                if (node.get_hemisphere() == self.hemisphere) & (node.get_name() == self.box):
+                    self.box_idx = i
         else:
             self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
-        self.box = box
-        self.hemisphere = hemisphere
-        self.cbm_model = cbm_model
+            self.box_idx = 1
+
+
 
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time = 2000, num_offset=4):
         """
@@ -545,7 +555,7 @@ class SingleFitter(CarbonFitter):
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
-        binned_data = self.cbm.bin_data(event[:, 1], self.oversample, self.annual, growth=self.growth)
+        binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
         d14c = (binned_data - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
         return d14c[self.mask] + self.offset
 
@@ -564,7 +574,7 @@ class SingleFitter(CarbonFitter):
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
-        d14c = (event[:, 1] - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
+        d14c = (event[:, self.box_idx] - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
         return d14c + self.offset
 
     @partial(jit, static_argnums=(0,))
@@ -932,6 +942,7 @@ class MultiFitter(CarbonFitter):
         self.growth = None
         self.cbm = None
         self.cbm_model = None
+        self.box_idx = None
 
     def add_SingleFitter(self, sf):
         """
@@ -964,6 +975,12 @@ class MultiFitter(CarbonFitter):
             self.oversample = sf.oversample
         elif self.oversample < sf.oversample:
             self.oversample = sf.oversample
+
+        if not self.box_idx:
+            self.box_idx = sf.box_idx
+        elif not self.box_idx == sf.box_idx:
+            raise ValueError(
+                "'box' parameter and 'hemisphere' parameter for SingleFitters must be consistent")
 
         if self.steady_state_y0 is None:
             self.steady_state_y0 = sf.steady_state_y0
@@ -1314,7 +1331,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
             raise ValueError("Invalid production model")
         print("Done")
     else:
-        raise ValueError("Invalid sampler type. sampler must be one of the following: MCMC, NS")
+        raise ValueError("Invalid sampler type. 'sampler' must be one of the following: MCMC, NS")
     return result
 
 def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Guttler14', box='Troposphere',
