@@ -63,32 +63,32 @@ def test_fit_event():
                       production=10)
     assert True
 
-def test_chain_summary(SingleFitter_creation):
-    SingleFitter_creation.prepare_function(model="simple_sinusoid")
-    chain = SingleFitter_creation.MarkovChainSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
-                                                     SingleFitter_creation.log_joint_simple_sinusoid,
-                                                     burnin=10,
-                                                     production=10,
-                                                     args=(jnp.array([200., 0., -jnp.pi, 0.]),
-                                                           jnp.array([210., 5., jnp.pi, 15.]))
-                                                     )
-    SingleFitter_creation.chain_summary(chain, 8,
-                                        labels=["Start Date (yr)", "Duration (yr)", "phi (yr)", "Area"])
-    assert True
-
-def test_plot_multiple_chains(SingleFitter_creation):
-    SingleFitter_creation.prepare_function(model="simple_sinusoid")
-    chain = SingleFitter_creation.MarkovChainSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
-                                                     SingleFitter_creation.log_joint_simple_sinusoid,
-                                                     burnin=10,
-                                                     production=10,
-                                                     args=(jnp.array([200., 0., -jnp.pi, 0.]),
-                                                           jnp.array([210., 5., jnp.pi, 15.]))
-                                                     )
-    SingleFitter_creation.plot_multiple_chains([chain, chain], 8,
-                                               params_names=["Start Date (yr)", "Duration (yr)", "phi (yr)", "Area"],
-                                               labels=["1", "2"])
-    assert True
+# def test_chain_summary(SingleFitter_creation):
+#     SingleFitter_creation.prepare_function(model="simple_sinusoid")
+#     chain = SingleFitter_creation.MarkovChainSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
+#                                                      SingleFitter_creation.log_joint_simple_sinusoid,
+#                                                      burnin=10,
+#                                                      production=10,
+#                                                      args=(jnp.array([200., 0., -jnp.pi, 0.]),
+#                                                            jnp.array([210., 5., jnp.pi, 15.]))
+#                                                      )
+#     SingleFitter_creation.chain_summary(chain, 8,
+#                                         labels=["Start Date (yr)", "Duration (yr)", "phi (yr)", "Area"])
+#     assert True
+#
+# def test_plot_multiple_chains(SingleFitter_creation):
+#     SingleFitter_creation.prepare_function(model="simple_sinusoid")
+#     chain = SingleFitter_creation.MarkovChainSampler(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
+#                                                      SingleFitter_creation.log_joint_simple_sinusoid,
+#                                                      burnin=10,
+#                                                      production=10,
+#                                                      args=(jnp.array([200., 0., -jnp.pi, 0.]),
+#                                                            jnp.array([210., 5., jnp.pi, 15.]))
+#                                                      )
+#     SingleFitter_creation.plot_multiple_chains([chain, chain], 8,
+#                                                params_names=["Start Date (yr)", "Duration (yr)", "phi (yr)", "Area"],
+#                                                labels=["1", "2"])
+#     assert True
 
 def test_multi_likelihood(MultiFitter_creation):
     out = MultiFitter_creation.multi_likelihood(params=jnp.array([205., 1. / 12, jnp.pi / 2., 81. / 12]))
