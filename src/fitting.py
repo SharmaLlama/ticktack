@@ -324,7 +324,6 @@ class SingleFitter(CarbonFitter):
             self.box_idx = 1
 
 
-
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time = 2000, num_offset=4):
         """
         Loads d14c data from specified file
@@ -556,7 +555,7 @@ class SingleFitter(CarbonFitter):
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
         binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
-        d14c = (binned_data - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
+        d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
     @partial(jit, static_argnums=(0,))
@@ -574,7 +573,7 @@ class SingleFitter(CarbonFitter):
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
-        d14c = (event[:, self.box_idx] - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
+        d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
 
     @partial(jit, static_argnums=(0,))
@@ -1084,8 +1083,8 @@ class MultiFitter(CarbonFitter):
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
-        binned_data = self.cbm.bin_data(event[:, 1], self.oversample, self.annual, growth=self.growth)
-        d14c = (binned_data - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
+        binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
+        d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c
 
     @partial(jit, static_argnums=(0,))
