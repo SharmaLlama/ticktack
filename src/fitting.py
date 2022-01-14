@@ -275,7 +275,7 @@ class SingleFitter(CarbonFitter):
     Does parameter fitting, Monte Carlo sampling, plotting and more.
     """
 
-    def __init__(self, cbm, production_rate_units='atoms/cm^2/s', target_C_14=707., box='Troposphere',
+    def __init__(self, cbm, cbm_model, production_rate_units='atoms/cm^2/s', target_C_14=707., box='Troposphere',
                  hemisphere='north'):
         """
         Initializes a SingleFitter Object
@@ -305,12 +305,17 @@ class SingleFitter(CarbonFitter):
                 raise ValueError('Must be a valid CBM model')
         self.cbm = cbm
         self.cbm.compile()
-        self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
-        self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
+        if cbm_model in ['Brehm21', 'Buntgen18']:
+            self.steady_state_production = 1.76
+            self.steady_state_y0 = self.cbm.equilibrate(production_rate=1.76)
+        else:
+            self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
+            self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
         self.box = box
         self.hemisphere = hemisphere
+        self.cbm_model = cbm_model
 
-    def load_data(self, file_name, oversample=1008, burnin_oversample=1, num_offset=4):
+    def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time = 2000, num_offset=4):
         """
         Loads d14c data from specified file
         Parameters
@@ -335,7 +340,7 @@ class SingleFitter(CarbonFitter):
         self.d14c_data_error = jnp.array(data["sig_d14c"])
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
-        self.burn_in_time = jnp.arange(self.start - 1000, self.start)
+        self.burn_in_time = jnp.arange(self.start - 1 - burnin_time, self.start - 1)
         self.oversample = oversample
         self.burnin_oversample = burnin_oversample
         self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, int(self.oversample * (self.end - self.start + 2)))
@@ -362,13 +367,17 @@ class SingleFitter(CarbonFitter):
         self.gp = None
         if callable(model):
             self.production = model
+            self.production_model = 'custom'
         elif model == "simple_sinusoid":
             self.production = self.simple_sinusoid
+            self.production_model = 'simple sinusoid'
         elif model == "flexible_sinusoid":
             self.production = self.flexible_sinusoid
+            self.production_model = 'flexible sinusoid'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.interp_gp
+            self.production_model = 'control points'
             self.gp = True
         else:
             raise ValueError("model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, control_points")
@@ -899,7 +908,7 @@ class MultiFitter(CarbonFitter):
     A class for parametric inference of d14c data from a common time period using an ensemble of SingleFitter.
     Does parameter fitting, likelihood evaluations, Monte Carlo sampling, plotting and more.
     """
-    def __init__(self, sf=None):
+    def __init__(self):
         """
         Initializes a MultiFitter object. If sf is not None it should be a list of SingleFitter objects.
         Parameters
@@ -911,26 +920,137 @@ class MultiFitter(CarbonFitter):
         float
             Log-likelihood
         """
-        # TODO: add start, end filter
-        if isinstance(sf, list):
-            valid_sf = True
-            for object in sf:
-                valid_sf = valid_sf and isinstance(object, SingleFitter)
-            if valid_sf:
-                self.MultiFitter = sf
-            else:
-                raise ValueError("sf should be a list of SingleFitter objects")
-        elif sf is None:
-            self.MultiFitter = []
-            self.idx = 0
-            self.start = None
-            self.end = None
-        else:
-            raise ValueError("Invalid sf. sf should be None or a list of SingleFitter objects")
+        self.MultiFitter = []
+        self.burnin_oversample = 1
+        self.start = None
+        self.end = None
+        self.oversample = None
+        self.production = None
+        self.production_model = None
+        self.burn_in_time = None
+        self.steady_state_y0 = None
+        self.growth = None
+        self.cbm = None
+        self.cbm_model = None
+
+    def add_SingleFitter(self, sf):
+        """
+        Adds a SingleFitter Object to a Multifitter Object
+        Parameters
+        ----------
+        sf : SingleFitter
+            SingleFitter Object
+        Returns
+        -------
+        """
+        if not self.start:
+            self.start = sf.start
+        elif self.start > sf.start:
+            self.start = sf.start
+            
+        if not self.end:
+            self.end = sf.end
+        elif self.end < sf.end:
+            self.end = sf.end
+
+        if self.production is None:
+            self.production = sf.production
+            self.production_model = sf.production_model
+        elif self.production_model is not sf.production_model:
+            raise ValueError("production for SingleFitters must be consistent. Got {}, expected {}".format(sf.production_model,
+                             self.production_model))
+
+        if self.oversample is None:
+            self.oversample = sf.oversample
+        elif self.oversample < sf.oversample:
+            self.oversample = sf.oversample
+
+        if self.steady_state_y0 is None:
+            self.steady_state_y0 = sf.steady_state_y0
+        elif not jnp.allclose(self.steady_state_y0, sf.steady_state_y0):
+            raise ValueError("steady state burn-in solution for SingleFitters must be consistent. Got {}, expected {}".format(sf.steady_state_y0,
+                             self.steady_state_y0))
+
+        if self.growth is None:
+            self.growth = sf.growth
+        elif not jnp.allclose(self.growth, sf.growth):
+            raise ValueError("growth seasons for SingleFitters must be consistent. Got {}, expected {}".format(sf.growth,
+                             self.growth))
+
+        if self.cbm is None:
+            self.cbm_model = sf.cbm_model
+            self.cbm = ticktack.load_presaved_model(self.cbm_model, production_rate_units = 'atoms/cm^2/s')
+            self.cbm.compile()
+        elif not self.cbm_model is sf.cbm_model:
+            raise ValueError("cbm model for SingleFitters must be consistent. Got {}, expected {}".format(sf.cbm_model,
+                             self.cbm_model))
+        self.MultiFitter.append(sf)
 
     def compile(self):
+        self.burn_in_time = jnp.arange(self.start - 2000 - 1, self.start - 1)
+        self.annual = jnp.arange(self.start, self.end + 1)
         for sf in self.MultiFitter:
             sf.multi_mask = jnp.in1d(self.annual, sf.time_data)
+
+    @partial(jit, static_argnums=(0))
+    def run_burnin(self, y0=None, params=()):
+        """
+        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Parameters
+        ----------
+        time_values : ndarray
+            Time values
+        y0 : ndarray, optional
+            The initial contents of all boxes
+        params : ndarray, optional
+            Parameters for self.production
+        Returns
+        -------
+        ndarray
+            The value of each box in the carbon box at the specified time_values along with the steady state solution
+            for the system
+        """
+        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
+        return box_values
+
+    @partial(jit, static_argnums=(0))
+    def run_event(self, y0=None, params=()):
+        """
+        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Parameters
+        ----------
+        time_values : ndarray
+            Time values
+        y0 : ndarray, optional
+            The initial contents of all boxes
+        params : ndarray, optional
+            Parameters for self.production
+        Returns
+        -------
+        ndarray
+            The value of each box in the carbon box at the specified time_values along with the steady state solution
+            for the system
+        """
+        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, args=params)
+        return box_values
+
+    # @partial(jit, static_argnums=(0,))
+    # def multi_likelihood(self, params):
+    #     """
+    #     Computes the ensemble log-likelihood of parameters of some parametric model, across multiple d14c datasets
+    #     Parameters
+    #     ----------
+    #     params : ndarray
+    #         Parameters of a parametric model
+    #     Returns
+    #     -------
+    #     float
+    #         Log-likelihood
+    #     """
+    #     like = 0
+    #     for sf in self.MultiFitter:
+    #         like += sf.log_likelihood(params)
+    #     return like
 
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
@@ -945,29 +1065,11 @@ class MultiFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        sf = self.MultiFitter[self.idx]
-        burnin = sf.run_burnin(y0=sf.steady_state_y0, params=params)
-        event = sf.run_event(y0=burnin[-1, :], params=params)
-        binned_data = sf.cbm.bin_data(event[:, 1], sf.oversample, sf.annual, growth=sf.growth)
-        d14c = (binned_data - sf.steady_state_y0[1]) / sf.steady_state_y0[1] * 1000
+        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        event = self.run_event(y0=burnin[-1, :], params=params)
+        binned_data = self.cbm.bin_data(event[:, 1], self.oversample, self.annual, growth=self.growth)
+        d14c = (binned_data - self.steady_state_y0[1]) / self.steady_state_y0[1] * 1000
         return d14c
-
-    @partial(jit, static_argnums=(0, 1))
-    def log_likelihood(self, sf, d14c):
-        """
-        Computes the gaussian log-likelihood of parameters of self.production
-        Parameters
-        ----------
-        params : ndarray, optional
-            Parameters of self.production
-        Returns
-        -------
-        float
-            Gaussian log-likelihood
-        """
-        d14c = d14c[sf.multi_mask] + sf.offset
-        chi2 = jnp.sum(((sf.d14c_data - d14c) / sf.d14c_data_error) ** 2)
-        return -0.5 * chi2
 
     @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
@@ -982,10 +1084,11 @@ class MultiFitter(CarbonFitter):
         float
             Log-likelihood
         """
-        like = 0
         d14c = self.dc14(params)
+        like = 0
         for sf in self.MultiFitter:
-            like += self.log_likelihood(sf, d14c)
+            d14c_sf = d14c[sf.multi_mask] + sf.offset
+            like += jnp.sum(((sf.d14c_data - d14c_sf) / sf.d14c_data_error) ** 2) * -0.5
         return like
 
     @partial(jit, static_argnums=(0,))
@@ -1079,29 +1182,6 @@ class MultiFitter(CarbonFitter):
         pos = self.multi_likelihood(params=params)
         return lp + pos
 
-    def add_SingleFitter(self, sf):
-        """
-        Adds a SingleFitter Object to a Multifitter Object
-        Parameters
-        ----------
-        sf : SingleFitter
-            SingleFitter Object
-        Returns
-        -------
-        """
-        if not self.start:
-            self.start = sf.start
-            self.end = sf.end
-            self.annual = jnp.arange(self.start, self.end + 1)
-        elif self.start != sf.start:
-            raise ValueError("start date for SingleFitters must be consistent. Got {}, expected {}".format(sf.start,
-                             self.start))
-        if self.end < sf.end:
-            self.idx = len(self.MultiFitter)
-            self.end = sf.end
-            self.annual = jnp.arange(self.start, self.end + 1)
-        self.MultiFitter.append(sf)
-
     def get_time_period(self):
         """
         Retrieves the earliest and the latest time sampling covered by the SingleFitters
@@ -1116,7 +1196,7 @@ class MultiFitter(CarbonFitter):
         end = jnp.max(jnp.array([sf.end for sf in self.MultiFitter]))
         return start, end
 
-def get_data(path=None, event=None, hemisphere='north'):
+def get_data(path=None, event=None):
     """
     Retrieves the earliest and the latest time sampling covered by the SingleFitters.
     Parameters
@@ -1136,17 +1216,12 @@ def get_data(path=None, event=None, hemisphere='north'):
     """
     if path:
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-    elif event in ['660BCE', '775AD', '993AD', '5259BCE', '5410BCE', '7176BCE']:
-        if hemisphere == 'north':
-            file = 'data/datasets/' + event + '/NH'
-        elif hemisphere == 'south':
-            file = 'data/datasets/' + event + '/SH'
-        else:
-            raise ValueError("Invalid hemisphere, hemisphere must be from: 'north', 'south'")
+    elif event in ['660BCE_Ew', '660BCE_Lw', '775AD early', '775AD late', '993AD', '5259BCE', '5410BCE', '7176BCE']:
+        file = 'data/datasets/' + event
         path = os.path.join(os.path.dirname(__file__), file)
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
     else:
-        raise ValueError("Invalid path, or event is not from: '660BCE', '775AD', '993AD', '5259BCE', '5410BCE', '7176BCE'")
+        raise ValueError("Invalid path, or event is not from the following: '660BCE_Ew', '660BCE_Lw', '775AD early', '775AD late', '993AD', '5259BCE', '5410BCE', '7176BCE'")
     return file_names
 
 def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', burnin=500, production=1000,
@@ -1178,7 +1253,6 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
     result
         MCMC sampler or NS sampler
     """
-    start, end = (mf.start, mf.end)
     if sampler == 'MCMC':
         if production_model == 'simple_sinusoid':
             default_params = np.array([year, 1./12, np.pi/2., 81./12])
@@ -1220,15 +1294,15 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
             default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
             result = mf.NestedSampler(default_params,
                                       likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([start, 0., -jnp.pi, 0.]),
-                                      high_bound=jnp.array([end, 5., jnp.pi, 15.])
+                                      low_bound=jnp.array([year-5, 0., -jnp.pi, 0.]),
+                                      high_bound=jnp.array([year+5, 5., jnp.pi, 15.])
                                       )
         elif production_model == 'flexible_sinusoid':
             default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
             result = mf.NestedSampler(default_params,
                                       likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([start, 0., -jnp.pi, 0., 0.]),
-                                      high_bound=jnp.array([end, 5., jnp.pi, 15., 2.])
+                                      low_bound=jnp.array([year-5, 0., -jnp.pi, 0., 0.]),
+                                      high_bound=jnp.array([year+5, 5., jnp.pi, 15., 2.])
                                       )
         elif callable(production_model):
             result = mf.NestedSampler(params,
@@ -1292,14 +1366,11 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         mf = MultiFitter()
     cbm = ticktack.load_presaved_model(cbm_model, production_rate_units='atoms/cm^2/s')
     if event:
-        file_names = get_data(event=event, hemisphere=hemisphere)
+        file_names = get_data(event=event)
         print("Retrieving data...")
         for file in tqdm(file_names):
-            if hemisphere == 'north':
-                file_name = 'data/datasets/' + event + '/NH/' + file
-            else:
-                file_name = 'data/datasets/' + event + '/SH/' + file
-            sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
+            file_name = 'data/datasets/' + event + '/' + file
+            sf = SingleFitter(cbm, cbm_model=cbm_model, box=box, hemisphere=hemisphere)
             sf.load_data(os.path.join(os.path.dirname(__file__), file_name), oversample=oversample)
             sf.prepare_function(model=production_model)
             mf.add_SingleFitter(sf)
@@ -1307,7 +1378,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         file_names = get_data(path=path)
         print("Retrieving data...")
         for file_name in tqdm(file_names):
-            sf = SingleFitter(cbm, box=box, hemisphere=hemisphere)
+            sf = SingleFitter(cbm, cbm_model=cbm_model, box=box, hemisphere=hemisphere)
             sf.load_data(path + '/' + file_name, oversample=oversample)
             sf.prepare_function(model=production_model)
             mf.add_SingleFitter(sf)
