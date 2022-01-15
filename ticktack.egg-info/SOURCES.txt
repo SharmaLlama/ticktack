@@ -1,0 +1,12 @@
+MANIFEST.in
+README.md
+setup.py
+src/__init__.py
+src/fitting.py
+src/ode.py
+src/ticktack.py
+ticktack.egg-info/PKG-INFO
+ticktack.egg-info/SOURCES.txt
+ticktack.egg-info/dependency_links.txt
+ticktack.egg-info/requires.txt
+ticktack.egg-info/top_level.txt

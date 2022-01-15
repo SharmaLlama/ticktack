@@ -1,0 +1,15 @@
+astropy
+celerite2
+chainconsumer
+emcee
+h5py==3.3.0
+hdfdict
+jax==0.2.25
+jaxlib==0.1.69
+jaxns
+matplotlib
+numpy
+pandas
+scipy
+seaborn
+tqdm

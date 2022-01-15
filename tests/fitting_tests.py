@@ -36,9 +36,11 @@ def MultiFitter_creation(SingleFitter_creation):
     return mf
 
 def test_get_data():
-    fitting.get_data(event="993AD")
-    fitting.get_data(event="775AD early")
-    fitting.get_data(event="775AD late")
+    fitting.get_data(event="993AD-N")
+    fitting.get_data(event="993AD-S")
+    fitting.get_data(event="775AD-early-N")
+    fitting.get_data(event="775AD-early-S")
+    fitting.get_data(event="775AD-late-N")
     fitting.get_data(event="660BCE_Ew")
     fitting.get_data(event="660BCE_Lw")
     fitting.get_data(event="5259BCE")
@@ -48,17 +50,18 @@ def test_get_data():
 
 def test_fit_event():
     fitting.fit_event(993,
-                      event='993AD',
+                      event='993AD-S',
                       production_model='simple_sinusoid',
                       sampler="MCMC",
+                      hemisphere='south',
                       burnin=10,
                       production=10)
     mf = fitting.fit_event(993,
-                           event='993AD',
-                           sampler=None)
+                           event='993AD-S',
+                           sampler=None, hemisphere='south')
     fitting.fit_event(993,
-                      event='993AD',
-                      sampler='MCMC', mf=mf,
+                      event='993AD-S',
+                      sampler='MCMC', mf=mf, hemisphere='south', 
                       burnin=10,
                       production=10)
     assert True

@@ -1232,12 +1232,13 @@ def get_data(path=None, event=None):
     """
     if path:
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-    elif event in ['660BCE_Ew', '660BCE_Lw', '775AD early', '775AD late', '993AD', '5259BCE', '5410BCE', '7176BCE']:
+    elif event in ['660BCE_Ew', '660BCE_Lw', '775AD-early-N', '775AD-early-S', '775AD-late-N',
+                   '993AD-N', '993AD-S', '5259BCE', '5410BCE', '7176BCE']:
         file = 'data/datasets/' + event
         path = os.path.join(os.path.dirname(__file__), file)
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
     else:
-        raise ValueError("Invalid path, or event is not from the following: '660BCE_Ew', '660BCE_Lw', '775AD early', '775AD late', '993AD', '5259BCE', '5410BCE', '7176BCE'")
+        raise ValueError("Invalid path, or event is not from the following: '660BCE_Ew', '660BCE_Lw', '775AD-early', '775AD-late', '993AD', '5259BCE', '5410BCE', '7176BCE'")
     return file_names
 
 def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', burnin=500, production=1000,
