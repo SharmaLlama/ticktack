@@ -1263,7 +1263,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
                                             likelihood = mf.log_joint_simple_sinusoid,
                                             burnin = burnin,
                                             production = production,
-                                            args = (jnp.array([year-5, 1/365., -jnp.pi, 0.]),
+                                            args = (jnp.array([year-5, 1/52., -jnp.pi, 0.]),
                                             jnp.array([year+5, 5., jnp.pi, 15.]))
                                            )
         elif production_model == 'flexible_sinusoid':
@@ -1272,7 +1272,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
                                             likelihood = mf.log_joint_flexible_sinusoid,
                                             burnin = burnin,
                                             production = production,
-                                            args = (jnp.array([year-5, 1/365, -jnp.pi, 0., 0.]),
+                                            args = (jnp.array([year-5, 1/52, -jnp.pi, 0., 0.]),
                                             jnp.array([year+5, 5., jnp.pi, 15., 2.]))
                                            )
         elif callable(production_model):
@@ -1299,14 +1299,14 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
             default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
             result = mf.NestedSampler(default_params,
                                       likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([year-5, 1/365., -jnp.pi, 0.]),
+                                      low_bound=jnp.array([year-5, 1/52., -jnp.pi, 0.]),
                                       high_bound=jnp.array([year+5, 5., jnp.pi, 15.])
                                       )
         elif production_model == 'flexible_sinusoid':
             default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
             result = mf.NestedSampler(default_params,
                                       likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([year-5, 1/365., -jnp.pi, 0., 0.]),
+                                      low_bound=jnp.array([year-5, 1/52., -jnp.pi, 0., 0.]),
                                       high_bound=jnp.array([year+5, 5., jnp.pi, 15., 2.])
                                       )
         elif callable(production_model):
@@ -1326,7 +1326,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
 
 def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Guttler14', box='Troposphere',
               hemisphere='north', sampler=None, burnin=500, production=1000, params=(), low_bounds=None,
-              up_bounds=None, mf=None, oversample=108):
+              up_bounds=None, mf=None, oversample=108, burnin_time=2000):
     """
     Fits a Miyake event.
     Parameters
@@ -1378,7 +1378,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         for file in tqdm(file_names):
             file_name = 'data/datasets/' + event + '/' + file
             sf = SingleFitter(cbm, cbm_model, box=box, hemisphere=hemisphere)
-            sf.load_data(os.path.join(os.path.dirname(__file__), file_name), oversample=oversample)
+            sf.load_data(os.path.join(os.path.dirname(__file__), file_name), oversample=oversample, burnin_time=burnin_time)
             sf.compile_production_model(model=production_model)
             mf.add_SingleFitter(sf)
     elif path:
@@ -1386,7 +1386,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         print("Retrieving data...")
         for file_name in tqdm(file_names):
             sf = SingleFitter(cbm, cbm_model=cbm_model, box=box, hemisphere=hemisphere)
-            sf.load_data(path + '/' + file_name, oversample=oversample)
+            sf.load_data(path + '/' + file_name, oversample=oversample, burnin_time=burnin_time)
             sf.compile_production_model(model=production_model)
             mf.add_SingleFitter(sf)
     mf.compile()
