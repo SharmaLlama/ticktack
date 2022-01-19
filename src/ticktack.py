@@ -185,7 +185,7 @@ class CarbonBoxModel:
         self._fluxes = None
         self._decay_matrix = None
         self._production_coefficients = None
-        self._decay_constant = jnp.log(2) / 5730
+        self._decay_constant = jnp.log(2) / 5700
         self._production_rate_units = production_rate_units
         self._flow_rate_units = flow_rate_units
         self._corrected_fluxes = None
