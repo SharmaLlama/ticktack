@@ -579,21 +579,25 @@ class CarbonBoxModel:
 
         masked = jnp.linspace(0, 1, time_oversample)
         kernel = (masked < jnp.count_nonzero(growth)/12)
-        shifted_index = self._shifted_index_finder(growth)
+        
+        @partial(jit)
+        def _shifted_index_finder(seasons):
+            first1 = jnp.where(seasons == 1, size=1)[0][0]
+            first0 = jnp.where(seasons == 0, size=1)[0][0]
+            all1s = jnp.where(seasons == 1, size=12)[0]
+            after1 = jnp.where(all1s > first0, all1s, 0)
+            after1 = after1.at[jnp.nonzero(after1, size=1)].get()[0]
+            num = jax.lax.sub(first1, after1)
+            val = cond(num == 0, lambda x: 12 - first1, lambda x : 12 - after1, num)
+            act = cond(jnp.all(seasons == 1), lambda x: 0, lambda x: val, seasons)
+            return act
+    
+        shifted_index = _shifted_index_finder(growth)
+  
         binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
         return binned_data
     
-    @partial(jit)
-    def _shifted_index_finder(seasons):
-        first1 = jnp.where(seasons == 1, size=1)[0][0]
-        first0 = jnp.where(seasons == 0, size=1)[0][0]
-        all1s = jnp.where(seasons == 1, size=12)[0]
-        after1 = jnp.where(all1s > first0, all1s, 0)
-        after1 = after1.at[jnp.nonzero(after1, size=1)].get()[0]
-        num = jax.lax.sub(first1, after1)
-        val = cond(num == 0, lambda x: 12 - first1, lambda x : 12 - after1, num)
-        act = cond(jnp.all(seasons == 1), lambda x: 0, lambda x: val, seasons)
-        return act
+
 
 
     @partial(jit, static_argnums=(0, 3))
