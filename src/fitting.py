@@ -56,7 +56,7 @@ class CarbonFitter:
         print("Running production...")
         sampler.reset()
         sampler.run_mcmc(p0, production, progress=True);
-        return sampler.flatchain
+        return sampler.flatchain, sampler
 
     def NestedSampler(self, params, likelihood, low_bound=None, high_bound=None, sampler_name='multi_ellipsoid'):
         """
@@ -1326,7 +1326,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
 
 def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Guttler14', box='Troposphere',
               hemisphere='north', sampler=None, burnin=500, production=1000, params=(), low_bounds=None,
-              up_bounds=None, mf=None, oversample=108):
+              up_bounds=None, mf=None, oversample=1008):
     """
     Fits a Miyake event.
     Parameters
