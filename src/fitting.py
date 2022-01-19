@@ -348,7 +348,7 @@ class SingleFitter(CarbonFitter):
         else:
             self.growth = jnp.array([1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1])
 
-    def prepare_function(self, model=None):
+    def compile_production_model(self, model=None):
         """
         Specifies the production rate function
         Parameters
@@ -612,7 +612,7 @@ class SingleFitter(CarbonFitter):
         lp += ((params[4] < low_bounds[4]) | (params[4] > up_bounds[4])) * -jnp.inf
         return lp
 
-    @partial(jit, static_argnums=(0,))
+    # @partial(jit, static_argnums=(0,))
     def log_likelihood(self, params=()):
         """
         Computes the gaussian log-likelihood of parameters of self.production
@@ -625,9 +625,8 @@ class SingleFitter(CarbonFitter):
         float
             Gaussian log-likelihood
         """
-        d_14_c = self.dc14(params=params)
-        chi2 = jnp.sum(((self.d14c_data - d_14_c) / self.d14c_data_error) ** 2)
-        return -0.5 * chi2
+        d14c = self.dc14(params)
+        return -0.5 * jnp.sum(((self.d14c_data - d14c) / self.d14c_data_error) ** 2)
 
     @partial(jit, static_argnums=(0,))
     def neg_log_likelihood(self, params=()):
@@ -1219,13 +1218,13 @@ def get_data(path=None, event=None):
     """
     if path:
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
-    elif event in ['660BCE_Ew', '660BCE_Lw', '775AD-early-N', '775AD-early-S', '775AD-late-N',
+    elif event in ['660BCE-Ew', '660BCE-Lw', '775AD-early-N', '775AD-early-S', '775AD-late-N',
                    '993AD-N', '993AD-S', '5259BCE', '5410BCE', '7176BCE']:
         file = 'data/datasets/' + event
         path = os.path.join(os.path.dirname(__file__), file)
         file_names = [f for f in os.listdir(path) if os.path.isfile(os.path.join(path, f))]
     else:
-        raise ValueError("Invalid path, or event is not from the following: '660BCE_Ew', '660BCE_Lw', '775AD-early', '775AD-late', '993AD', '5259BCE', '5410BCE', '7176BCE'")
+        raise ValueError("Invalid path, or event is not from the following: '660BCE-Ew', '660BCE-Lw', '775AD-early', '775AD-late', '993AD', '5259BCE', '5410BCE', '7176BCE'")
     return file_names
 
 def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', burnin=500, production=1000,
@@ -1300,17 +1299,19 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
             default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
             result = mf.NestedSampler(default_params,
                                       likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([year-5, 0., -jnp.pi, 0.]),
+                                      low_bound=jnp.array([year-5, 1/365., -jnp.pi, 0.]),
                                       high_bound=jnp.array([year+5, 5., jnp.pi, 15.])
                                       )
         elif production_model == 'flexible_sinusoid':
             default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
             result = mf.NestedSampler(default_params,
                                       likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([year-5, 0., -jnp.pi, 0., 0.]),
+                                      low_bound=jnp.array([year-5, 1/365., -jnp.pi, 0., 0.]),
                                       high_bound=jnp.array([year+5, 5., jnp.pi, 15., 2.])
                                       )
         elif callable(production_model):
+            if any(arg is None for arg in (low_bounds, up_bounds)):
+                raise ValueError("lower bounds and upper bounds must be specified for custom production model")
             result = mf.NestedSampler(params,
                                       likelihood=mf.multi_likelihood,
                                       low_bound=low_bounds,
@@ -1378,7 +1379,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
             file_name = 'data/datasets/' + event + '/' + file
             sf = SingleFitter(cbm, cbm_model, box=box, hemisphere=hemisphere)
             sf.load_data(os.path.join(os.path.dirname(__file__), file_name), oversample=oversample)
-            sf.prepare_function(model=production_model)
+            sf.compile_production_model(model=production_model)
             mf.add_SingleFitter(sf)
     elif path:
         file_names = get_data(path=path)
@@ -1386,7 +1387,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         for file_name in tqdm(file_names):
             sf = SingleFitter(cbm, cbm_model=cbm_model, box=box, hemisphere=hemisphere)
             sf.load_data(path + '/' + file_name, oversample=oversample)
-            sf.prepare_function(model=production_model)
+            sf.compile_production_model(model=production_model)
             mf.add_SingleFitter(sf)
     mf.compile()
     if not sampler:

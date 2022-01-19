@@ -41,8 +41,8 @@ def test_get_data():
     fitting.get_data(event="775AD-early-N")
     fitting.get_data(event="775AD-early-S")
     fitting.get_data(event="775AD-late-N")
-    fitting.get_data(event="660BCE_Ew")
-    fitting.get_data(event="660BCE_Lw")
+    fitting.get_data(event="660BCE-Ew")
+    fitting.get_data(event="660BCE-Lw")
     fitting.get_data(event="5259BCE")
     fitting.get_data(event="5410BCE")
     fitting.get_data(event="7176BCE")
@@ -61,7 +61,7 @@ def test_fit_event():
                            sampler=None, hemisphere='south')
     fitting.fit_event(993,
                       event='993AD-S',
-                      sampler='MCMC', mf=mf, hemisphere='south', 
+                      sampler='MCMC', mf=mf, hemisphere='south',
                       burnin=10,
                       production=10)
     assert True
