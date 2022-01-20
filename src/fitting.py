@@ -370,13 +370,16 @@ class SingleFitter(CarbonFitter):
         elif model == "flexible_sinusoid":
             self.production = self.flexible_sinusoid
             self.production_model = 'flexible sinusoid'
+        elif model == "flexible_sinusoid_affine_variant":
+            self.production = self.flexible_sinusoid_affine_variant
+            self.production_model = 'flexible sinusoid affine variant'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.interp_gp
             self.production_model = 'control_points'
             self.gp = True
         else:
-            raise ValueError("model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, control_points")
+            raise ValueError("model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, flexible_sinusoid_affine_variant, control_points")
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
@@ -484,6 +487,14 @@ class SingleFitter(CarbonFitter):
             2 * np.pi / 11 * t + phase) + height
         return production
 
+    @partial(jit, static_argnums=(0,))
+    def flexible_sinusoid_affine_variant(self, t, *args):
+        gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + gradient * (
+                t - self.start) + amplitude * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
+        return production
+
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
         """
@@ -563,55 +574,6 @@ class SingleFitter(CarbonFitter):
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
 
-    @partial(jit, static_argnums=(0,))
-    def log_prior_simple_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log prior likelihood of parameters of simple sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of simple sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            log prior likelihood
-        """
-        lp = 0
-        lp += ((params[0] < low_bounds[0]) | (params[0] > up_bounds[0])) * -jnp.inf
-        lp += ((params[1] < low_bounds[1]) | (params[1] > up_bounds[1])) * -jnp.inf
-        lp += ((params[2] < low_bounds[2]) | (params[2] > up_bounds[2])) * -jnp.inf
-        lp += ((params[3] < low_bounds[3]) | (params[3] > up_bounds[3])) * -jnp.inf
-        return lp
-
-    @partial(jit, static_argnums=(0,))
-    def log_prior_flexible_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log prior likelihood of parameters of flexible sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of flexible sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            log prior likelihood
-        """
-        lp = 0
-        lp += ((params[0] < low_bounds[0]) | (params[0] > up_bounds[0])) * -jnp.inf
-        lp += ((params[1] < low_bounds[1]) | (params[1] > up_bounds[1])) * -jnp.inf
-        lp += ((params[2] < low_bounds[2]) | (params[2] > up_bounds[2])) * -jnp.inf
-        lp += ((params[3] < low_bounds[3]) | (params[3] > up_bounds[3])) * -jnp.inf
-        lp += ((params[4] < low_bounds[4]) | (params[4] > up_bounds[4])) * -jnp.inf
-        return lp
-
     # @partial(jit, static_argnums=(0,))
     def log_likelihood(self, params=()):
         """
@@ -629,6 +591,13 @@ class SingleFitter(CarbonFitter):
         return -0.5 * jnp.sum(((self.d14c_data - d14c) / self.d14c_data_error) ** 2)
 
     @partial(jit, static_argnums=(0,))
+    def log_joint_likelihood(self, params, low_bounds, up_bounds):
+        lp = 0
+        lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
+        pos = self.log_likelihood(params)
+        return lp + pos
+
+    @partial(jit, static_argnums=(0,))
     def neg_log_likelihood(self, params=()):
         """
         Computes the negative gaussian log-likelihood of parameters of self.production
@@ -642,48 +611,6 @@ class SingleFitter(CarbonFitter):
             Negative gaussian log-likelihood
         """
         return -1 * self.log_likelihood(params=params)
-
-    @partial(jit, static_argnums=(0,))
-    def log_joint_simple_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log joint likelihood of parameters of simple sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of simple sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            Log joint likelihood
-        """
-        lp = self.log_prior_simple_sinusoid(params, low_bounds, up_bounds)
-        pos = self.log_likelihood(params=params)
-        return lp + pos
-
-    @partial(jit, static_argnums=(0,))
-    def log_joint_flexible_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log joint likelihood of parameters of flexible sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of flexible sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            Log joint likelihood
-        """
-        lp = self.log_prior_flexible_sinusoid(params, low_bounds, up_bounds)
-        pos = self.log_likelihood(params=params)
-        return lp + pos
 
     @partial(jit, static_argnums=(0,))
     def neg_log_likelihood_gp(self, params):
@@ -924,6 +851,7 @@ class MultiFitter(CarbonFitter):
         self.production_model = None
         self.burn_in_time = None
         self.steady_state_y0 = None
+        self.steady_state_production = None
         self.growth = None
         self.cbm = None
         self.cbm_model = None
@@ -969,6 +897,7 @@ class MultiFitter(CarbonFitter):
 
         if self.steady_state_y0 is None:
             self.steady_state_y0 = sf.steady_state_y0
+            self.steady_state_production = sf.steady_state_production
         elif not jnp.allclose(self.steady_state_y0, sf.steady_state_y0):
             raise ValueError("steady state burn-in solution for SingleFitters must be consistent. Got {}, expected {}".format(sf.steady_state_y0,
                              self.steady_state_y0))
@@ -1094,109 +1023,11 @@ class MultiFitter(CarbonFitter):
         return like
 
     @partial(jit, static_argnums=(0,))
-    def log_prior_simple_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log prior likelihood of parameters of simple sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of simple sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            log prior likelihood
-        """
+    def log_joint_likelihood(self, params, low_bounds, up_bounds):
         lp = 0
-        lp += ((params[0] < low_bounds[0]) | (params[0] > up_bounds[0])) * -jnp.inf
-        lp += ((params[1] < low_bounds[1]) | (params[1] > up_bounds[1])) * -jnp.inf
-        lp += ((params[2] < low_bounds[2]) | (params[2] > up_bounds[2])) * -jnp.inf
-        lp += ((params[3] < low_bounds[3]) | (params[3] > up_bounds[3])) * -jnp.inf
-        return lp
-
-    @partial(jit, static_argnums=(0,))
-    def log_prior_flexible_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log prior likelihood of parameters of flexible sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of flexible sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            log prior likelihood
-        """
-        lp = 0
-        lp += ((params[0] < low_bounds[0]) | (params[0] > up_bounds[0])) * -jnp.inf
-        lp += ((params[1] < low_bounds[1]) | (params[1] > up_bounds[1])) * -jnp.inf
-        lp += ((params[2] < low_bounds[2]) | (params[2] > up_bounds[2])) * -jnp.inf
-        lp += ((params[3] < low_bounds[3]) | (params[3] > up_bounds[3])) * -jnp.inf
-        lp += ((params[4] < low_bounds[4]) | (params[4] > up_bounds[4])) * -jnp.inf
-        return lp
-
-    @partial(jit, static_argnums=(0,))
-    def log_joint_simple_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log joint likelihood of parameters of simple sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of simple sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            Log joint likelihood
-        """
-        lp = self.log_prior_simple_sinusoid(params, low_bounds, up_bounds)
-        pos = self.multi_likelihood(params=params)
+        lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
+        pos = self.multi_likelihood(params)
         return lp + pos
-
-    @partial(jit, static_argnums=(0,))
-    def log_joint_flexible_sinusoid(self, params, low_bounds, up_bounds):
-        """
-        Computes the log joint likelihood of parameters of flexible sinusoid model
-        Parameters
-        ----------
-        params : ndarray
-            Parameters of flexible sinusoid model
-        low_bounds : ndarray
-            Lower bounds for 'params'
-        up_bounds : ndarray
-            Upper bounds for 'params'
-        Returns
-        -------
-        float
-            Log joint likelihood
-        """
-        lp = self.log_prior_flexible_sinusoid(params, low_bounds, up_bounds)
-        pos = self.multi_likelihood(params=params)
-        return lp + pos
-
-    def get_time_period(self):
-        """
-        Retrieves the earliest and the latest time sampling covered by the SingleFitters
-        Parameters
-        ----------
-        Returns
-        -------
-        tuple
-            the start and the end of the time sampling
-        """
-        start = jnp.min(jnp.array([sf.start for sf in self.MultiFitter]))
-        end = jnp.max(jnp.array([sf.end for sf in self.MultiFitter]))
-        return start, end
 
 def get_data(path=None, event=None):
     """
@@ -1228,7 +1059,7 @@ def get_data(path=None, event=None):
     return file_names
 
 def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', burnin=500, production=1000,
-                 params=(), low_bounds=None, up_bounds=None):
+                 params=None, low_bounds=None, up_bounds=None):
     """
     Runs Monte Carlo sampler on a Miyake event.
     Parameters
@@ -1256,76 +1087,52 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
     result
         MCMC sampler or NS sampler
     """
+    if production_model == 'simple_sinusoid':
+        default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
+        default_low_bounds = jnp.array([year - 5, 1 / 52., -jnp.pi, 0.])
+        default_up_bounds = jnp.array([year + 5, 5., jnp.pi, 15.])
+    elif production_model == 'flexible_sinusoid':
+        default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
+        default_low_bounds = jnp.array([year - 5, 1 / 52., -jnp.pi, 0., 0.])
+        default_up_bounds = jnp.array([year + 5, 5., jnp.pi, 15., 2.])
+    elif production_model == 'flexible_sinusoid_affine_variant':
+        default_params = np.array([0, year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 100, year - 5, 1 / 52., -jnp.pi, 0., 0.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 100, year + 5, 5., jnp.pi, 15., 2.])
+
+    if all(arg is not None for arg in (low_bounds, up_bounds)):
+        low_bounds = low_bounds
+        up_bounds = up_bounds
+    else:
+        low_bounds = default_low_bounds
+        up_bounds = default_up_bounds
+
+    if params is not None:
+        params = params
+    else:
+        params = default_params
+
     if sampler == 'MCMC':
-        if production_model == 'simple_sinusoid':
-            default_params = np.array([year, 1./12, np.pi/2., 81./12])
-            result = mf.MarkovChainSampler(default_params,
-                                            likelihood = mf.log_joint_simple_sinusoid,
-                                            burnin = burnin,
-                                            production = production,
-                                            args = (jnp.array([year-5, 1/52., -jnp.pi, 0.]),
-                                            jnp.array([year+5, 5., jnp.pi, 15.]))
-                                           )
-        elif production_model == 'flexible_sinusoid':
-            default_params = np.array([year, 1./12, np.pi/2., 81./12, 0.18])
-            result = mf.MarkovChainSampler(default_params,
-                                            likelihood = mf.log_joint_flexible_sinusoid,
-                                            burnin = burnin,
-                                            production = production,
-                                            args = (jnp.array([year-5, 1/52, -jnp.pi, 0., 0.]),
-                                            jnp.array([year+5, 5., jnp.pi, 15., 2.]))
-                                           )
-        elif callable(production_model):
-            if any(arg is None for arg in (low_bounds, up_bounds)):
-                raise ValueError("lower bounds and upper bounds must be specified for custom production model")
-            def log_joint_likelihood(params, low_bounds, up_bounds):
-                lp = 0
-                lp += jnp.all(
-                    (params < low_bounds) | (params > up_bounds)
-                ) * -jnp.inf
-                pos = mf.multi_likelihood(params=params)
-                return lp + pos
-            result = mf.MarkovChainSampler(params,
-                                            likelihood = log_joint_likelihood,
-                                            burnin = burnin,
-                                            production = production,
-                                           args = (low_bounds, up_bounds)
-                                           )
-        else:
-            raise ValueError("Invalid production model")
+        chain = mf.MarkovChainSampler(params,
+                                       likelihood=mf.log_joint_likelihood,
+                                       burnin=burnin,
+                                       production=production,
+                                       args=(low_bounds, up_bounds)
+                                       )
     elif sampler == 'NS':
         print("Running Nested Sampling...")
-        if production_model == 'simple_sinusoid':
-            default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
-            result = mf.NestedSampler(default_params,
-                                      likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([year-5, 1/52., -jnp.pi, 0.]),
-                                      high_bound=jnp.array([year+5, 5., jnp.pi, 15.])
-                                      )
-        elif production_model == 'flexible_sinusoid':
-            default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
-            result = mf.NestedSampler(default_params,
-                                      likelihood=mf.multi_likelihood,
-                                      low_bound=jnp.array([year-5, 1/52., -jnp.pi, 0., 0.]),
-                                      high_bound=jnp.array([year+5, 5., jnp.pi, 15., 2.])
-                                      )
-        elif callable(production_model):
-            if any(arg is None for arg in (low_bounds, up_bounds)):
-                raise ValueError("lower bounds and upper bounds must be specified for custom production model")
-            result = mf.NestedSampler(params,
-                                      likelihood=mf.multi_likelihood,
-                                      low_bound=low_bounds,
-                                      high_bound=up_bounds
-                                      )
-        else:
-            raise ValueError("Invalid production model")
+        chain = mf.NestedSampler(params,
+                                 likelihood=mf.multi_likelihood,
+                                 low_bound=low_bounds,
+                                 high_bound=up_bounds
+                                 )
         print("Done")
     else:
-        raise ValueError("Invalid sampler type. 'sampler' must be one of the following: MCMC, NS")
-    return result
+        raise ValueError("Invalid sampler value. 'sampler' must be one of the following: MCMC, NS")
+    return chain
 
 def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Guttler14', box='Troposphere',
-              hemisphere='north', sampler=None, burnin=500, production=1000, params=(), low_bounds=None,
+              hemisphere='north', sampler=None, burnin=500, production=1000, params=None, low_bounds=None,
               up_bounds=None, mf=None, oversample=108, burnin_time=2000):
     """
     Fits a Miyake event.
