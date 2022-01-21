@@ -311,7 +311,7 @@ class SingleFitter(CarbonFitter):
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
-    def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time = 2000, num_offset=4):
+    def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
         Loads d14c data from specified file
         Parameters
@@ -347,6 +347,24 @@ class SingleFitter(CarbonFitter):
             self.growth = jnp.array([0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0])
         else:
             self.growth = jnp.array([1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1])
+        try:
+            self.growth = self.get_growth_vector(data["growth_season"][0])
+        except:
+            pass
+
+    def get_growth_vector(self, growth_season):
+        growth_dict = {"january": 0, "february": 1, "march": 2, "april": 3, "may": 4,
+                       "june": 5, "july": 6, "august": 7, "september": 8, "october": 9,
+                       "november": 10, "december": 11}
+        start = growth_dict[growth_season.split('-')[0].lower()]
+        end = growth_dict[growth_season.split('-')[1].lower()]
+        growth = np.zeros((12,))
+        if end < start:
+            growth[start:] = 1
+            growth[:end + 1] = 1
+        else:
+            growth[start:end + 1] = 1
+        return jnp.array(growth)
 
     def compile_production_model(self, model=None):
         """
@@ -902,12 +920,6 @@ class MultiFitter(CarbonFitter):
             raise ValueError("steady state burn-in solution for SingleFitters must be consistent. Got {}, expected {}".format(sf.steady_state_y0,
                              self.steady_state_y0))
 
-        if self.growth is None:
-            self.growth = sf.growth
-        elif not jnp.allclose(self.growth, sf.growth):
-            raise ValueError("growth seasons for SingleFitters must be consistent. Got {}, expected {}".format(sf.growth,
-                             self.growth))
-
         if self.cbm is None:
             self.cbm_model = sf.cbm_model
             self.cbm = ticktack.load_presaved_model(self.cbm_model, production_rate_units = 'atoms/cm^2/s')
@@ -965,24 +977,6 @@ class MultiFitter(CarbonFitter):
         box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, args=params)
         return box_values
 
-    # @partial(jit, static_argnums=(0,))
-    # def multi_likelihood(self, params):
-    #     """
-    #     Computes the ensemble log-likelihood of parameters of some parametric model, across multiple d14c datasets
-    #     Parameters
-    #     ----------
-    #     params : ndarray
-    #         Parameters of a parametric model
-    #     Returns
-    #     -------
-    #     float
-    #         Log-likelihood
-    #     """
-    #     like = 0
-    #     for sf in self.MultiFitter:
-    #         like += sf.log_likelihood(params)
-    #     return like
-
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         """
@@ -1015,9 +1009,12 @@ class MultiFitter(CarbonFitter):
         float
             Log-likelihood
         """
-        d14c = self.dc14(params)
+        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        event = self.run_event(y0=burnin[-1, :], params=params)
         like = 0
         for sf in self.MultiFitter:
+            binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=sf.growth)
+            d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
             d14c_sf = d14c[sf.multi_mask] + sf.offset
             like += jnp.sum(((sf.d14c_data - d14c_sf) / sf.d14c_data_error) ** 2) * -0.5
         return like
