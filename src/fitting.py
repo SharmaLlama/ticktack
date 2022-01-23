@@ -96,7 +96,7 @@ class CarbonFitter:
         # summary(results)
         return results
 
-    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False):
+    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False, label_font_size=8, tick_font_size=8):
         """
         From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters
         Parameters
@@ -131,7 +131,7 @@ class CarbonFitter:
         if plot_dist:
             fig = c.plotter.plot_distributions(figsize=figsize)
         else:
-            c.configure(spacing=0.0)
+            c.configure(spacing=0.0, usetex=False, label_font_size=label_font_size, tick_font_size=tick_font_size)
             fig = c.plotter.plot(figsize=figsize)
 
     def correlation_plot(self, array, figsize=10, square_size=100):
@@ -211,7 +211,7 @@ class CarbonFitter:
         ax.yaxis.tick_right()
 
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_names=None, labels=None, colors=None,
-                             alpha=0.5, linewidths=None, plot_dists=False):
+                             alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8):
         """
        Overplots posterior surfaces of parameters from multiple chains.
         Parameters
@@ -247,7 +247,8 @@ class CarbonFitter:
         else:
             for i in range(len(chains)):
                 c.add_chain(chains[i], walkers=walker, parameters=params_names)
-        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths)
+        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=False,
+                    label_font_size=label_font_size, tick_font_size=tick_font_size)
 
         if plot_dists:
             fig = c.plotter.plot_distributions(figsize=figsize)
@@ -344,9 +345,9 @@ class SingleFitter(CarbonFitter):
         self.annual = jnp.arange(self.start, self.end + 1)
         self.mask = jnp.in1d(self.annual, self.time_data)
         if self.hemisphere is 'north':
-            self.growth = jnp.array([0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0])
+            self.growth = self.get_growth_vector("april-september")
         else:
-            self.growth = jnp.array([1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1])
+            self.growth = self.get_growth_vector("october-march")
         try:
             self.growth = self.get_growth_vector(data["growth_season"][0])
         except:
@@ -362,8 +363,10 @@ class SingleFitter(CarbonFitter):
         if end < start:
             growth[start:] = 1
             growth[:end + 1] = 1
+            self.time_offset = ((start/2 + end/2 + 6 + 1) % 12)/12
         else:
             growth[start:end + 1] = 1
+            self.time_offset = (start/2 + end/2 + 1)/12
         return jnp.array(growth)
 
     def compile_production_model(self, model=None):
