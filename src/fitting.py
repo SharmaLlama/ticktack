@@ -381,7 +381,6 @@ class SingleFitter(CarbonFitter):
         -------
         """
         self.production = None
-        self.gp = None
         if callable(model):
             self.production = model
             self.production_model = 'custom'
@@ -398,7 +397,6 @@ class SingleFitter(CarbonFitter):
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.interp_gp
             self.production_model = 'control_points'
-            self.gp = True
         else:
             raise ValueError("model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, flexible_sinusoid_affine_variant, control_points")
 
@@ -619,40 +617,6 @@ class SingleFitter(CarbonFitter):
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def neg_log_likelihood(self, params=()):
-        """
-        Computes the negative gaussian log-likelihood of parameters of self.production
-        Parameters
-        ----------
-        params : ndarray, optional
-            Parameters of self.production
-        Returns
-        -------
-        float
-            Negative gaussian log-likelihood
-        """
-        return -1 * self.log_likelihood(params=params)
-
-    @partial(jit, static_argnums=(0,))
-    def neg_log_likelihood_gp(self, params):
-        """
-        Computes the negative log-likelihood of a set of control-points with respect to a Gaussian Process with
-        constant mean and Matern-3/2 kernel.
-        Parameters
-        ----------
-        params : ndarray
-            An array of control-points. First control point is also the mean of the Gaussian Process
-        Returns
-        -------
-        float
-            Negative Gaussian Process log-likelihood
-        """
-        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(kernel, mean=params[0])
-        gp.compute(self.control_points_time)
-        return -gp.log_likelihood(params)
-
-    @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
         """
         Computes the log-likelihood of a set of control-points with respect to a Gaussian Process with
@@ -674,7 +638,7 @@ class SingleFitter(CarbonFitter):
         return gp.log_likelihood(control_points)
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_gp(self, params=()):
+    def log_joint_likelihood_gp(self, params=()):
         """
         Computes the log joint likelihood of control-points for non-parametric inferences. Currently used as the
         likelihood function for Monte Carlo sampling.
@@ -690,7 +654,7 @@ class SingleFitter(CarbonFitter):
         return self.log_likelihood(params=params) + self.log_likelihood_gp(params)
 
     @partial(jit, static_argnums=(0,))
-    def neg_log_joint_gp(self, params=()):
+    def neg_log_joint_likelihood_gp(self, params=()):
         """
         Computes the negative log joint likelihood of control-points for non-parametric inferences. Currently used as
         the objective function for fitting the set of control-points via numerical optimization.
@@ -703,10 +667,10 @@ class SingleFitter(CarbonFitter):
         float
             Negative log joint likelihood
         """
-        return self.neg_log_likelihood(params=params) + self.neg_log_likelihood_gp(params)
+        return -1 * self.log_joint_likelihood_gp(params)
 
     @partial(jit, static_argnums=(0,))
-    def neg_grad_log_joint_gp(self, params=()):
+    def grad_neg_log_joint_likelihood_gp(self, params=()):
         """
         Computes the negative gradient of the log joint likelihood of control-points.
         Parameters
@@ -718,7 +682,7 @@ class SingleFitter(CarbonFitter):
         float
             Negative gradient of log joint likelihood
         """
-        return grad(self.neg_log_joint_gp)(params)
+        return grad(self.neg_log_joint_likelihood_gp)(params)
 
     def fit_ControlPoints(self, low_bound=0):
         """
@@ -734,108 +698,9 @@ class SingleFitter(CarbonFitter):
         """
         initial = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         bounds = tuple([(low_bound, None)] * len(initial))
-
-        if self.gp:
-            soln = scipy.optimize.minimize(self.neg_log_joint_gp, initial, bounds=bounds,
-                                           options={'maxiter': 20000})
-        else:
-            soln = scipy.optimize.minimize(self.neg_log_likelihood, initial, bounds=bounds,
-                                           method="L-BFGS-B", options={'maxiter': 20000})
+        soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
+                                       options={'maxiter': 20000})
         return soln
-
-    def plot_recovery(self, chain, time_data=None, true_production=None, size=100, alpha=0.2):
-        """
-        Takes a chain of Markov Chain Monte Carlo walks and the true production rates, plots the predicted production
-        rate from different samples of the chain against the true production rates.
-        Parameters
-        ----------
-        chain : ndarray
-            A chain of MCMC walks
-        time_data : ndarray, optional
-            Array of time sampling on which production rates will be evaluated
-        true_production : ndarray, optional
-            True production rates on 'time_data'
-        size : int, optional
-            The number of samples randomly chosen from 'chain'
-        alpha : float, optional
-            Parameter for blending, between 0-1.
-        Returns
-        -------
-        figure
-            plot of samples against true production rates
-        """
-        mean = np.mean(chain, axis=0)
-        fig, (ax1, ax2) = plt.subplots(2, figsize=(10, 10), sharex=True)
-        top_n = np.random.permutation(len(chain))[:size]
-        ax1.errorbar(self.time_data, self.d14c_data, yerr=self.d14c_data_error,
-                     fmt="o", color="k", fillstyle="full", capsize=3, markersize=4, label="noisy d14c")
-        for i in tqdm(top_n):
-            d14c = self.dc14_fine(params=chain[i, :])
-            ax1.plot(self.time_data_fine, d14c, color="g", alpha=alpha)
-            control_points_fine = self.production(self.time_data_fine, (chain[i, :],))
-            ax2.plot(self.time_data_fine, control_points_fine, color="g", alpha=alpha)
-        control_points_fine = self.production(self.time_data_fine, (mean,))
-        ax2.plot(self.time_data_fine, control_points_fine, "r", label="sample mean production rate")
-        ax1.set_ylabel("$\Delta^{14}$C (‰)");
-        ax2.set_ylabel("Production rate ($cm^2s^{-1}$)")
-        ax2.set_xlabel("Calendar Year")
-        if (true_production is not None) & (time_data is not None):
-            ax2.plot(time_data, true_production, 'k', label="true production rate")
-        ax2.legend(loc='upper center', bbox_to_anchor=(0.5, -0.13), fancybox=True);
-        ax1.legend();
-
-    def plot_samples(self, chain, nwalkers, size=100, alpha=0.2):
-        """
-        Takes a chain of Markov Chain Monte Carlo walks and plots the predicted production rate from different samples
-        of the chain.
-        Parameters
-        ----------
-        chain : ndarray
-            A chain of MCMC walks
-        nwalkers : int
-            Number of walkers of 'chain'
-        size : int, optional
-            The number of samples randomly chosen from 'chain'
-        alpha : float, optional
-            Parameter for blending, between 0-1.
-        Returns
-        -------
-        figure
-            plot of samples
-        """
-        c = ChainConsumer().add_chain(chain, walkers=nwalkers)
-        mle = []
-        for lst in c.analysis.get_summary().values():
-            mle.append(lst[1])
-
-        fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 12), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
-        for s in chain[np.random.randint(len(chain), size=size)]:
-            d_c_14_fine = self.dc14_fine(params=s)
-            ax1.plot(self.time_data_fine, d_c_14_fine, alpha=alpha, color="g")
-
-        d_c_14_coarse = self.dc14(params=mle)
-        d_c_14_fine = self.dc14_fine(params=mle)
-        ax1.plot(self.time_data_fine, d_c_14_fine, color="k")
-
-        ax1.plot(self.time_data, d_c_14_coarse, "o", color="k", fillstyle="none", markersize=7,
-                 label="fitted $\Delta^{14}$C")
-        ax1.errorbar(self.time_data, self.d14c_data,
-                     yerr=self.d14c_data_error, fmt="o", color="k", fillstyle="full", capsize=3, markersize=7,
-                     label="$\Delta^{14}$C data")
-        ax1.set_ylabel("$\Delta^{14}$C (‰)")
-        ax1.legend(loc="lower right")
-        fig.subplots_adjust(hspace=0.05)
-
-        for s in chain[np.random.randint(len(chain), size=10)]:
-            production_rate = self.production(self.time_data_fine, *s)
-            ax2.plot(self.time_data_fine, production_rate, alpha=0.25, color="g")
-
-        production_rate = self.production(self.time_data_fine, *mle)
-        ax2.plot(self.time_data_fine, production_rate, color="k", lw=2, label="MLE")
-        ax2.set_ylim(jnp.min(production_rate) * 0.8, jnp.max(production_rate) * 1.1);
-        ax2.set_xlabel("Calendar Year (CE)");
-        ax2.set_ylabel("Production rate ($cm^2s^{-1}$)");
-        ax2.legend(loc="upper left")
 
     # @partial(jit, static_argnums=(0,))
     # def sum_interp_gp(self, *args):

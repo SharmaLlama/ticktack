@@ -205,19 +205,19 @@ def test_log_joint_likelihood(SingleFitter_creation):
                                                     )
     assert jnp.allclose(out, -133505.18251355)
 
-def test_neg_log_likelihood_gp(SingleFitter_creation):
+def test_log_likelihood_gp(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="control_points")
-    out = SingleFitter_creation.neg_log_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
-    assert jnp.allclose(out, 10.21255349)
+    out = SingleFitter_creation.log_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
+    assert jnp.allclose(out, -10.21255349)
 
-def test_log_joint_gp(SingleFitter_creation):
+def test_log_joint_likelihood_gp(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="control_points")
-    out = SingleFitter_creation.log_joint_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
+    out = SingleFitter_creation.log_joint_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
     assert jnp.allclose(out, -4832.12756846)
 
-def test_neg_grad_log_joint_gp(SingleFitter_creation):
+def test_grad_neg_log_joint_likelihood_gp(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="control_points")
-    out = SingleFitter_creation.neg_grad_log_joint_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
+    out = SingleFitter_creation.grad_neg_log_joint_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
     assert jnp.allclose(out, jnp.array([41430.18874965,   515.81845717,   385.24052732,
                                         338.96075142,   281.56061807,   229.10357489,
                                         171.36231689,   108.43039156,    51.22351578]))
