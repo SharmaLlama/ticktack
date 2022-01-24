@@ -363,10 +363,11 @@ class SingleFitter(CarbonFitter):
         if end < start:
             growth[start:] = 1
             growth[:end + 1] = 1
-            self.time_offset = ((start/2 + end/2 + 6 + 1) % 12)/12
+            # self.time_offset = ((start/2 + end/2 + 6 + 1) % 12)/12
         else:
             growth[start:end + 1] = 1
-            self.time_offset = (start/2 + end/2 + 1)/12
+            # self.time_offset = (start/2 + end/2 + 1)/12
+        self.time_offset = growth_dict[start]/12 + 1/12
         return jnp.array(growth)
 
     def compile_production_model(self, model=None):
@@ -396,7 +397,7 @@ class SingleFitter(CarbonFitter):
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.interp_gp
-            self.production_model = 'control_points'
+            self.production_model = 'control points'
         else:
             raise ValueError("model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, flexible_sinusoid_affine_variant, control_points")
 
@@ -418,11 +419,10 @@ class SingleFitter(CarbonFitter):
         """
         tval = tval.reshape(-1)
         params = jnp.array(list(args)).reshape(-1)
-        control_points = params
         mean = params[0]
         kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
         gp = celerite2.jax.GaussianProcess(kernel, self.control_points_time, mean=mean)
-        alpha = gp.apply_inverse(control_points)
+        alpha = gp.apply_inverse(params)
         Ks = kernel.get_value(tval[:, None] - self.control_points_time[None, :])
         mu = jnp.dot(Ks, alpha)
         mu = (tval > self.start) * mu + (tval <= self.start) * mean
@@ -475,7 +475,7 @@ class SingleFitter(CarbonFitter):
         start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + phase) + height
+            2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -503,7 +503,7 @@ class SingleFitter(CarbonFitter):
         start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + phase) + height
+            2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -511,7 +511,8 @@ class SingleFitter(CarbonFitter):
         gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + gradient * (
-                t - self.start) + amplitude * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t + phase) + height
+                t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(2 * np.pi / 11 * t
+                                                                                     + phase * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0))
@@ -630,12 +631,10 @@ class SingleFitter(CarbonFitter):
         float
             Gaussian Process log-likelihood
         """
-        control_points = params
-        mean = params[0]
         kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(kernel, mean=mean)
+        gp = celerite2.jax.GaussianProcess(kernel, mean=params[0])
         gp.compute(self.control_points_time)
-        return gp.log_likelihood(control_points)
+        return gp.log_likelihood(params)
 
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood_gp(self, params=()):
@@ -699,7 +698,7 @@ class SingleFitter(CarbonFitter):
         initial = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         bounds = tuple([(low_bound, None)] * len(initial))
         soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
-                                       options={'maxiter': 20000})
+                                       options={'maxiter': 20000, 'maxfun': 60000,})
         return soln
 
     # @partial(jit, static_argnums=(0,))
@@ -800,8 +799,39 @@ class MultiFitter(CarbonFitter):
     def compile(self):
         self.burn_in_time = jnp.arange(self.start - 2000 - 1, self.start - 1)
         self.annual = jnp.arange(self.start, self.end + 1)
+        self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, int(self.oversample * (self.end - self.start + 2)))
         for sf in self.MultiFitter:
             sf.multi_mask = jnp.in1d(self.annual, sf.time_data)
+        if self.production_model == 'control points':
+            self.control_points_time = jnp.arange(self.start, self.end)
+            self.production = self.multi_interp_gp
+
+    @partial(jit, static_argnums=(0,))
+    def multi_interp_gp(self, tval, *args):
+        """
+        A Gaussian Process regression interpolator
+        Parameters
+        ----------
+        tval : ndarray
+            Time sampling of the output interpolation
+        args : ndarray | float
+            Set of control-points. Can be passed in as ndarray or individual floats. Must have the same size as
+            self.control_points_time.
+        Returns
+        -------
+        ndarray
+            Interpolated values on tval
+        """
+        tval = tval.reshape(-1)
+        params = jnp.array(list(args)).reshape(-1)
+        mean = params[0]
+        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
+        gp = celerite2.jax.GaussianProcess(kernel, self.control_points_time, mean=mean)
+        alpha = gp.apply_inverse(params)
+        Ks = kernel.get_value(tval[:, None] - self.control_points_time[None, :])
+        mu = jnp.dot(Ks, alpha)
+        mu = (tval > self.start) * mu + (tval <= self.start) * mean
+        return mu
 
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
@@ -846,9 +876,9 @@ class MultiFitter(CarbonFitter):
         return box_values
 
     @partial(jit, static_argnums=(0,))
-    def dc14(self, params=()):
+    def dc14_fine(self, params=()):
         """
-        Predict d14c on the same time sampling as self.time_data
+        Predict d14c on the same time sampling as self.time_data_fine.
         Parameters
         ----------
         params : ndarray, optional
@@ -860,8 +890,7 @@ class MultiFitter(CarbonFitter):
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
-        binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
-        d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
+        d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c
 
     @partial(jit, static_argnums=(0,))
@@ -888,11 +917,64 @@ class MultiFitter(CarbonFitter):
         return like
 
     @partial(jit, static_argnums=(0,))
+    def log_likelihood_gp(self, params):
+        """
+        Computes the log-likelihood of a set of control-points with respect to a Gaussian Process with
+        constant mean and Matern-3/2 kernel.
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+        Returns
+        -------
+        float
+            Gaussian Process log-likelihood
+        """
+        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
+        gp = celerite2.jax.GaussianProcess(kernel, mean=params[0])
+        gp.compute(self.control_points_time)
+        return gp.log_likelihood(params)
+
+    @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
         lp = 0
         lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         pos = self.multi_likelihood(params)
         return lp + pos
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_joint_likelihood_gp(self, params=()):
+        """
+        Computes the log joint likelihood of control-points for non-parametric inferences. Currently used as the
+        likelihood function for Monte Carlo sampling.
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+        Returns
+        -------
+        float
+            Log joint likelihood
+        """
+        return -1 * self.multi_likelihood(params=params) + -1 * self.log_likelihood_gp(params)
+
+    def fit_ControlPoints(self, low_bound=0):
+        """
+        Fits the control-points by minimizing the negative log joint likelihood.
+        Parameters
+        ----------
+        low_bound : int, optional
+            The minimum value each control-point can take. 0 by default.
+        Returns
+        -------
+        OptimizeResult
+            Scipy OptimizeResult object
+        """
+        initial = self.steady_state_production * jnp.ones((len(self.control_points_time),))
+        bounds = tuple([(low_bound, None)] * len(initial))
+        soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
+                                       options={'maxiter': 20000, 'maxfun': 60000,})
+        return soln
 
 def get_data(path=None, event=None):
     """
@@ -953,17 +1035,17 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         MCMC sampler or NS sampler
     """
     if production_model == 'simple_sinusoid':
-        default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12])
-        default_low_bounds = jnp.array([year - 5, 1 / 52., -jnp.pi, 0.])
-        default_up_bounds = jnp.array([year + 5, 5., jnp.pi, 15.])
+        default_params = np.array([year, 1. / 12, 3., 81. / 12])
+        default_low_bounds = jnp.array([year - 5, 1 / 52., 0, 0.])
+        default_up_bounds = jnp.array([year + 5, 5., 11, 15.])
     elif production_model == 'flexible_sinusoid':
-        default_params = np.array([year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
-        default_low_bounds = jnp.array([year - 5, 1 / 52., -jnp.pi, 0., 0.])
-        default_up_bounds = jnp.array([year + 5, 5., jnp.pi, 15., 2.])
+        default_params = np.array([year, 1. / 12, 3., 81. / 12, 0.18])
+        default_low_bounds = jnp.array([year - 5, 1 / 52., 0, 0., 0.])
+        default_up_bounds = jnp.array([year + 5, 5., 11, 15., 2.])
     elif production_model == 'flexible_sinusoid_affine_variant':
-        default_params = np.array([0, year, 1. / 12, np.pi / 2., 81. / 12, 0.18])
-        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 100, year - 5, 1 / 52., -jnp.pi, 0., 0.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 100, year + 5, 5., jnp.pi, 15., 2.])
+        default_params = np.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 100, year - 5, 1 / 52., 0, 0., 0.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 100, year + 5, 5., 11, 15., 2.])
 
     if all(arg is not None for arg in (low_bounds, up_bounds)):
         low_bounds = low_bounds
@@ -1063,7 +1145,11 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
             mf.add_SingleFitter(sf)
     mf.compile()
     if not sampler:
-        return mf
+        if production_model == "control_points":
+            print("Running numerical optimization...")
+            return mf, mf.fit_ControlPoints()
+        else:
+            return mf
     else:
         return mf, sample_event(year, mf, sampler, params=params, burnin=burnin, production=production,
                                 production_model=production_model, low_bounds=low_bounds, up_bounds=up_bounds)
