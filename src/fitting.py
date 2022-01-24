@@ -367,7 +367,7 @@ class SingleFitter(CarbonFitter):
         else:
             growth[start:end + 1] = 1
             # self.time_offset = (start/2 + end/2 + 1)/12
-        self.time_offset = growth_dict[start]/12 + 1/12
+        self.time_offset = start/12 + 1/12
         return jnp.array(growth)
 
     def compile_production_model(self, model=None):
