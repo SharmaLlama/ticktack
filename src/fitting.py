@@ -312,6 +312,27 @@ class SingleFitter(CarbonFitter):
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
+        self._solver = None # The solver to be passed to the CarbonBoxModel.run method 
+
+    def set_solver(self, solver):
+        """
+        Assigns a solver to `self._solver`, which is passed to the CarbonBoxModel.run method.
+        Parameters:
+        -----------
+        solver : function
+            The odeint style function to be passed. This function must accept the positional arguments: `derivative, y_initial`, and `time_values` as well as the key word arguments `atol=1e-15`, and `rtol=1e-15`.
+        """
+        self._solver = solver
+
+    def get_solver(self):
+        """
+        Returns
+        -------
+        solver : function
+            The solver that has been set for the `CarbonBoxModel.run` method using `set_solver`
+        """
+        return self._solver
+
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
         Loads d14c data from specified file
