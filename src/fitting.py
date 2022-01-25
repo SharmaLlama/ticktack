@@ -303,10 +303,14 @@ class SingleFitter(CarbonFitter):
 
         if cbm_model in ['Brehm21', 'Buntgen18']:
             self.steady_state_production = 1.76
-            self.steady_state_y0 = self.cbm.equilibrate(production_rate=1.76)
+            self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             for i, node in enumerate(cbm.get_nodes_objects()):
                 if (node.get_hemisphere() == self.hemisphere) & (node.get_name() == self.box):
                     self.box_idx = i
+        elif cbm_model == "Miyake17":
+            self.steady_state_production = 1.8
+            self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
+            self.box_idx = 1
         else:
             self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
@@ -354,6 +358,17 @@ class SingleFitter(CarbonFitter):
             pass
 
     def get_growth_vector(self, growth_season):
+        """
+        Converts the growing season of a tree from string to 12-digit binary vector
+        Parameters
+        ----------
+        growth_season : str
+            Growing season of a tree. Must have the following format: "StartMonth-EndMonth"
+        Returns
+        -------
+        ndarray
+            12-digit binary vector of growing season
+        """
         growth_dict = {"january": 0, "february": 1, "march": 2, "april": 3, "may": 4,
                        "june": 5, "july": 6, "august": 7, "september": 8, "october": 9,
                        "november": 10, "december": 11}
@@ -372,12 +387,12 @@ class SingleFitter(CarbonFitter):
 
     def compile_production_model(self, model=None):
         """
-        Specifies the production rate function
+        Specifies the production rate model
         Parameters
         ----------
         model : str | callable, optional
-            Specifies a built-in model or a custom model. Currently supported built-in models include ['simple_sinusoid',
-            'flexible_sinusoid', 'control_points']
+            Specifies a built-in model or a custom model. Currently supported built-in models include ["simple_sinusoid",
+            "flexible_sinusoid", "flexible_sinusoid_affine_variant", "control_points"]
         Returns
         -------
         """
@@ -394,6 +409,9 @@ class SingleFitter(CarbonFitter):
         elif model == "flexible_sinusoid_affine_variant":
             self.production = self.flexible_sinusoid_affine_variant
             self.production_model = 'flexible sinusoid affine variant'
+        elif model == "affine":
+            self.production = self.affine
+            self.production_model = 'affine'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.interp_gp
@@ -415,7 +433,7 @@ class SingleFitter(CarbonFitter):
         Returns
         -------
         ndarray
-            Interpolated values on tval
+            Interpolation on tval
         """
         tval = tval.reshape(-1)
         params = jnp.array(list(args)).reshape(-1)
@@ -431,18 +449,18 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
         """
-        Computes the density of a super gaussian characterised by an exponent of 16. Currently used to emulate the
-        'spike' in d14c data following the occurrence of an Miyake event
+        Computes the density of a super gaussian function with an exponent of 16. Emulates the
+        spike in d14c data following the occurrence of a Miyake event
         Parameters
         ----------
         t : ndarray
             Scalar or vector input
         start_time : float
-            Start time of a hypothetical Miyake event
+            Start time of a Miyake event
         duration : float
-            Duration of a hypothetical Miyake event
+            Duration of a Miyake event
         area : float
-            Total radiocarbon delivered by a hypothetical Miyake event (in production rate times years)
+            Total radiocarbon delivered by a Miyake event
         Returns
         -------
         ndarray
@@ -455,8 +473,8 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def simple_sinusoid(self, t, *args):
         """
-        A simple sinusoid model for production rates in a period where a Miyake event is observed. Tunable parameters
-        include,
+        A simple sinusoid model for production rates over a period where a Miyake event is observed. Tunable parameters
+        include:
         Start time: start time of the Miyake event
         Duration: duration of the Miyake event
         Phase: phase of the solar cycle during this period
@@ -515,10 +533,17 @@ class SingleFitter(CarbonFitter):
                                                                                      + phase * 2 * np.pi / 11) + height
         return production
 
+    @partial(jit, static_argnums=(0,))
+    def affine(self, t, *args):
+        gradient, start_time, duration, area = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + gradient * (t - self.start) * (t >= self.start) + height
+        return production
+
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
         """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Calculates the C14 content of all the boxes within a carbon box model for the burn-in period.
         Parameters
         ----------
         time_values : ndarray
@@ -539,7 +564,7 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0))
     def run_event(self, y0=None, params=()):
         """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Calculates the C14 content of all the boxes within a carbon box model for the event duration.
         Parameters
         ----------
         time_values : ndarray
@@ -612,6 +637,21 @@ class SingleFitter(CarbonFitter):
 
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
+        """
+        Computes the log joint likelihood of parameters of self.production
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of self.production
+        low_bounds : ndarray
+            Lower bound for the parameters of self.production
+        up_bounds : ndarray
+            Upper bound for the parameters of self.production
+        Returns
+        -------
+        float
+            Log joint likelihood
+        """
         lp = 0
         lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         pos = self.log_likelihood(params)
@@ -620,8 +660,8 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
         """
-        Computes the log-likelihood of a set of control-points with respect to a Gaussian Process with
-        constant mean and Matern-3/2 kernel.
+        Computes the Gaussian Process log-likelihood of a set of control-points. The Gaussian Process
+        has a constant mean and a Matern-3/2 kernel with fixed parameters.
         Parameters
         ----------
         params : ndarray
@@ -639,8 +679,7 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood_gp(self, params=()):
         """
-        Computes the log joint likelihood of control-points for non-parametric inferences. Currently used as the
-        likelihood function for Monte Carlo sampling.
+        Computes the log joint likelihood of a set of control-points.
         Parameters
         ----------
         params : ndarray
@@ -655,8 +694,8 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def neg_log_joint_likelihood_gp(self, params=()):
         """
-        Computes the negative log joint likelihood of control-points for non-parametric inferences. Currently used as
-        the objective function for fitting the set of control-points via numerical optimization.
+        Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
+        training the set of control-points via numerical optimization.
         Parameters
         ----------
         params : ndarray
@@ -756,7 +795,7 @@ class MultiFitter(CarbonFitter):
             self.start = sf.start
         elif self.start > sf.start:
             self.start = sf.start
-            
+
         if not self.end:
             self.end = sf.end
         elif self.end < sf.end:
@@ -797,6 +836,15 @@ class MultiFitter(CarbonFitter):
         self.MultiFitter.append(sf)
 
     def compile(self):
+        """
+        Prepares a Multifitter Object for d14c computation and likelihood evaluation
+        Parameters
+        ----------
+        sf : SingleFitter
+            SingleFitter Object
+        Returns
+        -------
+        """
         self.burn_in_time = jnp.arange(self.start - 2000 - 1, self.start - 1)
         self.annual = jnp.arange(self.start, self.end + 1)
         self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, int(self.oversample * (self.end - self.start + 2)))
@@ -809,7 +857,7 @@ class MultiFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def multi_interp_gp(self, tval, *args):
         """
-        A Gaussian Process regression interpolator
+        A Gaussian Process regression interpolator for MultiFitter
         Parameters
         ----------
         tval : ndarray
@@ -836,7 +884,7 @@ class MultiFitter(CarbonFitter):
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
         """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Calculates the C14 content of all the boxes within a carbon box model for the burn-in period.
         Parameters
         ----------
         time_values : ndarray
@@ -857,7 +905,7 @@ class MultiFitter(CarbonFitter):
     @partial(jit, static_argnums=(0))
     def run_event(self, y0=None, params=()):
         """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Calculates the C14 content of all the boxes within a carbon box model for the event duration.
         Parameters
         ----------
         time_values : ndarray
@@ -896,11 +944,11 @@ class MultiFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
         """
-        Computes the ensemble log-likelihood of parameters of some parametric model, across multiple d14c datasets
+        Computes the ensemble log-likelihood of the parameters of self.production across multiple d14c datasets
         Parameters
         ----------
         params : ndarray
-            Parameters of a parametric model
+            Parameters of self.production
         Returns
         -------
         float
@@ -919,8 +967,8 @@ class MultiFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
         """
-        Computes the log-likelihood of a set of control-points with respect to a Gaussian Process with
-        constant mean and Matern-3/2 kernel.
+        Computes the Gaussian Process log-likelihood of a set of control-points. The Gaussian Process
+        has a constant mean and a Matern-3/2 kernel with fixed parameters.
         Parameters
         ----------
         params : ndarray
@@ -937,6 +985,21 @@ class MultiFitter(CarbonFitter):
 
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
+        """
+        Computes the log joint likelihood of parameters of self.production
+        Parameters
+        ----------
+        params : ndarray
+            Parameters of self.production
+        low_bounds : ndarray
+            Lower bound for the parameters of self.production
+        up_bounds : ndarray
+            Upper bound for the parameters of self.production
+        Returns
+        -------
+        float
+            Log joint likelihood
+        """
         lp = 0
         lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         pos = self.multi_likelihood(params)
@@ -945,8 +1008,8 @@ class MultiFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def neg_log_joint_likelihood_gp(self, params=()):
         """
-        Computes the log joint likelihood of control-points for non-parametric inferences. Currently used as the
-        likelihood function for Monte Carlo sampling.
+        Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
+        training the set of control-points via numerical optimization.
         Parameters
         ----------
         params : ndarray
@@ -954,7 +1017,7 @@ class MultiFitter(CarbonFitter):
         Returns
         -------
         float
-            Log joint likelihood
+            Negative log joint likelihood
         """
         return -1 * self.multi_likelihood(params=params) + -1 * self.log_likelihood_gp(params)
 
@@ -978,14 +1041,14 @@ class MultiFitter(CarbonFitter):
 
 def get_data(path=None, event=None):
     """
-    Retrieves the earliest and the latest time sampling covered by the SingleFitters.
+    Retrieves all the datasets (csv format) in a directory
     Parameters
     ----------
     path : str, optional
         When specified it is the relative path to the directory where the data is stored. Only one of path and event
         should be specified at any time.
     event : str, optional
-        Identifier of known Miyake events. When specified it takes values from: '660BCE', '775AD', '993AD', '5259BCE',
+        Identifier of known Miyake events. When specified it must take value from: '660BCE', '775AD-early', '993AD', '5259BCE',
         '5410BCE', '7176BCE'.
     hemisphere : str, optional
         hemispheric parameter for Carbon Box Model. Used to retrieve the correct data files when event is specified.
@@ -1044,8 +1107,12 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         default_up_bounds = jnp.array([year + 5, 5., 11, 15., 2.])
     elif production_model == 'flexible_sinusoid_affine_variant':
         default_params = np.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
-        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 100, year - 5, 1 / 52., 0, 0., 0.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 100, year + 5, 5., 11, 15., 2.])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 2.])
+    elif production_model == 'affine':
+        default_params = np.array([0, year, 1. / 12, 81. / 12])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 15.])
 
     if all(arg is not None for arg in (low_bounds, up_bounds)):
         low_bounds = low_bounds
