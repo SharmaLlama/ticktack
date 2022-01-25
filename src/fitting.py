@@ -314,7 +314,7 @@ class SingleFitter(CarbonFitter):
 
         self._solver = None # The solver to be passed to the CarbonBoxModel.run method 
 
-    def set_solver(self, solver):
+    def set_solver(self, solver, rtol=1e-15, atol=1e-5):
         """
         Assigns a solver to `self._solver`, which is passed to the CarbonBoxModel.run method.
         Parameters:
@@ -322,6 +322,7 @@ class SingleFitter(CarbonFitter):
         solver : function
             The odeint style function to be passed. This function must accept the positional arguments: `derivative, y_initial`, and `time_values` as well as the key word arguments `atol=1e-15`, and `rtol=1e-15`.
         """
+        solver = partial(solver, atol=atol, rtol=rtol)
         self._solver = solver
 
     def get_solver(self):
