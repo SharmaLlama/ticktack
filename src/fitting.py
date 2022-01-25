@@ -554,7 +554,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
+        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, solver=self._solver, args=params)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -575,7 +575,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, args=params)
+        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, solver=self._solver, args=params)
         return box_values
 
     @partial(jit, static_argnums=(0,))
