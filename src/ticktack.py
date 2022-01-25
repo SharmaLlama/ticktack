@@ -3,7 +3,6 @@ import hdfdict
 import jax.numpy as jnp
 import jax.ops
 import scipy as scipy
-import scipy.integrate
 import scipy.optimize
 from jax import jit
 from functools import partial
@@ -13,14 +12,7 @@ import pkg_resources
 from typing import Union
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 
-USE_JAX = True
-if USE_JAX:
-    from jax.experimental.ode import odeint
-else:
-    from scipy.integrate import odeint
-
 config.update("jax_enable_x64", True)
-
 
 class Box:
     """ Box class which represents each individual box in the carbon model."""
@@ -470,8 +462,8 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-    @partial(jit, static_argnums=(0, 2, 3, 6, 7))
-    def run(self, time_out, oversample, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
+    @partial(jit, static_argnums=(0, 2, 3, 4, 7, 8))
+    def run(self, time_out, oversample, production, solver=odeint, y0=None, args=(), target_C_14=None, steady_state_production=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
@@ -535,13 +527,13 @@ class CarbonBoxModel:
             elif target_C_14 is not None:
                 solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
             else:
-                ValueError("Must give either target C-14 or production rate.")
+                raise ValueError("Must give either target C-14 or production rate.")
             y_initial = jnp.array(solution)
 
         if not callable(production):
             raise ValueError("incorrect object type for production")
 
-        states = odeint(derivative, y_initial, time_values,  atol=1e-15, rtol=1e-15)
+        states = solver(derivative, y_initial, time_values,  atol=1e-15, rtol=1e-15)
         return states, solution
 
     @partial(jit, static_argnums=(0, 2))
