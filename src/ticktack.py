@@ -5,6 +5,7 @@ import jax.ops
 import scipy as scipy
 import scipy.optimize
 from jax import jit
+from jax.experimental.ode import odeint
 from functools import partial
 from jax.config import config
 import numpy as np
