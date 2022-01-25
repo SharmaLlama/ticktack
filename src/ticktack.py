@@ -555,7 +555,6 @@ class CarbonBoxModel:
         growth : list
             the growth season with which to bin the data with respect to.
 
-
         Returns
         -------
         list
@@ -589,9 +588,6 @@ class CarbonBoxModel:
         binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
         return binned_data
     
-
-
-
     @partial(jit, static_argnums=(0, 3))
     def _rebin1D(self, time_out, shifted_index, oversample, kernel, s):
         binned_data = jnp.zeros((len(time_out),))
