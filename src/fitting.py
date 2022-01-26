@@ -318,7 +318,7 @@ class SingleFitter(CarbonFitter):
 
         self._solver = None # The solver to be passed to the CarbonBoxModel.run method 
 
-    def set_solver(self, solver, rtol=1e-15, atol=1e-5):
+    def set_solver(self, solver, rtol=1e-15, atol=1e-15):
         """
         Assigns a solver to `self._solver`, which is passed to the CarbonBoxModel.run method.
         Parameters:
