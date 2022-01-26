@@ -559,17 +559,16 @@ class SingleFitter(CarbonFitter):
         This method parses the class variables to `_run_event` and `_run_burnin` functions
         and compiles them using the `jax.jit` function. 
         """
-        self.run_burnin = partial(self.cbm.run(time_out=self.burn_in_time,\
-            oversample=self.burnin_oversample, production=self.production,\
-                solver=self.get_solver(), y0=self.steady_state_y0))
-        self.run_burnin = jit(self.run_burnin, static_argnums=\
-            (0, 1, 2, 3, 4, 5, 6, 7, 9 ,10))
+        self.run_burnin = jit(partial(
+            self.cbm.run(self.burn_in_time, self.burnin_oversample,
+                self.production, solver=self.get_solver(), rtol=1e-15, 
+                atol=1e-15, y0=self.steady_state_y0, target_C_14=None, 
+                steady_state_production=None)))
 
-        self.run_event = partial(self.cbm.run(time_out=self.annual,\
-            oversample=self.oversample, production=self.production,\
-                solver=self.get_solver()))
-        self.run_event = jit(self.run_event, static_argnums=\
-            (0, 1, 2, 3, 4, 5, 6, 7, 9 ,10))
+        self.run_event = jit(partial(
+            self.cbm.run(self.annual, self.oversample, self.production,
+                solver=self.get_solver(), rtol=1e-15, atol=1e-15,
+                target_C_14=None, steady_state_production=None)))
 
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
