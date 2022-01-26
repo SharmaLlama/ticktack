@@ -6,12 +6,17 @@
       members:
         - MultiFitter
         - __init__
-        - multi_likelihood
-        - log_prior_simple_sinusoid
-        - log_prior_flexible_sinusoid
-        - log_joint_simple_sinusoid
-        - log_joint_flexible_sinusoid
         - add_SingleFitter
+        - compile
+        - multi_interp_gp
+        - run_burnin
+        - run_event
+        - dc14_fine
+        - multi_likelihood
+        - log_likelihood_gp
+        - log_joint_likelihood
+        - neg_log_joint_likelihood_gp
+        - fit_ControlPoints
     rendering:
       show_root_heading: false
       show_source: false
