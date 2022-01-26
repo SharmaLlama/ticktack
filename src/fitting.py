@@ -554,64 +554,22 @@ class SingleFitter(CarbonFitter):
                                                                                                      + phase * 2 * np.pi / 11) + height
         return production
 
-    def _run_burnin(self, y0=None, time_out=None, oversample=None,\
-        production=None, solver=None, params=()):
-        """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
-        Parameters
-        ----------
-        time_values : ndarray
-            Time values
-        y0 : ndarray, optional
-            The initial contents of all boxes
-        params : ndarray, optional
-            Parameters for self.production
-        Returns
-        -------
-        ndarray
-            The value of each box in the carbon box at the specified time_values along with the steady state solution
-            for the system
-        """
-        box_values, _ = self.cbm.run(time_out, oversample, production,\
-            y0=y0, solver=solver, args=params)
-        return box_values
-
-    def _run_event(self, y0=None, time_out=None, oversample=None,\
-        production=None, solver=None, params=()):
-        """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
-        Parameters
-        ----------
-        time_values : ndarray
-            Time values
-        y0 : ndarray, optional
-            The initial contents of all boxes
-        params : ndarray, optional
-            Parameters for self.production
-        Returns
-        -------
-        ndarray
-            The value of each box in the carbon box at the specified time_values along with the steady state solution
-            for the system
-        """
-        box_values, _ = self.cbm.run(time_out, oversample, production, y0=y0,\
-            solver=solver, args=params)
-        return box_values
-
     def parse_compilation_args(self):
         """
         This method parses the class variables to `_run_event` and `_run_burnin` functions
         and compiles them using the `jax.jit` function. 
         """
-        self.run_burnin = partial(self._run_burnin(time_out=self.burn_in_time,\
+        self.run_burnin = partial(self.cbm.run(time_out=self.burn_in_time,\
             oversample=self.burnin_oversample, production=self.production,\
                 solver=self.get_solver(), y0=self.steady_state_y0))
-        self.run_burnin = jit(self.run_burnin)
+        self.run_burnin = jit(self.run_burnin, static_argnums=\
+            (0, 1, 2, 3, 4, 5, 6, 7, 9 ,10))
 
-        self.run_event = partial(self._run_event(time_out=self.annual,\
+        self.run_event = partial(self.cbm.run(time_out=self.annual,\
             oversample=self.oversample, production=self.production,\
                 solver=self.get_solver()))
-        self.run_event = jit(self.run_event)
+        self.run_event = jit(self.run_event, static_argnums=\
+            (0, 1, 2, 3, 4, 5, 6, 7, 9 ,10))
 
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
