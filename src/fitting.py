@@ -594,11 +594,18 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(
-            self.annual, self.oversample, self.production, y0=y0, solver=self.get_solver(), args=params)
+        box_values, _ = self.cbm.run(time_out, oversample, production, y0=y0,\
+            solver=solver, args=params)
         return box_values
 
-    def dc14(self, params=()):
+    def parse_compilation_args(self):
+        self.run_event = partial(self.run_event(time_out=self.annual,\
+            oversample=self.oversample, production=self.production,\
+                solver=self.get_solver()))
+        self.run_event = jit(self.run_event)
+
+    def dc14(self, y0=None, time_out=None, oversample=None,\
+        production=None, solver=None, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
         Parameters
@@ -610,7 +617,8 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        burnin = self.run_burnin(time_out, oversample, production, y0=y0,\
+            solver=solver, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
         binned_data = self.cbm.bin_data(
             event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
