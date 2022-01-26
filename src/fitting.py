@@ -605,7 +605,7 @@ class SingleFitter(CarbonFitter):
         """
         self.run_burnin = partial(self._run_burnin(time_out=self.burn_in_time,\
             oversample=self.burnin_oversample, production=self.production,\
-                solver=self.get_solver()))
+                solver=self.get_solver(), y0=self.steady_state_y0))
         self.run_burnin = jit(self.run_burnin)
 
         self.run_event = partial(self._run_event(time_out=self.annual,\
@@ -613,7 +613,8 @@ class SingleFitter(CarbonFitter):
                 solver=self.get_solver()))
         self.run_event = jit(self.run_event)
 
-    def dc14(self, y0=None, params=()):
+    @partial(jit, static_argnums=(0,))
+    def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
         Parameters
@@ -625,7 +626,7 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=y0, params=params)
+        burnin = self.run_burnin(params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
         binned_data = self.cbm.bin_data(event[:, self.box_idx], \
             self.oversample, self.annual, growth=self.growth)
@@ -633,6 +634,7 @@ class SingleFitter(CarbonFitter):
             / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
+    @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data_fine.
@@ -645,7 +647,7 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        burnin = self.run_burnin(params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]
                 ) / self.steady_state_y0[self.box_idx] * 1000
