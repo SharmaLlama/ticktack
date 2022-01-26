@@ -464,7 +464,7 @@ class CarbonBoxModel:
             raise ValueError("Must give either target C-14 or production rate.")
 
     @partial(jit, static_argnums=(0, 2, 3, 4, 7, 8))
-    def run(self, time_out, oversample, production, solver=odeint, y0=None, args=(), target_C_14=None, steady_state_production=None):
+    def run(self, time_out, oversample, production, solver=odeint, rtol=1e-15, atol=1e-15, y0=None, args=(), target_C_14=None, steady_state_production=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
@@ -534,7 +534,7 @@ class CarbonBoxModel:
         if not callable(production):
             raise ValueError("incorrect object type for production")
 
-        states = solver(derivative, y_initial, time_values,  atol=1e-15, rtol=1e-15)
+        states = solver(derivative, y_initial, time_values,  atol=atol, rtol=rtol)
         return states, solution
 
     @partial(jit, static_argnums=(0, 2))
