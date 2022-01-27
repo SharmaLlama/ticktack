@@ -4,7 +4,7 @@ from matplotlib.pyplot import rcParams
 import celerite2.jax
 from celerite2.jax import terms as jax_terms
 import jax.numpy as jnp
-from jax import grad, jit, random
+from jax import grad, jit, random, tree_util
 from functools import partial
 import ticktack
 from astropy.table import Table
@@ -332,7 +332,7 @@ class SingleFitter(CarbonFitter):
         solver : function
             The odeint style function to be passed. This function must accept the positional arguments: `derivative, y_initial`, and `time_values` as well as the key word arguments `atol=1e-15`, and `rtol=1e-15`.
         """
-        solver = jax.tree_util.Partial(solver, atol=atol, rtol=rtol)
+        solver = tree_util.Partial(solver, atol=atol, rtol=rtol)
         self._solver = solver
 
     def get_solver(self):
