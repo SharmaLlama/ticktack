@@ -593,8 +593,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(
-            self.annual, self.oversample, self.production, y0=y0, solver=self.get_solver(), args=params)
+        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, solver=self.get_solver(), args=params)
         return box_values
 
 
@@ -618,6 +617,7 @@ class SingleFitter(CarbonFitter):
         d14c = (binned_data - self.steady_state_y0[self.box_idx])\
             / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
+
 
     @partial(jit, static_argnums=(0))
     def dc14_fine(self, params=()):
@@ -654,12 +654,14 @@ class SingleFitter(CarbonFitter):
         d14c = self.dc14(params)
         return -0.5 * jnp.sum(((self.d14c_data - d14c) / self.d14c_data_error) ** 2)
 
+
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
         lp = 0
         lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         pos = self.log_likelihood(params)
         return lp + pos
+
 
     @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
@@ -680,6 +682,7 @@ class SingleFitter(CarbonFitter):
         gp.compute(self.control_points_time)
         return gp.log_likelihood(params)
 
+
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood_gp(self, params=()):
         """
@@ -696,6 +699,7 @@ class SingleFitter(CarbonFitter):
         """
         return self.log_likelihood(params=params) + self.log_likelihood_gp(params)
 
+
     @partial(jit, static_argnums=(0,))
     def neg_log_joint_likelihood_gp(self, params=()):
         """
@@ -711,6 +715,7 @@ class SingleFitter(CarbonFitter):
             Negative log joint likelihood
         """
         return -1 * self.log_joint_likelihood_gp(params)
+
 
     @partial(jit, static_argnums=(0,))
     def grad_neg_log_joint_likelihood_gp(self, params=()):
