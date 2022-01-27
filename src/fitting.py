@@ -556,7 +556,6 @@ class SingleFitter(CarbonFitter):
 
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
-    def run_burnin(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a carbon box model for the burn-in period.
         Parameters
