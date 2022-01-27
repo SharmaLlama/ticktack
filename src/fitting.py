@@ -4,7 +4,7 @@ from matplotlib.pyplot import rcParams
 import celerite2.jax
 from celerite2.jax import terms as jax_terms
 import jax.numpy as jnp
-from jax import grad, jit, random
+from jax import grad, jit, random, tree_util
 from functools import partial
 import ticktack
 from astropy.table import Table
@@ -332,7 +332,7 @@ class SingleFitter(CarbonFitter):
         solver : function
             The odeint style function to be passed. This function must accept the positional arguments: `derivative, y_initial`, and `time_values` as well as the key word arguments `atol=1e-15`, and `rtol=1e-15`.
         """
-        solver = partial(solver, atol=atol, rtol=rtol)
+        solver = tree_util.Partial(solver, atol=atol, rtol=rtol)
         self._solver = solver
 
     def get_solver(self):
@@ -556,8 +556,9 @@ class SingleFitter(CarbonFitter):
 
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
+    def run_burnin(self, y0=None, params=()):
         """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Calculates the C14 content of all the boxes within a carbon box model for the burn-in period.
         Parameters
         ----------
         time_values : ndarray
@@ -572,8 +573,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample,
-                                     self.production, y0=y0, solver=self.get_solver(), args=params)
+        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -598,6 +598,7 @@ class SingleFitter(CarbonFitter):
             self.annual, self.oversample, self.production, y0=y0, solver=self.get_solver(), args=params)
         return box_values
 
+
     @partial(jit, static_argnums=(0))
     def dc14(self, params=()):
         """
@@ -611,12 +612,12 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
-        binned_data = self.cbm.bin_data(
-            event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
-        d14c = (binned_data - self.steady_state_y0[self.box_idx]
-                ) / self.steady_state_y0[self.box_idx] * 1000
+        burnin, _ = self.run_burnin(args=params, solver=self.get_solver())
+        event, _ = self.run_event(y0=burnin[-1, :], args=params, solver=self.get_solver())
+        binned_data = self.cbm.bin_data(event[:, self.box_idx], \
+            self.oversample, self.annual, growth=self.growth)
+        d14c = (binned_data - self.steady_state_y0[self.box_idx])\
+            / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
     @partial(jit, static_argnums=(0))
@@ -632,8 +633,8 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        burnin, _ = self.run_burnin(args=params)
+        event, _ = self.run_event(y0=burnin[-1, :], args=params)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]
                 ) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
