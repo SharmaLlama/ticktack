@@ -212,7 +212,9 @@ def test_log_likelihood_gp(SingleFitter_creation):
 
 def test_log_joint_likelihood_gp(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="control_points")
-    out = SingleFitter_creation.log_joint_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
+    out = SingleFitter_creation.log_joint_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size),
+                                                        jnp.zeros((SingleFitter_creation.control_points_time.size)),
+                                                        jnp.ones(SingleFitter_creation.control_points_time.size) * 100)
     assert jnp.allclose(out, -4832.12756846)
 
 def test_grad_neg_log_joint_likelihood_gp(SingleFitter_creation):
