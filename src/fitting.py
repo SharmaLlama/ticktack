@@ -560,15 +560,15 @@ class SingleFitter(CarbonFitter):
         and compiles them using the `jax.jit` function. 
         """
         self.run_burnin = jit(partial(
-            self.cbm.run(self.burn_in_time, self.burnin_oversample,
-                self.production, solver=self.get_solver(), rtol=1e-15, 
-                atol=1e-15, y0=self.steady_state_y0, target_C_14=None, 
-                steady_state_production=None)))
+            self.cbm.run, self.burn_in_time, self.burnin_oversample,
+            self.production, solver=self.get_solver(), rtol=1e-15, 
+            atol=1e-15, y0=self.steady_state_y0, target_C_14=None, 
+            steady_state_production=None))
 
         self.run_event = jit(partial(
-            self.cbm.run(self.annual, self.oversample, self.production,
-                solver=self.get_solver(), rtol=1e-15, atol=1e-15,
-                target_C_14=None, steady_state_production=None)))
+            self.cbm.run, self.annual, self.oversample, self.production,
+            solver=self.get_solver(), rtol=1e-15, atol=1e-15,
+            target_C_14=None, steady_state_production=None))
 
     @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
