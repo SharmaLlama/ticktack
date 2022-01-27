@@ -554,6 +554,7 @@ class SingleFitter(CarbonFitter):
                                                                                                      + phase * 2 * np.pi / 11) + height
         return production
 
+    @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
@@ -575,6 +576,7 @@ class SingleFitter(CarbonFitter):
                                      self.production, y0=y0, solver=self.get_solver(), args=params)
         return box_values
 
+    @partial(jit, static_argnums=(0))
     def run_event(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
@@ -596,6 +598,7 @@ class SingleFitter(CarbonFitter):
             self.annual, self.oversample, self.production, y0=y0, solver=self.get_solver(), args=params)
         return box_values
 
+    @partial(jit, static_argnums=(0))
     def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
@@ -616,6 +619,7 @@ class SingleFitter(CarbonFitter):
                 ) / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
+    @partial(jit, static_argnums=(0))
     def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data_fine.
