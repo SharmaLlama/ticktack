@@ -332,7 +332,7 @@ class SingleFitter(CarbonFitter):
         solver : function
             The odeint style function to be passed. This function must accept the positional arguments: `derivative, y_initial`, and `time_values` as well as the key word arguments `atol=1e-15`, and `rtol=1e-15`.
         """
-        solver = partial(solver, atol=atol, rtol=rtol)
+        solver = jax.tree_util.Partial(solver, atol=atol, rtol=rtol)
         self._solver = solver
 
     def get_solver(self):
