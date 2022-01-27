@@ -568,7 +568,6 @@ class SingleFitter(CarbonFitter):
             self.oversample, self.production, rtol=1e-15, atol=1e-15,
             target_C_14=None, steady_state_production=None))
 
-    @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
@@ -589,7 +588,6 @@ class SingleFitter(CarbonFitter):
             / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
-    @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data_fine.
