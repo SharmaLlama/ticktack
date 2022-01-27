@@ -16,6 +16,10 @@ import seaborn as sns
 from jaxns.nested_sampling import NestedSampler
 from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
+from matplotlib.lines import Line2D
+import matplotlib as mpl
+import pickle
+mpl.style.use('seaborn-colorblind')
 
 
 class CarbonFitter:
@@ -210,7 +214,7 @@ class CarbonFitter:
         ax.set_yticks([color_min, (color_min + color_max) / 2, color_max])
         ax.yaxis.tick_right()
 
-    def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_names=None, labels=None, colors=None,
+    def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None, colors=None,
                              alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8):
         """
        Overplots posterior surfaces of parameters from multiple chains.
@@ -222,7 +226,7 @@ class CarbonFitter:
             The number of walkers for each chain in 'chains'
         figsize : tuple, optional
             Output figure size
-        params_names : list[str], optional
+        params_labels : list[str], optional
             A list of parameter names
         labels : list[str], optional
             Labels that distinguish different chains
@@ -243,10 +247,10 @@ class CarbonFitter:
         if labels:
             assert len(labels) == len(chains), "labels must have the same length as chains"
             for i in range(len(chains)):
-                c.add_chain(chains[i], walkers=walker, parameters=params_names, name=labels[i])
+                c.add_chain(chains[i], walkers=walker, parameters=params_labels, name=labels[i])
         else:
             for i in range(len(chains)):
-                c.add_chain(chains[i], walkers=walker, parameters=params_names)
+                c.add_chain(chains[i], walkers=walker, parameters=params_labels)
         c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=False,
                     label_font_size=label_font_size, tick_font_size=tick_font_size)
 
@@ -257,6 +261,50 @@ class CarbonFitter:
         plt.suptitle(title)
         plt.tight_layout()
         return fig
+
+    def plot_samples(self, average_path=None, chains_path=None, cbm_models=None, hemisphere="north", production_model=None,
+                     directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None):
+        colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
+        for i, model in enumerate(cbm_models):
+            cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
+            sf = fitting.SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+            sf.load_data(average_path)
+            chain = np.load(chains_path[i])
+            sf.compile_production_model(model=production_model)
+
+            idx = np.random.randint(len(chain), size=size)
+            for param in chain[idx]:
+                ax1.plot(sf.time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
+
+            ax1.set_ylabel("$\Delta^{14}$C (‰)")
+            fig.subplots_adjust(hspace=0.05)
+
+            for param in chain[idx][:size2]:
+                ax2.plot(sf.time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
+
+        ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+                     markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+
+        if directory_path:
+            file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+            for file in file_names:
+                sf.load_data(directory_path + '/' + file)
+                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+
+        custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=models[i]) for i in range(len(cbm_models))]
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        ax1.legend(handles=custom_lines)
+        ax2.set_ylim(1, 10);
+        ax2.set_xlabel("Calendar Year (CE)");
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        ax2.legend(loc="upper left")
+        plt.suptitle(event);
+        plt.tight_layout();
+        if savefig_path:
+            plt.savefig(savefig_path)
 
 class SingleFitter(CarbonFitter):
     """
@@ -1108,7 +1156,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
     elif production_model == 'flexible_sinusoid_affine_variant':
         default_params = np.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 2.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.4])
     elif production_model == 'affine':
         default_params = np.array([0, year, 1. / 12, 81. / 12])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
@@ -1220,3 +1268,88 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
     else:
         return mf, sample_event(year, mf, sampler, params=params, burnin=burnin, production=production,
                                 production_model=production_model, low_bounds=low_bounds, up_bounds=up_bounds)
+
+
+def plot_samples(average_path=None, chains_path=None, cbm_models=None, hemisphere="north", production_model=None,
+                 directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None):
+    fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
+    for i, model in enumerate(cbm_models):
+        cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
+        sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+        sf.load_data(average_path)
+        chain = np.load(chains_path[i])
+        sf.compile_production_model(model=production_model)
+
+        idx = np.random.randint(len(chain), size=size)
+        for param in chain[idx]:
+            ax1.plot(sf.time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
+
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        fig.subplots_adjust(hspace=0.05)
+
+        for param in chain[idx][:size2]:
+            ax2.plot(sf.time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
+
+    ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+                 markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+
+    if directory_path:
+        file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+        for file in file_names:
+            sf.load_data(directory_path + '/' + file)
+            ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                         alpha=0.2)
+            ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+
+    custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
+    custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+    ax1.legend(handles=custom_lines)
+    ax2.set_ylim(1, 10);
+    ax2.set_xlabel("Calendar Year (CE)");
+    ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+    ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+    plt.suptitle(title);
+    plt.tight_layout();
+    if savefig_path:
+        plt.savefig(savefig_path)
+
+def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, hemisphere="north",
+                 directory_path=None, savefig_path=None, title=None):
+    fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+    colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
+    for i, model in enumerate(cbm_models):
+        cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
+        sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+        sf.load_data(average_path)
+        with open(soln_path[i], 'rb') as f:
+            soln = pickle.load(f)
+        sf.compile_production_model(model="control_points")
+
+        ax1.plot(sf.time_data_fine, sf.dc14_fine(soln.x), color=colors[i])
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        fig.subplots_adjust(hspace=0.05)
+        ax2.plot(sf.control_points_time, soln.x, "o", color=colors[i])
+        ax2.plot(sf.control_points_time, soln.x, color=colors[i])
+
+    ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+                 markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+
+    if directory_path:
+        file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+        for file in file_names:
+            sf.load_data(directory_path + '/' + file)
+            ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                         alpha=0.2)
+            ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+
+    custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
+    custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+    ax1.legend(handles=custom_lines)
+    ax2.set_xlabel("Calendar Year (CE)");
+    ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+    ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+    plt.suptitle(title);
+    plt.tight_layout();
+    if savefig_path:
+        plt.savefig(savefig_path)
