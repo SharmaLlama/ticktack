@@ -725,22 +725,7 @@ class SingleFitter(CarbonFitter):
         return gp.log_likelihood(params)
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_likelihood_gp(self, params=()):
-        """
-        Computes the log joint likelihood of a set of control-points.
-        Parameters
-        ----------
-        params : ndarray
-            An array of control-points. First control point is also the mean of the Gaussian Process
-        Returns
-        -------
-        float
-            Log joint likelihood
-        """
-        return self.log_likelihood(params=params) + self.log_likelihood_gp(params)
-
-    @partial(jit, static_argnums=(0,))
-    def neg_log_joint_likelihood_gp(self, params=()):
+    def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
         training the set of control-points via numerical optimization.
@@ -753,7 +738,24 @@ class SingleFitter(CarbonFitter):
         float
             Negative log joint likelihood
         """
-        return -1 * self.log_joint_likelihood_gp(params)
+        lp = jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
+        return self.log_likelihood(params=params) + self.log_likelihood_gp(params) + lp
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_joint_likelihood_gp(self, params):
+        """
+        Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
+        training the set of control-points via numerical optimization.
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+        Returns
+        -------
+        float
+            Negative log joint likelihood
+        """
+        return -1 * self.log_likelihood(params=params) + -1 * self.log_likelihood_gp(params)
 
     @partial(jit, static_argnums=(0,))
     def grad_neg_log_joint_likelihood_gp(self, params=()):
@@ -1054,7 +1056,24 @@ class MultiFitter(CarbonFitter):
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def neg_log_joint_likelihood_gp(self, params=()):
+    def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
+        """
+        Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
+        training the set of control-points via numerical optimization.
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+        Returns
+        -------
+        float
+            Negative log joint likelihood
+        """
+        lp = jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
+        return self.multi_likelihood(params=params) + self.log_likelihood_gp(params) + lp
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_joint_likelihood_gp(self, params):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
         training the set of control-points via numerical optimization.
@@ -1161,7 +1180,19 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         default_params = np.array([0, year, 1. / 12, 81. / 12])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
         default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 15.])
-
+    elif production_model == 'control_points':
+        if sampler == "MCMC":
+            params = mf.steady_state_production * jnp.ones((len(mf.control_points_time),))
+            low_bounds = jnp.array([0] * params.size)
+            up_bounds = jnp.array([100] * params.size)
+            return mf.MarkovChainSampler(params,
+                                         likelihood=mf.log_joint_likelihood_gp,
+                                         burnin=burnin,
+                                         production=production,
+                                         args=(low_bounds, up_bounds))
+        elif sampler == "optimisation":
+            print("Running numerical optimization...")
+            return mf, mf.fit_ControlPoints()
     if all(arg is not None for arg in (low_bounds, up_bounds)):
         low_bounds = low_bounds
         up_bounds = up_bounds
@@ -1260,13 +1291,9 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
             mf.add_SingleFitter(sf)
     mf.compile()
     if not sampler:
-        if production_model == "control_points":
-            print("Running numerical optimization...")
-            return mf, mf.fit_ControlPoints()
-        else:
-            return mf
+        return mf
     else:
-        return mf, sample_event(year, mf, sampler, params=params, burnin=burnin, production=production,
+        return mf, sample_event(year, mf, sampler=sampler, params=params, burnin=burnin, production=production,
                                 production_model=production_model, low_bounds=low_bounds, up_bounds=up_bounds)
 
 
