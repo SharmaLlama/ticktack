@@ -583,8 +583,8 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(args=params)
-        event = self.run_event(y0=burnin[-1, :], args=params)
+        burnin, _ = self.run_burnin(args=params)
+        event, _ = self.run_event(y0=burnin[-1, :], args=params)
         binned_data = self.cbm.bin_data(event[:, self.box_idx], \
             self.oversample, self.annual, growth=self.growth)
         d14c = (binned_data - self.steady_state_y0[self.box_idx])\
@@ -604,8 +604,8 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(args=params)
-        event = self.run_event(y0=burnin[-1, :], args=params)
+        burnin, _ = self.run_burnin(args=params)
+        event, _ = self.run_event(y0=burnin[-1, :], args=params)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]
                 ) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
