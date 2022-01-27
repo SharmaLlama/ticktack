@@ -578,7 +578,7 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0))
     def run_event(self, y0=None, params=()):
         """
-        Calculates the C14 content of all the boxes within a carbon box model at the specified time values.
+        Calculates the C14 content of all the boxes within a carbon box model for the event duration.
         Parameters
         ----------
         time_values : ndarray
@@ -593,11 +593,10 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, solver=self.get_solver(), args=params)
+        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, args=params)
         return box_values
 
-
-    @partial(jit, static_argnums=(0))
+    @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
@@ -610,16 +609,13 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin, _ = self.run_burnin(params=params)
-        event, _ = self.run_event(y0=burnin[-1, :], params=params)
-        binned_data = self.cbm.bin_data(event[:, self.box_idx], \
-            self.oversample, self.annual, growth=self.growth)
-        d14c = (binned_data - self.steady_state_y0[self.box_idx])\
-            / self.steady_state_y0[self.box_idx] * 1000
+        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        event = self.run_event(y0=burnin[-1, :], params=params)
+        binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
+        d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
-
-    @partial(jit, static_argnums=(0))
+    @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data_fine.
@@ -632,11 +628,11 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin, _ = self.run_burnin(args=params)
-        event, _ = self.run_event(y0=burnin[-1, :], args=params)
-        d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]
-                ) / self.steady_state_y0[self.box_idx] * 1000
+        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        event = self.run_event(y0=burnin[-1, :], params=params)
+        d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
+
 
     # @partial(jit, static_argnums=(0,))
     def log_likelihood(self, params=()):
