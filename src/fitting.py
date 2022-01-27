@@ -1185,7 +1185,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
             params = mf.steady_state_production * jnp.ones((len(mf.control_points_time),))
             low_bounds = jnp.array([0] * params.size)
             up_bounds = jnp.array([100] * params.size)
-            return mf.MarkovChainSampler(params,
+            return mf, mf.MarkovChainSampler(params,
                                          likelihood=mf.log_joint_likelihood_gp,
                                          burnin=burnin,
                                          production=production,
@@ -1295,7 +1295,6 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
     else:
         return mf, sample_event(year, mf, sampler=sampler, params=params, burnin=burnin, production=production,
                                 production_model=production_model, low_bounds=low_bounds, up_bounds=up_bounds)
-
 
 def plot_samples(average_path=None, chains_path=None, cbm_models=None, hemisphere="north", production_model=None,
                  directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None):
