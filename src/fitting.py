@@ -610,8 +610,8 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin, _ = self.run_burnin(args=params, solver=self.get_solver())
-        event, _ = self.run_event(y0=burnin[-1, :], args=params, solver=self.get_solver())
+        burnin, _ = self.run_burnin(params=params)
+        event, _ = self.run_event(y0=burnin[-1, :], params=params)
         binned_data = self.cbm.bin_data(event[:, self.box_idx], \
             self.oversample, self.annual, growth=self.growth)
         d14c = (binned_data - self.steady_state_y0[self.box_idx])\
