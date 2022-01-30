@@ -18,7 +18,7 @@ from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
 from matplotlib.lines import Line2D
 import matplotlib as mpl
-import pickle
+from matplotlib.ticker import MaxNLocator
 mpl.style.use('seaborn-colorblind')
 
 
@@ -252,7 +252,7 @@ class CarbonFitter:
             for i in range(len(chains)):
                 c.add_chain(chains[i], walkers=walker, parameters=params_labels)
         c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=False,
-                    label_font_size=label_font_size, tick_font_size=tick_font_size)
+                    label_font_size=label_font_size, tick_font_size=tick_font_size, diagonal_tick_labels=False)
 
         if plot_dists:
             fig = c.plotter.plot_distributions(figsize=figsize)
@@ -396,7 +396,7 @@ class SingleFitter(CarbonFitter):
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
         self.mask = jnp.in1d(self.annual, self.time_data)
-        if self.hemisphere is 'north':
+        if self.hemisphere == 'north':
             self.growth = self.get_growth_vector("april-september")
         else:
             self.growth = self.get_growth_vector("october-march")
@@ -430,7 +430,7 @@ class SingleFitter(CarbonFitter):
         else:
             growth[start:end + 1] = 1
             # self.time_offset = (start/2 + end/2 + 1)/12
-        self.time_offset = start/12 + 1/12
+        self.time_offset = start/12
         return jnp.array(growth)
 
     def compile_production_model(self, model=None):
@@ -1104,7 +1104,7 @@ class MultiFitter(CarbonFitter):
         bounds = tuple([(low_bound, None)] * len(initial))
         soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
                                        options={'maxiter': 20000, 'maxfun': 60000,})
-        return soln
+        return soln.x
 
 def get_data(path=None, event=None):
     """
@@ -1296,9 +1296,14 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         return mf, sample_event(year, mf, sampler=sampler, params=params, burnin=burnin, production=production,
                                 production_model=production_model, low_bounds=low_bounds, up_bounds=up_bounds)
 
-def plot_samples(average_path=None, chains_path=None, cbm_models=None, hemisphere="north", production_model=None,
-                 directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None):
-    fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label=None, hemisphere="north", production_model=None,
+                 directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None,
+                 axs=None, labels=True):
+    if axs:
+        ax1, ax2 = axs
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        fig.subplots_adjust(hspace=0.05)
     colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
     for i, model in enumerate(cbm_models):
         cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
@@ -1307,75 +1312,131 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, hemispher
         chain = np.load(chains_path[i])
         sf.compile_production_model(model=production_model)
 
+        if sf.start < 0:
+            time_data = sf.time_data * -1
+            time_data_fine = sf.time_data_fine * -1
+            ax1.invert_xaxis()
+            ax2.invert_xaxis()
+        else:
+            time_data = sf.time_data
+            time_data_fine = sf.time_data_fine
+
         idx = np.random.randint(len(chain), size=size)
         for param in chain[idx]:
-            ax1.plot(sf.time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
-
-        ax1.set_ylabel("$\Delta^{14}$C (‰)")
-        fig.subplots_adjust(hspace=0.05)
+            ax1.plot(time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
 
         for param in chain[idx][:size2]:
-            ax2.plot(sf.time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
+            ax2.plot(time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
 
-    ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
                  markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
 
     if directory_path:
         file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
         for file in file_names:
             sf.load_data(directory_path + '/' + file)
-            ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
-                         alpha=0.2)
-            ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+            if sf.start < 0:
+                ax1.errorbar(-sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(-sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+            else:
+                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
 
-    custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
-    custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
-    ax1.legend(handles=custom_lines)
+    if labels:
+        if cbm_label:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_label[i]) for i in
+                            range(len(cbm_label))]
+        else:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        ax1.legend(handles=custom_lines)
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        if sf.start < 0:
+            ax2.set_xlabel("Year (BCE)");
+        else:
+            ax2.set_xlabel("Year (AD)");
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        plt.suptitle(title);
+        plt.tight_layout();
     ax2.set_ylim(1, 10);
-    ax2.set_xlabel("Calendar Year (CE)");
-    ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
-    ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
-    plt.suptitle(title);
-    plt.tight_layout();
+    if sf.start < 0:
+        ax2.set_xlim(-sf.start + 0.2, -sf.end - 0.2);
+    else:
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+    ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+
     if savefig_path:
         plt.savefig(savefig_path)
 
-def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, hemisphere="north",
-                 directory_path=None, savefig_path=None, title=None):
-    fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_label=None, hemisphere="north",
+                 directory_path=None, savefig_path=None, title=None, axs=None, labels=True):
+    if axs:
+        ax1, ax2 = axs
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        fig.subplots_adjust(hspace=0.05)
     colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
     for i, model in enumerate(cbm_models):
         cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
         sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
         sf.load_data(average_path)
-        with open(soln_path[i], 'rb') as f:
-            soln = pickle.load(f)
+        soln = np.load(soln_path[i])
         sf.compile_production_model(model="control_points")
 
-        ax1.plot(sf.time_data_fine, sf.dc14_fine(soln.x), color=colors[i])
-        ax1.set_ylabel("$\Delta^{14}$C (‰)")
-        fig.subplots_adjust(hspace=0.05)
-        ax2.plot(sf.control_points_time, soln.x, "o", color=colors[i])
-        ax2.plot(sf.control_points_time, soln.x, color=colors[i])
+        if sf.start < 0:
+            time_data = sf.time_data * -1
+            time_data_fine = sf.time_data_fine * -1
+            control_points_time = sf.control_points_time * -1
+            ax1.invert_xaxis()
+            ax2.invert_xaxis()
+        else:
+            time_data = sf.time_data
+            control_points_time = sf.control_points_time
+            time_data_fine = sf.time_data_fine
 
-    ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+        ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
+        ax2.plot(control_points_time, soln, "o", color=colors[i])
+        ax2.plot(control_points_time, soln, color=colors[i])
+
+    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
                  markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
 
     if directory_path:
         file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
         for file in file_names:
             sf.load_data(directory_path + '/' + file)
-            ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
-                         alpha=0.2)
-            ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+            if sf.start < 0:
+                ax1.errorbar(-sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(-sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+            else:
+                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
 
-    custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
-    custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
-    ax1.legend(handles=custom_lines)
-    ax2.set_xlabel("Calendar Year (CE)");
-    ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
-    ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
-    plt.suptitle(title);
-    plt.tight_layout();
+    if labels:
+        if cbm_label:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_label[i]) for i in
+                            range(len(cbm_label))]
+        else:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        ax1.legend(handles=custom_lines)
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        if sf.start < 0:
+            ax2.set_xlabel("Year (BCE)");
+        else:
+            ax2.set_xlabel("Year (AD)");
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        plt.suptitle(title);
+        plt.tight_layout();
+    if sf.start < 0:
+        ax2.set_xlim(-sf.start + 0.2, -sf.end - 0.2);
+    else:
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+    ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+
     if savefig_path:
         plt.savefig(savefig_path)
