@@ -469,20 +469,19 @@ class CarbonBoxModel:
 
         else:
             raise ValueError("Must give either target C-14 or production rate.")
-
-    @partial(jit, static_argnums=(0, 2, 3, 6, 7))
-    def run(self, time_out, oversample, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
+            
+            
+            
+    @partial(jit, static_argnums=(0, 2, 5, 6))
+    def run(cbm, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
 
         Parameters
         ----------
-        time_out : list
+        time : list
             the time values at which to calculate the content of all the boxes.
-
-        oversample : int
-            number of samples taken per year.
 
         production : callable
             the production function which determines the contents of the boxes.
@@ -517,32 +516,37 @@ class CarbonBoxModel:
 
         @jit
         def derivative(y, t):
-            ans = jnp.matmul(self._matrix, y)
-            production_rate_constant = production(t, *args)
-            production_rate_constant = self._convert_production_rate(production_rate_constant)
-            production_term = self._production_coefficients * production_rate_constant
-            return ans + production_term
+        ans = jnp.matmul(cbm._matrix, y)
+        production_rate_constant = production(t, *args) - steady_state_production
+        production_rate_constant = cbm._convert_production_rate(production_rate_constant)
+        production_term = cbm._production_coefficients * production_rate_constant
+        return ans + production_term
 
-        time_out = jnp.array(time_out)
-        time_values = jnp.linspace(jnp.min(time_out) - 1, jnp.max(time_out) + 1, (time_out.shape[0] + 1) * oversample)
+        time_values = jnp.array(time)
+    #         time_values = jnp.linspace(jnp.min(time_out) - 1, jnp.max(time_out) + 1, (time_out.shape[0] + 1) * oversample)
         solution = None
-        if y0 is not None:
-            y_initial = jnp.array(y0)
-        else:
-            if steady_state_production is not None:
-                solution = self.equilibrate(production_rate=steady_state_production)
 
-            elif target_C_14 is not None:
-                solution = self.equilibrate(production_rate=self.equilibrate(target_C_14=target_C_14))
-            else:
-                ValueError("Must give either target C-14 or production rate.")
-            y_initial = jnp.array(solution)
+        if steady_state_production is not None:
+            solution = cbm.equilibrate(production_rate=steady_state_production)
+
+        elif target_C_14 is not None:
+            steady_state_production = cbm.equilibrate(target_C_14=target_C_14)
+            solution = cbm.equilibrate(production_rate=steady_state_production)
+        else:
+            ValueError("Must give either target C-14 or production rate.")
 
         if not callable(production):
             raise ValueError("incorrect object type for production")
+            
+        if y0 is not None:
+            y_initial = jnp.array(y0)
+        else:
+            y_initial = jnp.array(solution)
 
-        states = odeint(derivative, y_initial, time_values,  atol=1e-15, rtol=1e-15)
+
+        states = odeint(derivative, y0-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
         return states, solution
+
 
     @partial(jit, static_argnums=(0, 2))
     def bin_data(self, data, time_oversample, time_out, growth):
