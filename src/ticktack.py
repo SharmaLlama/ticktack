@@ -473,7 +473,7 @@ class CarbonBoxModel:
             
             
     @partial(jit, static_argnums=(0, 2, 5, 6))
-    def run(cbm, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
+    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
@@ -516,22 +516,22 @@ class CarbonBoxModel:
 
         @jit
         def derivative(y, t):
-        ans = jnp.matmul(cbm._matrix, y)
-        production_rate_constant = production(t, *args) - steady_state_production
-        production_rate_constant = cbm._convert_production_rate(production_rate_constant)
-        production_term = cbm._production_coefficients * production_rate_constant
-        return ans + production_term
+            ans = jnp.matmul(self._matrix, y)
+            production_rate_constant = production(t, *args) - steady_state_production
+            production_rate_constant = self._convert_production_rate(production_rate_constant)
+            production_term = self._production_coefficients * production_rate_constant
+            return ans + production_term
 
         time_values = jnp.array(time)
     #         time_values = jnp.linspace(jnp.min(time_out) - 1, jnp.max(time_out) + 1, (time_out.shape[0] + 1) * oversample)
         solution = None
 
         if steady_state_production is not None:
-            solution = cbm.equilibrate(production_rate=steady_state_production)
+            solution = self.equilibrate(production_rate=steady_state_production)
 
         elif target_C_14 is not None:
-            steady_state_production = cbm.equilibrate(target_C_14=target_C_14)
-            solution = cbm.equilibrate(production_rate=steady_state_production)
+            steady_state_production = self.equilibrate(target_C_14=target_C_14)
+            solution = self.equilibrate(production_rate=steady_state_production)
         else:
             ValueError("Must give either target C-14 or production rate.")
 
