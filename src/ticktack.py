@@ -473,7 +473,7 @@ class CarbonBoxModel:
             
             
     @partial(jit, static_argnums=(0, 2, 5, 6))
-    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None):
+    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
@@ -524,16 +524,15 @@ class CarbonBoxModel:
 
         time_values = jnp.array(time)
     #         time_values = jnp.linspace(jnp.min(time_out) - 1, jnp.max(time_out) + 1, (time_out.shape[0] + 1) * oversample)
-        solution = None
+        if solution is None:
+            if steady_state_production is not None:
+                solution = self.equilibrate(production_rate=steady_state_production)
 
-        if steady_state_production is not None:
-            solution = self.equilibrate(production_rate=steady_state_production)
-
-        elif target_C_14 is not None:
-            steady_state_production = self.equilibrate(target_C_14=target_C_14)
-            solution = self.equilibrate(production_rate=steady_state_production)
-        else:
-            ValueError("Must give either target C-14 or production rate.")
+            elif target_C_14 is not None:
+                steady_state_production = self.equilibrate(target_C_14=target_C_14)
+                solution = self.equilibrate(production_rate=steady_state_production)
+            else:
+                ValueError("Must give either target C-14 or production rate or steady state values of system.")
 
         if not callable(production):
             raise ValueError("incorrect object type for production")
