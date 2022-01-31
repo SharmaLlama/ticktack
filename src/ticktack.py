@@ -591,7 +591,7 @@ class CarbonBoxModel:
             after1 = jnp.where(all1s > first0, all1s, 0)
             after1 = after1.at[jnp.nonzero(after1, size=1)].get()[0]
             num = jax.lax.sub(first1, after1)
-            val = cond(num == 0, lambda x: 12 - first1, lambda x : 12 - after1, num)
+            val = cond(num == 0, lambda x: first1, lambda x : after1, num)
             act = cond(jnp.all(seasons == 1), lambda x: 0, lambda x: val, seasons)
             return act
     
@@ -607,7 +607,7 @@ class CarbonBoxModel:
     def _rebin1D(self, time_out, shifted_index, oversample, kernel, s):
         binned_data = jnp.zeros((len(time_out),))
         fun = lambda i, val: dynamic_update_slice(val, jnp.array([jnp.sum(jnp.multiply(dynamic_slice(
-            s, ((i + 1) * oversample - shifted_index * oversample // 12,), (oversample,)), kernel)) / (
+            s, (i * oversample + shifted_index * oversample // 12,), (oversample,)), kernel)) / (
                                                                       jnp.sum(kernel))]), (i,))
         binned_data = fori_loop(0, len(time_out), fun, binned_data)
         return binned_data
