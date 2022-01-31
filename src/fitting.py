@@ -215,7 +215,7 @@ class CarbonFitter:
         ax.yaxis.tick_right()
 
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None, colors=None,
-                             alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8):
+                             alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8, max_ticks=10):
         """
        Overplots posterior surfaces of parameters from multiple chains.
         Parameters
@@ -252,7 +252,9 @@ class CarbonFitter:
             for i in range(len(chains)):
                 c.add_chain(chains[i], walkers=walker, parameters=params_labels)
         c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=False,
-                    label_font_size=label_font_size, tick_font_size=tick_font_size, diagonal_tick_labels=False)
+                    label_font_size=label_font_size, tick_font_size=tick_font_size, diagonal_tick_labels=False,
+                    max_ticks = max_ticks)
+        # legend_kwargs={"fontsize":14}
 
         if plot_dists:
             fig = c.plotter.plot_distributions(figsize=figsize)
@@ -359,7 +361,7 @@ class SingleFitter(CarbonFitter):
             self.steady_state_production = 1.8
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
-        else:
+        elif cbm_model == "Guttler14":
             self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
@@ -606,7 +608,8 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.burn_in_time) - 1, jnp.max(self.burn_in_time) + 1, (self.burn_in_time.size + 1) * self.burnin_oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -627,7 +630,8 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.annual) - 1, jnp.max(self.annual) + 1, (self.annual.size + 1) * self.oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -949,7 +953,8 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.burn_in_time) - 1, jnp.max(self.burn_in_time) + 1, (self.burn_in_time.size + 1) * self.burnin_oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -970,7 +975,8 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.annual) - 1, jnp.max(self.annual) + 1, (self.annual.size + 1) * self.oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -1175,7 +1181,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
     elif production_model == 'flexible_sinusoid_affine_variant':
         default_params = np.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.4])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.3])
     elif production_model == 'affine':
         default_params = np.array([0, year, 1. / 12, 81. / 12])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
@@ -1343,7 +1349,7 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
                 ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
                              alpha=0.2)
                 ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
-
+    sf.load_data(average_path)
     if labels:
         if cbm_label:
             custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_label[i]) for i in
@@ -1382,7 +1388,7 @@ def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_l
         cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
         sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
         sf.load_data(average_path)
-        soln = np.load(soln_path[i])
+        soln = np.load(soln_path[i], allow_pickle=True)[1]
         sf.compile_production_model(model="control_points")
 
         if sf.start < 0:
@@ -1416,6 +1422,7 @@ def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_l
                              alpha=0.2)
                 ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
 
+    sf.load_data(average_path)
     if labels:
         if cbm_label:
             custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_label[i]) for i in
