@@ -524,7 +524,7 @@ class CarbonBoxModel:
                 steady_state_production = self.equilibrate(target_C_14=target_C_14)
                 solution = self.equilibrate(production_rate=steady_state_production)
             else:
-                ValueError("Must give either target C-14 or production rate or steady state values of system.")
+                raise ValueError("Must give either target C-14 or production rate or steady state values of system.")
 
         if not callable(production):
             raise ValueError("incorrect object type for production")
