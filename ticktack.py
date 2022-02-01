@@ -3,9 +3,9 @@ import hdfdict
 import jax.numpy as jnp
 import jax.ops
 import scipy as scipy
+import scipy.integrate
 import scipy.optimize
 from jax import jit
-from jax.experimental.ode import odeint
 from functools import partial
 from jax.config import config
 import numpy as np
@@ -13,7 +13,14 @@ import pkg_resources
 from typing import Union
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 
+USE_JAX = True
+if USE_JAX:
+    from jax.experimental.ode import odeint
+else:
+    from scipy.integrate import odeint
+
 config.update("jax_enable_x64", True)
+
 
 class Box:
     """ Box class which represents each individual box in the carbon model."""
@@ -463,9 +470,10 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
             
-
+            
+            
     @partial(jit, static_argnums=(0, 2, 5, 6))
-    def run(self, time, production, y0=None, args=(), solver=odeint, target_C_14=None, steady_state_production=None, solution=None):
+    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile() method has not been executed first.
@@ -534,7 +542,8 @@ class CarbonBoxModel:
         else:
             y_initial = jnp.array(solution)
 
-        states = solver(derivative, y0 - solution, time_values, atol=1e-8, rtol=1e-10) + solution
+
+        states = odeint(derivative, y0-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
         return states, solution
 
 
@@ -556,6 +565,7 @@ class CarbonBoxModel:
 
         growth : list
             the growth season with which to bin the data with respect to.
+
 
         Returns
         -------
@@ -581,7 +591,7 @@ class CarbonBoxModel:
             after1 = jnp.where(all1s > first0, all1s, 0)
             after1 = after1.at[jnp.nonzero(after1, size=1)].get()[0]
             num = jax.lax.sub(first1, after1)
-            val = cond(num == 0, lambda x: first1, lambda x : after1, num)
+            val = cond(num == 0, lambda x: 12 - first1, lambda x : 12 - after1, num)
             act = cond(jnp.all(seasons == 1), lambda x: 0, lambda x: val, seasons)
             return act
     
@@ -590,11 +600,14 @@ class CarbonBoxModel:
         binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
         return binned_data
     
+
+
+
     @partial(jit, static_argnums=(0, 3))
     def _rebin1D(self, time_out, shifted_index, oversample, kernel, s):
         binned_data = jnp.zeros((len(time_out),))
         fun = lambda i, val: dynamic_update_slice(val, jnp.array([jnp.sum(jnp.multiply(dynamic_slice(
-            s, (i * oversample + shifted_index * oversample // 12,), (oversample,)), kernel)) / (
+            s, ((i + 1) * oversample - shifted_index * oversample // 12,), (oversample,)), kernel)) / (
                                                                       jnp.sum(kernel))]), (i,))
         binned_data = fori_loop(0, len(time_out), fun, binned_data)
         return binned_data

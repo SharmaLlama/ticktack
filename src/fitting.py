@@ -16,6 +16,10 @@ import seaborn as sns
 from jaxns.nested_sampling import NestedSampler
 from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
+from matplotlib.lines import Line2D
+import matplotlib as mpl
+from matplotlib.ticker import MaxNLocator
+mpl.style.use('seaborn-colorblind')
 
 
 class CarbonFitter:
@@ -212,8 +216,8 @@ class CarbonFitter:
         ax.set_yticks([color_min, (color_min + color_max) / 2, color_max])
         ax.yaxis.tick_right()
 
-    def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_names=None, labels=None, colors=None,
-                             alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8):
+    def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None, colors=None,
+                             alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8, max_ticks=10):
         """
        Overplots posterior surfaces of parameters from multiple chains.
         Parameters
@@ -224,7 +228,7 @@ class CarbonFitter:
             The number of walkers for each chain in 'chains'
         figsize : tuple, optional
             Output figure size
-        params_names : list[str], optional
+        params_labels : list[str], optional
             A list of parameter names
         labels : list[str], optional
             Labels that distinguish different chains
@@ -246,13 +250,14 @@ class CarbonFitter:
             assert len(labels) == len(
                 chains), "labels must have the same length as chains"
             for i in range(len(chains)):
-                c.add_chain(chains[i], walkers=walker,
-                            parameters=params_names, name=labels[i])
+                c.add_chain(chains[i], walkers=walker, parameters=params_labels, name=labels[i])
         else:
             for i in range(len(chains)):
-                c.add_chain(chains[i], walkers=walker, parameters=params_names)
+                c.add_chain(chains[i], walkers=walker, parameters=params_labels)
         c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=False,
-                    label_font_size=label_font_size, tick_font_size=tick_font_size)
+                    label_font_size=label_font_size, tick_font_size=tick_font_size, diagonal_tick_labels=False,
+                    max_ticks = max_ticks)
+        # legend_kwargs={"fontsize":14}
 
         if plot_dists:
             fig = c.plotter.plot_distributions(figsize=figsize)
@@ -262,6 +267,50 @@ class CarbonFitter:
         plt.tight_layout()
         return fig
 
+
+    def plot_samples(self, average_path=None, chains_path=None, cbm_models=None, hemisphere="north", production_model=None,
+                     directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None):
+        colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
+        for i, model in enumerate(cbm_models):
+            cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
+            sf = fitting.SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+            sf.load_data(average_path)
+            chain = np.load(chains_path[i])
+            sf.compile_production_model(model=production_model)
+
+            idx = np.random.randint(len(chain), size=size)
+            for param in chain[idx]:
+                ax1.plot(sf.time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
+
+            ax1.set_ylabel("$\Delta^{14}$C (‰)")
+            fig.subplots_adjust(hspace=0.05)
+
+            for param in chain[idx][:size2]:
+                ax2.plot(sf.time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
+
+        ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+                     markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+
+        if directory_path:
+            file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+            for file in file_names:
+                sf.load_data(directory_path + '/' + file)
+                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+
+        custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=models[i]) for i in range(len(cbm_models))]
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        ax1.legend(handles=custom_lines)
+        ax2.set_ylim(1, 10);
+        ax2.set_xlabel("Calendar Year (CE)");
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        ax2.legend(loc="upper left")
+        plt.suptitle(event);
+        plt.tight_layout();
+        if savefig_path:
+            plt.savefig(savefig_path)
 
 class SingleFitter(CarbonFitter):
     """
@@ -319,11 +368,9 @@ class SingleFitter(CarbonFitter):
             self.steady_state_production = 1.8
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
-        else:
-            self.steady_state_production = self.cbm.equilibrate(
-                target_C_14=target_C_14)
-            self.steady_state_y0 = self.cbm.equilibrate(
-                production_rate=self.steady_state_production)
+        elif cbm_model == "Guttler14":
+            self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
+            self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
         self._solver = None  # The solver to be passed to the CarbonBoxModel.run method
@@ -382,7 +429,7 @@ class SingleFitter(CarbonFitter):
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
         self.mask = jnp.in1d(self.annual, self.time_data)
-        if self.hemisphere is 'north':
+        if self.hemisphere == 'north':
             self.growth = self.get_growth_vector("april-september")
         else:
             self.growth = self.get_growth_vector("october-march")
@@ -416,7 +463,7 @@ class SingleFitter(CarbonFitter):
         else:
             growth[start:end + 1] = 1
             # self.time_offset = (start/2 + end/2 + 1)/12
-        self.time_offset = start/12 + 1/12
+        self.time_offset = start/12
         return jnp.array(growth)
 
     def compile_production_model(self, model=None):
@@ -597,7 +644,8 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.burn_in_time, self.burnin_oversample, self.production, solver=self.get_solver(), y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.burn_in_time), jnp.max(self.burn_in_time) + 2, (self.burn_in_time.size + 1) * self.burnin_oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, solver=self.get_solver(), y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -618,7 +666,8 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(self.annual, self.oversample, self.production, solver=self.get_solver(), y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2, (self.annual.size + 1) * self.oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, self.get_solver(), y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -720,23 +769,7 @@ class SingleFitter(CarbonFitter):
 
 
     @partial(jit, static_argnums=(0,))
-    def log_joint_likelihood_gp(self, params=()):
-        """
-        Computes the log joint likelihood of a set of control-points.
-        Parameters
-        ----------
-        params : ndarray
-            An array of control-points. First control point is also the mean of the Gaussian Process
-        Returns
-        -------
-        float
-            Log joint likelihood
-        """
-        return self.log_likelihood(params=params) + self.log_likelihood_gp(params)
-
-
-    @partial(jit, static_argnums=(0,))
-    def neg_log_joint_likelihood_gp(self, params=()):
+    def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
         training the set of control-points via numerical optimization.
@@ -749,7 +782,25 @@ class SingleFitter(CarbonFitter):
         float
             Negative log joint likelihood
         """
-        return -1 * self.log_joint_likelihood_gp(params)
+        lp = jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
+        return self.log_likelihood(params=params) + self.log_likelihood_gp(params) + lp
+
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_joint_likelihood_gp(self, params):
+        """
+        Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
+        training the set of control-points via numerical optimization.
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+        Returns
+        -------
+        float
+            Negative log joint likelihood
+        """
+        return -1 * self.log_likelihood(params=params) + -1 * self.log_likelihood_gp(params)
 
 
     @partial(jit, static_argnums=(0,))
@@ -951,8 +1002,8 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(
-            self.burn_in_time, self.burnin_oversample, self.production, y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.burn_in_time), jnp.max(self.burn_in_time) + 2, (self.burn_in_time.size + 1) * self.burnin_oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, solver=self.get_solver(), y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -973,8 +1024,8 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        box_values, _ = self.cbm.run(
-            self.annual, self.oversample, self.production, y0=y0, args=params)
+        time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2, (self.annual.size + 1) * self.oversample)
+        box_values, _ = self.cbm.run(time_values, self.production, solver=self.get_solver(), y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -1064,7 +1115,24 @@ class MultiFitter(CarbonFitter):
         return lp + pos
 
     @partial(jit, static_argnums=(0,))
-    def neg_log_joint_likelihood_gp(self, params=()):
+    def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
+        """
+        Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
+        training the set of control-points via numerical optimization.
+        Parameters
+        ----------
+        params : ndarray
+            An array of control-points. First control point is also the mean of the Gaussian Process
+        Returns
+        -------
+        float
+            Negative log joint likelihood
+        """
+        lp = jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
+        return self.multi_likelihood(params=params) + self.log_likelihood_gp(params) + lp
+
+    @partial(jit, static_argnums=(0,))
+    def neg_log_joint_likelihood_gp(self, params):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
         training the set of control-points via numerical optimization.
@@ -1094,9 +1162,8 @@ class MultiFitter(CarbonFitter):
         initial = self.steady_state_production * \
             jnp.ones((len(self.control_points_time),))
         bounds = tuple([(low_bound, None)] * len(initial))
-        soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
-                                       options={'maxiter': 20000, 'maxfun': 60000, })
-        return soln
+        soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds, options={'maxiter': 20000, 'maxfun': 60000,})
+        return soln.x
 
 
 def get_data(path=None, event=None):
@@ -1171,11 +1238,25 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         default_up_bounds = jnp.array([year + 5, 5., 11, 15., 2.])
     elif production_model == 'flexible_sinusoid_affine_variant':
         default_params = np.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
-        default_low_bounds = jnp.array(
-            [-mf.steady_state_production * 0.05 / 100, year - 5, 1 / 52., 0, 0., 0.])
-        default_up_bounds = jnp.array(
-            [mf.steady_state_production * 0.05 / 100, year + 5, 5., 11, 15., 2.])
-
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.3])
+    elif production_model == 'affine':
+        default_params = np.array([0, year, 1. / 12, 81. / 12])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 15.])
+    elif production_model == 'control_points':
+        if sampler == "MCMC":
+            params = mf.steady_state_production * jnp.ones((len(mf.control_points_time),))
+            low_bounds = jnp.array([0] * params.size)
+            up_bounds = jnp.array([100] * params.size)
+            return mf, mf.MarkovChainSampler(params,
+                                         likelihood=mf.log_joint_likelihood_gp,
+                                         burnin=burnin,
+                                         production=production,
+                                         args=(low_bounds, up_bounds))
+        elif sampler == "optimisation":
+            print("Running numerical optimization...")
+            return mf, mf.fit_ControlPoints()
     if all(arg is not None for arg in (low_bounds, up_bounds)):
         low_bounds = low_bounds
         up_bounds = up_bounds
@@ -1280,11 +1361,153 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
             mf.add_SingleFitter(sf)
     mf.compile()
     if not sampler:
-        if production_model == "control_points":
-            print("Running numerical optimization...")
-            return mf, mf.fit_ControlPoints()
-        else:
-            return mf
+        return mf
     else:
-        return mf, sample_event(year, mf, sampler, params=params, burnin=burnin, production=production,
+        return mf, sample_event(year, mf, sampler=sampler, params=params, burnin=burnin, production=production,
                                 production_model=production_model, low_bounds=low_bounds, up_bounds=up_bounds)
+
+def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label=None, hemisphere="north", production_model=None,
+                 directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None,
+                 axs=None, labels=True):
+    if axs:
+        ax1, ax2 = axs
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        fig.subplots_adjust(hspace=0.05)
+    colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
+    for i, model in enumerate(cbm_models):
+        cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
+        sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+        sf.load_data(average_path)
+        chain = np.load(chains_path[i])
+        sf.compile_production_model(model=production_model)
+
+        if sf.start < 0:
+            time_data = sf.time_data * -1
+            time_data_fine = sf.time_data_fine * -1
+            ax1.invert_xaxis()
+            ax2.invert_xaxis()
+        else:
+            time_data = sf.time_data
+            time_data_fine = sf.time_data_fine
+
+        idx = np.random.randint(len(chain), size=size)
+        for param in chain[idx]:
+            ax1.plot(time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
+
+        for param in chain[idx][:size2]:
+            ax2.plot(time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
+
+    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+                 markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+
+    if directory_path:
+        file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+        for file in file_names:
+            sf.load_data(directory_path + '/' + file)
+            if sf.start < 0:
+                ax1.errorbar(-sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(-sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+            else:
+                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+    sf.load_data(average_path)
+    if labels:
+        if cbm_label:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_label[i]) for i in
+                            range(len(cbm_label))]
+        else:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        ax1.legend(handles=custom_lines)
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        if sf.start < 0:
+            ax2.set_xlabel("Year (BCE)");
+        else:
+            ax2.set_xlabel("Year (AD)");
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        plt.suptitle(title);
+        plt.tight_layout();
+    ax2.set_ylim(1, 10);
+    if sf.start < 0:
+        ax2.set_xlim(-sf.start + 0.2, -sf.end - 0.2);
+    else:
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+    ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    if savefig_path:
+        plt.savefig(savefig_path)
+
+def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_label=None, hemisphere="north",
+                 directory_path=None, savefig_path=None, title=None, axs=None, labels=True):
+    if axs:
+        ax1, ax2 = axs
+    else:
+        fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        fig.subplots_adjust(hspace=0.05)
+    colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
+    for i, model in enumerate(cbm_models):
+        cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
+        sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+        sf.load_data(average_path)
+        soln = np.load(soln_path[i], allow_pickle=True)[1]
+        sf.compile_production_model(model="control_points")
+
+        if sf.start < 0:
+            time_data = sf.time_data * -1
+            time_data_fine = sf.time_data_fine * -1
+            control_points_time = sf.control_points_time * -1
+            ax1.invert_xaxis()
+            ax2.invert_xaxis()
+        else:
+            time_data = sf.time_data
+            control_points_time = sf.control_points_time
+            time_data_fine = sf.time_data_fine
+
+        ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
+        ax2.plot(control_points_time, soln, "o", color=colors[i])
+        ax2.plot(control_points_time, soln, color=colors[i])
+
+    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
+                 markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+
+    if directory_path:
+        file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
+        for file in file_names:
+            sf.load_data(directory_path + '/' + file)
+            if sf.start < 0:
+                ax1.errorbar(-sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(-sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+            else:
+                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
+                             alpha=0.2)
+                ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
+
+    sf.load_data(average_path)
+    if labels:
+        if cbm_label:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_label[i]) for i in
+                            range(len(cbm_label))]
+        else:
+            custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in range(len(cbm_models))]
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        ax1.legend(handles=custom_lines)
+        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        if sf.start < 0:
+            ax2.set_xlabel("Year (BCE)");
+        else:
+            ax2.set_xlabel("Year (AD)");
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        plt.suptitle(title);
+        plt.tight_layout();
+    if sf.start < 0:
+        ax2.set_xlim(-sf.start + 0.2, -sf.end - 0.2);
+    else:
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
+    ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    if savefig_path:
+        plt.savefig(savefig_path)
