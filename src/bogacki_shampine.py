@@ -23,7 +23,6 @@ from jax import lax
 from jax import ops
 from jax.util import safe_map, safe_zip
 from jax.flatten_util import ravel_pytree
-from jax.tree_util import tree_map
 from jax import linear_util as lu
 
 map = safe_map
