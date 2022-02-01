@@ -392,7 +392,7 @@ class SingleFitter(CarbonFitter):
         solver : function
             The solver that has been set for the `CarbonBoxModel.run` method using `set_solver`
         """
-        return self._solver
+        return tree_util.Partial(self._solver)  # Making it a valid JAX type
 
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
