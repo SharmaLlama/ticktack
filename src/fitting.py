@@ -907,6 +907,7 @@ class MultiFitter(CarbonFitter):
         if self.production_model == 'control points':
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.multi_interp_gp
+        self.steady_state_box = self.steady_state_y0[self.box_idx]
 
     @partial(jit, static_argnums=(0,))
     def multi_interp_gp(self, tval, *args):
@@ -997,7 +998,7 @@ class MultiFitter(CarbonFitter):
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c
 
-    @partial(jit, static_argnums=(0,))
+    # @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
         """
         Computes the ensemble log-likelihood of the parameters of self.production across multiple d14c datasets
@@ -1011,11 +1012,11 @@ class MultiFitter(CarbonFitter):
             Log-likelihood
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        event = self.run_event(y0=burnin[-1, :], params=params)[:, self.box_idx]
         like = 0
         for sf in self.MultiFitter:
-            binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=sf.growth)
-            d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
+            binned_data = self.cbm.bin_data(event, self.oversample, self.annual, growth=sf.growth)
+            d14c = (binned_data - self.steady_state_box) / self.steady_state_box * 1000
             d14c_sf = d14c[sf.multi_mask] + sf.offset
             like += jnp.sum(((sf.d14c_data - d14c_sf) / sf.d14c_data_error) ** 2) * -0.5
         return like
@@ -1039,7 +1040,6 @@ class MultiFitter(CarbonFitter):
         gp.compute(self.control_points_time)
         return gp.log_likelihood(params)
 
-    @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
         """
         Computes the log joint likelihood of parameters of self.production
@@ -1061,7 +1061,6 @@ class MultiFitter(CarbonFitter):
         pos = self.multi_likelihood(params)
         return lp + pos
 
-    @partial(jit, static_argnums=(0,))
     def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
@@ -1078,7 +1077,6 @@ class MultiFitter(CarbonFitter):
         lp = jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         return self.multi_likelihood(params=params) + self.log_likelihood_gp(params) + lp
 
-    @partial(jit, static_argnums=(0,))
     def neg_log_joint_likelihood_gp(self, params):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
