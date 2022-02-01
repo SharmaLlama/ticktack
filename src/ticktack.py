@@ -543,7 +543,7 @@ class CarbonBoxModel:
             y_initial = jnp.array(solution)
 
 
-        states = odeint(derivative, y0-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
+        states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
         return states, solution
 
 
