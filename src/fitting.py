@@ -608,7 +608,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        time_values = jnp.linspace(jnp.min(self.burn_in_time) - 1, jnp.max(self.burn_in_time) + 1, (self.burn_in_time.size + 1) * self.burnin_oversample)
+        time_values = jnp.linspace(jnp.min(self.burn_in_time), jnp.max(self.burn_in_time) + 2, (self.burn_in_time.size + 1) * self.burnin_oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
@@ -630,7 +630,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        time_values = jnp.linspace(jnp.min(self.annual) - 1, jnp.max(self.annual) + 1, (self.annual.size + 1) * self.oversample)
+        time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2, (self.annual.size + 1) * self.oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
@@ -953,7 +953,7 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        time_values = jnp.linspace(jnp.min(self.burn_in_time) - 1, jnp.max(self.burn_in_time) + 1, (self.burn_in_time.size + 1) * self.burnin_oversample)
+        time_values = jnp.linspace(jnp.min(self.burn_in_time), jnp.max(self.burn_in_time) + 2, (self.burn_in_time.size + 1) * self.burnin_oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
@@ -975,7 +975,7 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        time_values = jnp.linspace(jnp.min(self.annual) - 1, jnp.max(self.annual) + 1, (self.annual.size + 1) * self.oversample)
+        time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2, (self.annual.size + 1) * self.oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
