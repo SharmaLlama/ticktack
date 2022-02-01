@@ -666,7 +666,7 @@ class SingleFitter(CarbonFitter):
             for the system
         """
         time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2, (self.annual.size + 1) * self.oversample)
-        box_values, _ = self.cbm.run(time_values, self.production, self.get_solver(), y0=y0, args=params, steady_state_production= self.steady_state_production)
+        box_values, _ = self.cbm.run(time_values, self.production, solver=self.get_solver(), y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0,))
