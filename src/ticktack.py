@@ -534,7 +534,7 @@ class CarbonBoxModel:
         else:
             y_initial = jnp.array(solution)
 
-        states = solver(derivative, y0 - solution, time_values, atol=1e-8, rtol=1e-10) + solution
+        states = solver(derivative, y_initial - solution, time_values, atol=1e-8, rtol=1e-10) + solution
         return states, solution
 
 
