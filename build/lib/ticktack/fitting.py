@@ -1399,7 +1399,7 @@ def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_l
         cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
         sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
         sf.load_data(average_path)
-        soln = np.load(soln_path[i], allow_pickle=True)
+        soln = np.load(soln_path[i], allow_pickle=True)[1]
         sf.compile_production_model(model="control_points")
 
         if sf.start < 0:
