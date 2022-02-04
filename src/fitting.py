@@ -399,10 +399,10 @@ class SingleFitter(CarbonFitter):
         self.burn_in_time = jnp.arange(self.start - 1 - burnin_time, self.start - 1)
         self.oversample = oversample
         self.burnin_oversample = burnin_oversample
-        self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, int(self.oversample * (self.end - self.start + 2)))
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
         self.mask = jnp.in1d(self.annual, self.time_data)
+        self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2, (self.annual.size + 1) * self.oversample)
         if self.hemisphere == 'north':
             self.growth = self.get_growth_vector("april-september")
         else:
@@ -433,11 +433,10 @@ class SingleFitter(CarbonFitter):
         if end < start:
             growth[start:] = 1
             growth[:end + 1] = 1
-            # self.time_offset = ((start/2 + end/2 + 6 + 1) % 12)/12
+            self.time_offset = (start/2 + end/2 + 6)/12
         else:
             growth[start:end + 1] = 1
-            # self.time_offset = (start/2 + end/2 + 1)/12
-        self.time_offset = start/12
+            self.time_offset = (start/2 + end/2)/12
         return jnp.array(growth)
 
     def compile_production_model(self, model=None):
@@ -796,7 +795,7 @@ class SingleFitter(CarbonFitter):
         initial = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         bounds = tuple([(low_bound, None)] * len(initial))
         soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
-                                       options={'maxiter': 20000, 'maxfun': 60000,})
+                                       options={'maxiter': 100000, 'maxfun': 100000,})
         return soln
 
     # @partial(jit, static_argnums=(0,))
@@ -1112,7 +1111,7 @@ class MultiFitter(CarbonFitter):
         initial = self.steady_state_production * jnp.ones((len(self.control_points_time),))
         bounds = tuple([(low_bound, None)] * len(initial))
         soln = scipy.optimize.minimize(self.neg_log_joint_likelihood_gp, initial, bounds=bounds,
-                                       options={'maxiter': 20000, 'maxfun': 60000,})
+                                       options={'maxiter': 100000, 'maxfun': 100000,})
         return soln.x
 
 def get_data(path=None, event=None):
@@ -1309,7 +1308,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
 
 def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label=None, hemisphere="north", production_model=None,
                  directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None,
-                 axs=None, labels=True, interval=None):
+                 axs=None, labels=True, interval=None, capsize=3, markersize=6, elinewidth=3):
     if axs:
         ax1, ax2 = axs
     else:
@@ -1324,12 +1323,12 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
         sf.compile_production_model(model=production_model)
 
         if sf.start < 0:
-            time_data = sf.time_data * -1
+            time_data = sf.time_data * -1 - sf.time_offset
             time_data_fine = sf.time_data_fine * -1
             ax1.invert_xaxis()
             ax2.invert_xaxis()
         else:
-            time_data = sf.time_data
+            time_data = sf.time_data + sf.time_offset
             time_data_fine = sf.time_data_fine
 
         idx = np.random.randint(len(chain), size=size)
@@ -1339,19 +1338,19 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
         for param in chain[idx][:size2]:
             ax2.plot(time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
 
-    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
-                 markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize, markersize=markersize,
+                 elinewidth=elinewidth, label="average $\Delta^{14}$C")
 
     if directory_path:
         file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
         for file in file_names:
             sf.load_data(directory_path + '/' + file)
             if sf.start < 0:
-                ax1.errorbar(-sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
-                             alpha=0.2)
+                ax1.errorbar(-sf.time_data - sf.time_offset, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=capsize,
+                             markersize=markersize, alpha=0.2, elinewidth=elinewidth)
             else:
-                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
-                             alpha=0.2)
+                ax1.errorbar(sf.time_data + sf.time_offset, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=capsize,
+                             markersize=markersize, alpha=0.2, elinewidth=elinewidth)
     sf.load_data(average_path)
     if labels:
         if cbm_label:
@@ -1387,8 +1386,9 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
     if savefig_path:
         plt.savefig(savefig_path)
 
-def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_label=None, hemisphere="north",
-                 directory_path=None, savefig_path=None, title=None, axs=None, labels=True, interval=None):
+def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_models=None, cbm_label=None, hemisphere="north",
+                       directory_path=None, savefig_path=None, title=None, axs=None, labels=True, interval=None, markersize=6,
+                       capsize=3, markersize2=3, elinewidth=3):
     if axs:
         ax1, ax2 = axs
     else:
@@ -1403,33 +1403,38 @@ def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_l
         sf.compile_production_model(model="control_points")
 
         if sf.start < 0:
-            time_data = sf.time_data * -1
+            time_data = sf.time_data * -1 - sf.time_offset
             time_data_fine = sf.time_data_fine * -1
             control_points_time = sf.control_points_time * -1
             ax1.invert_xaxis()
             ax2.invert_xaxis()
         else:
-            time_data = sf.time_data
+            time_data = sf.time_data + sf.time_offset
             control_points_time = sf.control_points_time
             time_data_fine = sf.time_data_fine
 
         ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
-        ax2.plot(control_points_time, soln, "o", color=colors[i])
+        ax2.plot(control_points_time, soln, "o", color=colors[i], markersize=markersize2)
         ax2.plot(control_points_time, soln, color=colors[i])
+        if chain_path:
+            chain = np.load(chain_path[i], allow_pickle=True)
+            std = np.std(chain, axis=0)
+            ax2.fill_between(control_points_time, soln + std, soln - std, color=colors[i], alpha=0.3,
+                             edgecolor="none")
 
-    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
-                 markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+    ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize,
+                 markersize=markersize, elinewidth=elinewidth, label="average $\Delta^{14}$C")
 
     if directory_path:
         file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
         for file in file_names:
             sf.load_data(directory_path + '/' + file)
             if sf.start < 0:
-                ax1.errorbar(-sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
-                             alpha=0.2)
+                ax1.errorbar(-sf.time_data - sf.time_offset, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=capsize,
+                             markersize=markersize, alpha=0.2)
             else:
-                ax1.errorbar(sf.time_data, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=3,
-                             alpha=0.2)
+                ax1.errorbar(sf.time_data + sf.time_offset, sf.d14c_data, fmt="o", color="gray", yerr=sf.d14c_data_error, capsize=capsize,
+                             markersize=markersize, alpha=0.2)
 
     sf.load_data(average_path)
     if labels:
@@ -1451,7 +1456,7 @@ def plot_ControlPoints(average_path=None, soln_path=None, cbm_models=None, cbm_l
     if interval:
         if sf.start < 0:
             ax2.set_xlim(-sf.start + 0.2, -sf.end - 0.2);
-            ax2.set_xticks(np.arange(-sf.end - 1, -sf.start, interval))
+            ax2.set_xticks(np.arange(-sf.start, -sf.end - 1, -interval))
         else:
             ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
             ax2.set_xticks(np.arange(sf.start, sf.end + 1, interval))
