@@ -100,7 +100,8 @@ class CarbonFitter:
         # summary(results)
         return results
 
-    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False, label_font_size=8, tick_font_size=8, mle=False):
+    def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False,
+                      label_font_size=8, tick_font_size=8, mle=False):
         """
         From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters
         Parameters
@@ -135,7 +136,8 @@ class CarbonFitter:
         if plot_dist:
             fig = c.plotter.plot_distributions(figsize=figsize)
         else:
-            c.configure(spacing=0.0, usetex=False, label_font_size=label_font_size, tick_font_size=tick_font_size)
+            c.configure(spacing=0.0, usetex=False, label_font_size=label_font_size, tick_font_size=tick_font_size,
+                        diagonal_tick_labels=False,)
             fig = c.plotter.plot(figsize=figsize)
         if mle:
             MLE = []
@@ -396,7 +398,7 @@ class SingleFitter(CarbonFitter):
         self.d14c_data_error = jnp.array(data["sig_d14c"])
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
-        self.burn_in_time = jnp.arange(self.start - 1 - burnin_time, self.start - 1)
+        self.burn_in_time = jnp.arange(self.start - burnin_time, self.start)
         self.oversample = oversample
         self.burnin_oversample = burnin_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
@@ -612,8 +614,7 @@ class SingleFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        time_values = jnp.linspace(jnp.min(self.burn_in_time), jnp.max(self.burn_in_time) + 2, (self.burn_in_time.size + 1) * self.burnin_oversample)
-        box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
+        box_values, _ = self.cbm.run(self.burn_in_time, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0))
@@ -903,9 +904,10 @@ class MultiFitter(CarbonFitter):
         Returns
         -------
         """
-        self.burn_in_time = jnp.arange(self.start - 2000 - 1, self.start - 1)
+        self.burn_in_time = jnp.arange(self.start - 2000, self.start)
         self.annual = jnp.arange(self.start, self.end + 1)
-        self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, int(self.oversample * (self.end - self.start + 2)))
+        self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
+                                           (self.annual.size + 1) * 1008)
         for sf in self.MultiFitter:
             sf.multi_mask = jnp.in1d(self.annual, sf.time_data)
         if self.production_model == 'control points':
@@ -958,8 +960,7 @@ class MultiFitter(CarbonFitter):
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system
         """
-        time_values = jnp.linspace(jnp.min(self.burn_in_time), jnp.max(self.burn_in_time) + 2, (self.burn_in_time.size + 1) * self.burnin_oversample)
-        box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
+        box_values, _ = self.cbm.run(self.burn_in_time, self.production, y0=y0, args=params, steady_state_production= self.steady_state_production)
         return box_values
 
     @partial(jit, static_argnums=(0))
