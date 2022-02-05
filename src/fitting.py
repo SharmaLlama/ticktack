@@ -398,7 +398,7 @@ class SingleFitter(CarbonFitter):
         self.d14c_data_error = jnp.array(data["sig_d14c"])
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
-        self.burn_in_time = jnp.arange(self.start - burnin_time, self.start)
+        self.burn_in_time = jnp.arange(self.start - burnin_time, self.start, 1.)
         self.oversample = oversample
         self.burnin_oversample = burnin_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
@@ -904,7 +904,7 @@ class MultiFitter(CarbonFitter):
         Returns
         -------
         """
-        self.burn_in_time = jnp.arange(self.start - 2000, self.start)
+        self.burn_in_time = jnp.arange(self.start - 2000, self.start, 1.)
         self.annual = jnp.arange(self.start, self.end + 1)
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                            (self.annual.size + 1) * 1008)
