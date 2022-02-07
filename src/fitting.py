@@ -376,7 +376,7 @@ class SingleFitter(CarbonFitter):
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
-    def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
+    def load_data(self, file_name, oversample=1008, burnin_time=2000, num_offset=4):
         """
         Loads d14c data from specified file
         Parameters
@@ -403,12 +403,19 @@ class SingleFitter(CarbonFitter):
         self.end = np.nanmax(self.time_data)
         self.burn_in_time = jnp.arange(self.start - 1 - burnin_time, self.start - 1)
         self.oversample = oversample
+<<<<<<< Updated upstream
         self.burnin_oversample = burnin_oversample
         self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1,
                                            int(self.oversample * (self.end - self.start + 2)))
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
         self.mask = jnp.in1d(self.annual, self.time_data)
+=======
+        self.offset = jnp.mean(self.d14c_data[:num_offset])
+        self.annual = jnp.arange(self.start, self.end + 1)
+        self.mask = jnp.in1d(self.annual, self.time_data)
+        self.time_data_fine = jnp.linspace(self.start - 1 , self.end + 1, (self.annual.size + 1) * self.oversample)
+>>>>>>> Stashed changes
         if self.hemisphere == 'north':
             self.growth = self.get_growth_vector("april-september")
         else:
@@ -684,7 +691,8 @@ class SingleFitter(CarbonFitter):
             Predicted d14c value
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        event, _ = self.cbm.run(self.time_data_fine, self.production, y0=burnin[-1, :], args=params,
+                                steady_state_production= self.steady_state_production)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
 
@@ -895,7 +903,6 @@ class MultiFitter(CarbonFitter):
             Log-likelihood
         """
         self.MultiFitter = []
-        self.burnin_oversample = 1
         self.start = None
         self.end = None
         self.oversample = None
@@ -978,8 +985,12 @@ class MultiFitter(CarbonFitter):
         """
         self.burn_in_time = jnp.arange(self.start - 2000 - 1, self.start - 1)
         self.annual = jnp.arange(self.start, self.end + 1)
+<<<<<<< Updated upstream
         self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1,
                                            int(self.oversample * (self.end - self.start + 2)))
+=======
+        self.time_data_fine = jnp.linspace(self.start - 1, self.end + 1, (self.annual.size + 1) * 1008)
+>>>>>>> Stashed changes
         for sf in self.MultiFitter:
             sf.multi_mask = jnp.in1d(self.annual, sf.time_data)
         if self.production_model == 'control points':
@@ -1075,7 +1086,8 @@ class MultiFitter(CarbonFitter):
             Predicted d14c value
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        event, _ = self.cbm.run(self.time_data_fine, self.production, y0=burnin[-1, :], args=params,
+                                steady_state_production=self.steady_state_production)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c
 
