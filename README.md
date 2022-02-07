@@ -7,7 +7,7 @@ A lightweight, open-source carbon box modelling library in Python, adapted for m
 
 ## Contributors
 
-[Utkarsh Sharma](https://github.com/SharmaLlama), [Qingyuan Zhang](https://github.com/qingyuanzhang3), [Benjamin Pope](https://github.com/benjaminpope)
+[Utkarsh Sharma](https://github.com/SharmaLlama), [Qingyuan Zhang](https://github.com/qingyuanzhang3),  [Jordan Dennis](https://github.com/Jordan-Dennis),[Benjamin Pope](https://github.com/benjaminpope)
 
 ## Overview
 
