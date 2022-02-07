@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import rcParams
+from jax.experimental.ode import odeint
+from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
 import celerite2.jax
 from celerite2.jax import terms as jax_terms
 import jax.numpy as jnp
@@ -10,16 +12,20 @@ import ticktack
 from astropy.table import Table
 from tqdm import tqdm
 import emcee
+from jax.lax import cond,sub
 from chainconsumer import ChainConsumer
 import scipy
 import seaborn as sns
+from jax import jit, grad, jacrev, vmap
 from jaxns.nested_sampling import NestedSampler
 from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
 from matplotlib.lines import Line2D
 import matplotlib as mpl
 from matplotlib.ticker import MaxNLocator
+
 mpl.style.use('seaborn-colorblind')
+
 
 
 class CarbonFitter:
@@ -807,6 +813,61 @@ class SingleFitter(CarbonFitter):
     # @partial(jit, static_argnums=(0,))
     # def grad_sum_interp_gp(self, *args):
     #     return grad(self.sum_interp_gp)(*args)
+    
+    @partial(jit, static_argnums=(0,5, 6))
+    def reconstruct_production_rate(self, d14c, t_in, t_out, steady_state_solution, steady_state_production=None,
+                                    target_C_14=None):
+
+        data = d14c / 1000 * steady_state_solution[self.box_idx] + steady_state_solution[self.box_idx]
+        first1 = jnp.where(self.growth == 1, size=1)[0][0]
+        first0 = jnp.where(self.growth == 0, size=1)[0][0]
+        all1s = jnp.where(self.growth == 1, size=12)[0]
+        after1 = jnp.where(all1s > first0, all1s, 0)
+        after1 = after1.at[jnp.nonzero(after1, size=1)].get()[0]
+        num = sub(first1, after1)
+        val = cond(num == 0, lambda x: first1, lambda x: after1, num)
+        act = cond(jnp.all(self.growth == 1), lambda x: 6, lambda x: val+1, self.growth)
+        t_in = t_in + act/12
+
+        @jit
+        def interp(time):
+            fn = cond(jnp.count_nonzero(self.growth) == 12, lambda x:jnp.interp(time,t_in,data), 
+                     lambda x:InterpolatedUnivariateSpline(t_in, data)(time), self.growth)
+            return fn
+
+
+        dash = jit(grad(interp))
+
+        @partial(jit, static_argnums=(0))
+        def _reverse_convert_production_rate(cbm, production_rate):
+            new_rate = None
+            if cbm._production_rate_units == 'atoms/cm^2/s':
+                new_rate = production_rate / (14.003242 / 6.022 * 5.11 * 31536. / 1.e5)
+            elif cbm._production_rate_units == 'kg/yr':
+                new_rate = production_rate
+            return new_rate
+
+
+        @jit
+        def derivative(y, time):
+            ans = jnp.matmul(self.cbm.get_matrix(), y)
+            prod_coeff = self.cbm.get_production_coefficients()
+            production_rate = (dash(time) - ans[self.box_idx]) / prod_coeff[self.box_idx]
+            production_term = prod_coeff * production_rate
+            return ans + production_term
+
+        if target_C_14 is not None:
+            steady_state = self.cbm.equilibrate(production_rate=self.cbm.equilibrate(target_C_14=target_C_14))
+        elif steady_state_production is not None:
+            steady_state = self.cbm.equilibrate(production_rate=steady_state_production)
+        else:
+            raise ValueError("Must give either target C-14 or production rate.")
+
+        states = odeint(derivative, steady_state, t_out, atol=1e-15, rtol=1e-15)
+
+        flows = jnp.matmul(self.cbm.get_matrix(), states.T)
+        return _reverse_convert_production_rate(self.cbm, (vmap(dash)(t_out) - flows[self.box_idx, :]) /
+                                                self.cbm.get_production_coefficients()[self.box_idx])
 
 class MultiFitter(CarbonFitter):
     """

@@ -322,9 +322,12 @@ class CarbonBoxModel:
         jax.numpy.array
             jax array containing the normalised production coefficients of the nodes (returned in the order the
             nodes were added).
-
         """
         return self._production_coefficients
+
+
+    def get_matrix(self):
+        return self._matrix
 
     @partial(jit, static_argnums=0)
     def _convert_production_rate(self, production_rate):
@@ -523,7 +526,6 @@ class CarbonBoxModel:
             return ans + production_term
 
         time_values = jnp.array(time)
-    #         time_values = jnp.linspace(jnp.min(time_out) - 1, jnp.max(time_out) + 1, (time_out.shape[0] + 1) * oversample)
         if solution is None:
             if steady_state_production is not None:
                 solution = self.equilibrate(production_rate=steady_state_production)
@@ -542,8 +544,7 @@ class CarbonBoxModel:
         else:
             y_initial = jnp.array(solution)
 
-
-        states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
+        states = odeint(derivative, y_initial-solution, time_values,  atol=1e-8, rtol=1e-10) + solution
         return states, solution
 
 
@@ -554,7 +555,7 @@ class CarbonBoxModel:
 
         Parameters
         ----------
-        data : list
+        data : numpy.array
             the data which to bin.
 
         time_oversample : int
@@ -599,8 +600,6 @@ class CarbonBoxModel:
   
         binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
         return binned_data
-    
-
 
 
     @partial(jit, static_argnums=(0, 3))
@@ -734,3 +733,4 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
         return carbonmodel
     else:
         raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyake17, Buntgen18')
+
