@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.pyplot import rcParams
 from jax.experimental.ode import odeint
 from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
 import celerite2.jax
@@ -230,7 +229,7 @@ class CarbonFitter:
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None,
                              colors=None,
                              alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8,
-                             max_ticks=10):
+                             max_ticks=10, legend=True):
         """
        Overplots posterior surfaces of parameters from multiple chains.
         Parameters
@@ -272,9 +271,9 @@ class CarbonFitter:
         # legend_kwargs={"fontsize":14}
 
         if plot_dists:
-            fig = c.plotter.plot_distributions(figsize=figsize)
+            fig = c.plotter.plot_distributions(figsize=figsize, legend=legend)
         else:
-            fig = c.plotter.plot(figsize=(10, 10))
+            fig = c.plotter.plot(figsize=figsize, legend=legend)
         plt.suptitle(title)
         plt.tight_layout()
         return fig
@@ -1527,14 +1526,19 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
             control_points_time = sf.control_points_time
             time_data_fine = sf.time_data_fine
 
-        ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
-        ax2.plot(control_points_time, soln, "o", color=colors[i], markersize=markersize2)
-        ax2.plot(control_points_time, soln, color=colors[i])
         if chain_path:
             chain = np.load(chain_path[i], allow_pickle=True)
+            mu = np.mean(chain, axis=0)
             std = np.std(chain, axis=0)
-            ax2.fill_between(control_points_time, soln + std, soln - std, color=colors[i], alpha=0.3,
+            ax1.plot(time_data_fine, sf.dc14_fine(mu), color=colors[i])
+            ax2.plot(control_points_time, mu, "o", color=colors[i], markersize=markersize2)
+            ax2.plot(control_points_time, mu, color=colors[i])
+            ax2.fill_between(control_points_time, mu + std, mu - std, color=colors[i], alpha=0.3,
                              edgecolor="none")
+        else:
+            ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
+            ax2.plot(control_points_time, soln, "o", color=colors[i], markersize=markersize2)
+            ax2.plot(control_points_time, soln, color=colors[i])
 
     ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize,
                  markersize=markersize, elinewidth=elinewidth, label="average $\Delta^{14}$C")
