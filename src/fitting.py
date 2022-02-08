@@ -880,14 +880,17 @@ class SingleFitter(CarbonFitter):
     def MC_mean_std(self, iters=1000, t_in=None, t_out=None):
         if t_in is None:
             t_in = self.time_data.astype('float64')
+            t_in = jnp.arange(jnp.min(t_in) - 1, jnp.max(t_in) + 1)
 
         if t_out is None:
             t_out = self.time_data.astype('float64')
+            # t_out = jnp.arange(jnp.min(t_out) - 1, jnp.max(t_out) + 1)
 
         production_rates = []
 
         for _ in tqdm(range(iters)):
             new_data = self.d14c_data - self.offset + np.random.rand(len(self.d14c_data)) * self.d14c_data_error
+            new_data = np.concatenate((jnp.expand_dims(jnp.array(0), axis=0), new_data))
             prod_recon = self.reconstruct_production_rate(new_data, t_in, t_out, self.steady_state_y0,
                                                           steady_state_production=self.steady_state_production)
             production_rates.append(prod_recon)
