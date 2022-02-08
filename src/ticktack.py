@@ -438,7 +438,7 @@ class CarbonBoxModel:
         return final_production_rate.x[0]
 
     def equilibrate(self, target_C_14=None, production_rate=None):
-        """  External equilibrate method which determines the appropriate result to return given a parameter. If
+        """ External equilibrate method which determines the appropriate result to return given a parameter. If
         neither parameter is given then it throws a ValueError. If both are specified, then it treats production_rate
         as None.
 
@@ -702,13 +702,13 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
 
 def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
     """ Loads a pre-saved, commonly used model based on the research papers linked below. The model must be one of the
-    following: Miyake17, Brehm21, Guttler14, Buntgen18. Loads the model based on the the units for production rate
+    following: Miyake17, Brehm21, Guttler15, Buntgen18. Loads the model based on the the units for production rate
     and flow rate specified.
 
     Parameters
     ----------
     model : str
-        the name of the model to load. Must be one in [Miyake17, Brehm21, Guttler14, Buntgen18].
+        the name of the model to load. Must be one in [Miyake17, Brehm21, Guttler15, Buntgen18].
 
     production_rate_units : str, optional
         the production rate of the model to be loaded. Defaults to 'kg/yr'.
@@ -726,11 +726,11 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
     ValueError
         If the specified model parameter is not in the required list.
     """
-    if model in ['Guttler14', 'Brehm21', 'Miyake17', 'Buntgen18']:
+    if model in ['Guttler15', 'Brehm21', 'Miyake17', 'Buntgen18']:
         file = 'data/' + model + '.hd5'
         carbonmodel = load_model(pkg_resources.resource_stream(__name__, file),
                                  production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
         return carbonmodel
     else:
-        raise ValueError('model parameter must be one of the following: Guttler14, Brehm21, Miyake17, Buntgen18')
+        raise ValueError('model parameter must be one of the following: Guttler15, Brehm21, Miyake17, Buntgen18')
 
