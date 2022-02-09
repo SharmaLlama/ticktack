@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import jax
 from jax.experimental.ode import odeint
 from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
 import celerite2.jax
@@ -878,8 +879,9 @@ class SingleFitter(CarbonFitter):
 
     def MC_mean_std(self, iters=1000, t_in=None, t_out=None):
         if t_in is None:
-            t_in = self.time_data.astype('float64')
-            t_in = jnp.arange(jnp.min(t_in) - 1, jnp.max(t_in) + 1)
+            t_in = jnp.zeros((self.time_data.size + 1))
+            t_in = jax.ops.index_update(t_in, jnp.arange(self.time_data.size + 1)[1:], self.time_data)
+            t_in = jax.ops.index_update(t_in, 0, self.start - 1)
 
         if t_out is None:
             t_out = self.time_data.astype('float64')
