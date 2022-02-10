@@ -836,7 +836,8 @@ class SingleFitter(CarbonFitter):
         after1 = after1.at[jnp.nonzero(after1, size=1)].get()[0]
         num = sub(first1, after1)
         val = cond(num == 0, lambda x: first1, lambda x: after1, num)
-        act = cond(jnp.all(self.growth == 1), lambda x: 6, lambda x: val + 1, self.growth)
+        act = cond(jnp.all(self.growth == 1), lambda x: 0, lambda x: val, self.growth)
+        act = act + jnp.count_nonzero(self.growth)/2
         t_in = t_in + act / 12
 
         @jit
