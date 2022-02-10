@@ -1032,6 +1032,25 @@ class MultiFitter(CarbonFitter):
         return box_values
 
     @partial(jit, static_argnums=(0,))
+    def dc14(self, params=()):
+        """
+        Predict d14c on the same time sampling as self.time_data
+        Parameters
+        ----------
+        params : ndarray, optional
+            Parameters for self.production
+        Returns
+        -------
+        ndarray
+            Predicted d14c value
+        """
+        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+        event = self.run_event(y0=burnin[-1, :], params=params)
+        binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
+        d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
+        return d14c[self.mask] + self.offset
+
+    @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data_fine.
@@ -1046,9 +1065,8 @@ class MultiFitter(CarbonFitter):
         """
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
-        d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]
-                ) / self.steady_state_y0[self.box_idx] * 1000
-        return d14c
+        d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
+        return d14c + self.offset
 
     @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
