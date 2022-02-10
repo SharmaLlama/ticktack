@@ -891,7 +891,7 @@ class SingleFitter(CarbonFitter):
         production_rates = []
 
         for _ in tqdm(range(iters)):
-            new_data = self.d14c_data - self.offset + np.random.rand(len(self.d14c_data)) * self.d14c_data_error
+            new_data = self.d14c_data - self.offset + np.random.randn(len(self.d14c_data)) * self.d14c_data_error
             new_data = np.concatenate((jnp.expand_dims(jnp.array(0), axis=0), new_data))
             prod_recon = self.reconstruct_production_rate(new_data, t_in, t_out, self.steady_state_y0,
                                                           steady_state_production=self.steady_state_production)
