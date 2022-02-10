@@ -5,6 +5,7 @@ import celerite2.jax
 from celerite2.jax import terms as jax_terms
 import jax.numpy as jnp
 from jax import grad, jit, random, tree_util
+from jax.experimental.ode import odeint
 from functools import partial
 import ticktack
 from astropy.table import Table
@@ -877,6 +878,7 @@ class MultiFitter(CarbonFitter):
         self.steady_state_y0 = None
         self.steady_state_production = None
         self.growth = None
+        self._solver = odeint
         self.cbm = None
         self.cbm_model = None
         self.box_idx = None

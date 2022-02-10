@@ -3,11 +3,13 @@ import jax.numpy as jnp
 import pytest
 import ticktack
 from ticktack import fitting
+from jax.experimental.ode import odeint
 
 @pytest.fixture
 def SingleFitter_creation():
     cbm = ticktack.load_presaved_model('Guttler14', production_rate_units='atoms/cm^2/s')
     sf = fitting.SingleFitter(cbm, 'Guttler14', hemisphere="north")
+    sf.set_solver(odeint)
     sf.time_data = jnp.arange(200, 210)
     sf.d14c_data_error = jnp.ones((sf.time_data.size,))
     sf.d14c_data = jnp.array([-169.81482498, -168.05109886, -163.81278239, -158.13313339,
