@@ -896,10 +896,8 @@ class SingleFitter(CarbonFitter):
                                                           steady_state_production=self.steady_state_production)
             production_rates.append(prod_recon)
 
-        prod_rate = np.array(production_rates)
-        mean = np.mean(prod_rate, axis=0)
-        sd = np.std(prod_rate, axis=0)
-        return mean, sd
+        chain = np.array(production_rates)
+        return chain
 
 
 class MultiFitter(CarbonFitter):
@@ -1502,12 +1500,11 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
 def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_models=None, cbm_label=None,
                        hemisphere="north",
                        directory_path=None, savefig_path=None, title=None, axs=None, labels=True, interval=None,
-                       markersize=6,
-                       capsize=3, markersize2=3, elinewidth=3):
+                       markersize=6, capsize=3, markersize2=3, elinewidth=3, size=1, alpha=1,):
     if axs:
         ax1, ax2 = axs
     else:
-        fig, (ax1, ax2) = plt.subplots(2, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        fig, (ax1, ax2) = plt.subplots(2, dpi=100, figsize=(8, 8),  sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         fig.subplots_adjust(hspace=0.05)
     colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
     for i, model in enumerate(cbm_models):
@@ -1532,7 +1529,14 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
             chain = np.load(chain_path[i], allow_pickle=True)
             mu = np.mean(chain, axis=0)
             std = np.std(chain, axis=0)
-            ax1.plot(time_data_fine, sf.dc14_fine(mu), color=colors[i])
+
+            if size == 1:
+                ax1.plot(time_data_fine, sf.dc14_fine(mu), color=colors[i])
+            else:
+                idx = np.random.randint(len(chain), size=size)
+                for param in chain[idx]:
+                    ax1.plot(time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
+
             ax2.plot(control_points_time, mu, "o", color=colors[i], markersize=markersize2)
             ax2.plot(control_points_time, mu, color=colors[i])
             ax2.fill_between(control_points_time, mu + std, mu - std, color=colors[i], alpha=0.3,
@@ -1567,7 +1571,7 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
             custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in
                             range(len(cbm_models))]
         custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
-        ax1.legend(handles=custom_lines)
+        ax1.legend(handles=custom_lines, frameon=False)
         ax1.set_ylabel("$\Delta^{14}$C (‰)")
         if sf.start < 0:
             ax2.set_xlabel("Year (BCE)");
@@ -1591,3 +1595,4 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
     if savefig_path:
         plt.savefig(savefig_path)
+    return fig
