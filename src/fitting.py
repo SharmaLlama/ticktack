@@ -839,7 +839,6 @@ class SingleFitter(CarbonFitter):
         act = cond(jnp.all(self.growth == 1), lambda x: 0, lambda x: val, self.growth)
         act = act + jnp.count_nonzero(self.growth)/2
         t_in = t_in + act / 12
-        t_out = t_out + act/12
 
         @jit
         def interp(time):
