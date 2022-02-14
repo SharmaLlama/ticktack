@@ -92,14 +92,14 @@ def test_fit_event():
 
 def test_multi_likelihood(MultiFitter_creation):
     out = MultiFitter_creation.multi_likelihood(params=jnp.array([205., 1. / 12, jnp.pi / 2., 81. / 12]))
-    assert jnp.allclose(out, -269500.51096454)
+    assert jnp.allclose(out, -271736.26950342)
 
 def test_mf_log_joint_likelihood(MultiFitter_creation):
     out = MultiFitter_creation.log_joint_likelihood(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]),
                                                          jnp.array([200., 0., -jnp.pi, 0.]),
                                                          jnp.array([210., 5., jnp.pi, 15.])
                                                          )
-    assert jnp.allclose(out, -269500.51096454)
+    assert jnp.allclose(out, -271736.26950342)
 
     out = MultiFitter_creation.log_joint_likelihood(jnp.array([211., 1. / 12, jnp.pi / 2., 81./12]),
                                                          jnp.array([200., 0., -jnp.pi, 0.]),
@@ -158,15 +158,15 @@ def test_dc14(SingleFitter_creation):
     c = SingleFitter_creation.dc14(params=jnp.ones(SingleFitter_creation.control_points_time.size))
     assert jnp.all(
         jnp.array([
-            jnp.allclose(a, jnp.array([ 0.04804975,  0.63910481,  0.76016558,  0.37527572,
-              -0.37956041, 12.34915482, 14.50537975, 14.54228213,
-              14.06061063, 13.67800251])),
-            jnp.allclose(b, jnp.array([ 0.02669431,  0.35505823,  0.42231421,  0.20848651,
-              -0.2108669 , 12.90361592, 15.36586499, 15.52502989,
-              14.93705642, 14.24820176])),
-            jnp.allclose(c, jnp.array([-126.51396122, -126.55161042, -126.60292686, -126.65378554,
-              -126.70581391, -126.75734421, -126.81007942, -126.856763  ,
-              -126.93691473, -127.52508099]))
+            jnp.allclose(a, jnp.array([ 0.04804975,  0.63910482,  0.76016559,  0.37527574,
+              -0.3795604 , 12.34915479, 14.50537971, 14.54228208,
+              14.06061059, 13.67800247])),
+            jnp.allclose(b, jnp.array([ 0.02669429,  0.35505823,  0.42231421,  0.20848652,
+              -0.21086689, 12.90361593, 15.365865  , 15.52502989,
+              14.93705643, 14.24820176])),
+            jnp.allclose(c, jnp.array([-126.51396123, -126.55161057, -126.60292691, -126.65378533,
+              -126.70581364, -126.75734358, -126.81007871, -126.85676223,
+              -126.93691418, -127.52508047]))
         ])
     )
 
@@ -179,22 +179,22 @@ def test_dc14_fine(SingleFitter_creation):
     c = SingleFitter_creation.dc14_fine(params=jnp.ones(SingleFitter_creation.control_points_time.size))[-9:]
     assert jnp.all(
         jnp.array([
-            jnp.allclose(a, jnp.array([13.4248892 , 13.42474909, 13.42460889, 13.42446862,
-              13.42432826, 13.42418782, 13.4240473 , 13.4239067 ,
-              13.42376602])),
-            jnp.allclose(b, jnp.array([13.37697867, 13.37644155, 13.37590443, 13.37536732,
-              13.37483021, 13.3742931 , 13.373756  , 13.3732189 ,
-              13.3726818 ])),
-            jnp.allclose(c, jnp.array([-129.65468674, -129.6565079 , -129.65832947, -129.66015145,
-              -129.66197385, -129.66379665, -129.66561987, -129.66744349,
-              -129.66926753]))
+            jnp.allclose(a, jnp.array([13.42488917, 13.42474906, 13.42460886, 13.42446859,
+              13.42432823, 13.42418779, 13.42404727, 13.42390667,
+              13.42376598])),
+            jnp.allclose(b, jnp.array([13.37697866, 13.37644154, 13.37590442, 13.37536731,
+              13.37483019, 13.37429309, 13.37375598, 13.37321888,
+              13.37268179])),
+            jnp.allclose(c, jnp.array([-129.65468629, -129.65650745, -129.65832902, -129.660151  ,
+              -129.6619734 , -129.6637962 , -129.66561942, -129.66744304,
+              -129.66926708]))
         ])
     )
 
 def test_log_likelihood(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_likelihood(jnp.array([205., 1. / 12, jnp.pi / 2., 81./12]))
-    assert jnp.allclose(out, -134749.41427443)
+    assert jnp.allclose(out, -134749.41424852)
 
 def test_log_joint_likelihood(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
@@ -202,7 +202,7 @@ def test_log_joint_likelihood(SingleFitter_creation):
                                                     jnp.array([200., 0., -jnp.pi, 0.]),
                                                     jnp.array([210., 5., jnp.pi, 15.])
                                                     )
-    assert jnp.allclose(out, -134749.41427443)
+    assert jnp.allclose(out, -134749.41424852)
 
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_joint_likelihood(jnp.array([205., 1. / 12, jnp.pi / 2., 81. / 12]),
@@ -221,14 +221,14 @@ def test_log_joint_likelihood_gp(SingleFitter_creation):
     out = SingleFitter_creation.log_joint_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size),
                                                         jnp.zeros((SingleFitter_creation.control_points_time.size)),
                                                         jnp.ones(SingleFitter_creation.control_points_time.size) * 100)
-    assert jnp.allclose(out, -4848.15836128)
+    assert jnp.allclose(out, -4848.15844474)
 
 def test_grad_neg_log_joint_likelihood_gp(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="control_points")
     out = SingleFitter_creation.grad_neg_log_joint_likelihood_gp(jnp.ones(SingleFitter_creation.control_points_time.size))
-    assert jnp.allclose(out, jnp.array([40903.92798108,   603.14553586,   455.32578024,
-               400.57668741,   335.71501679,   280.9520573 ,
-               233.9208041 ,   148.3065663 ,   162.2101442 ]))
+    assert jnp.allclose(out, jnp.array([40903.92842731,   603.14554327,   455.32578778,
+               400.57669555,   335.71502475,   280.95206461,
+               233.92081014,   148.30657001,   162.21014777]))
 
 def test_fit_ControlPoints(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="control_points")

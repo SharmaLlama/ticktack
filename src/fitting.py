@@ -408,7 +408,7 @@ class SingleFitter(CarbonFitter):
         self.d14c_data_error = jnp.array(data["sig_d14c"])
         self.start = np.nanmin(self.time_data)
         self.end = np.nanmax(self.time_data)
-        self.burn_in_time = jnp.arange(self.start - burnin_time, self.start, 1.)
+        self.burn_in_time = jnp.arange(self.start - burnin_time, self.start + 1, 1.)
         self.oversample = oversample
         self.burnin_oversample = burnin_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
@@ -470,6 +470,10 @@ class SingleFitter(CarbonFitter):
         elif model == "simple_sinusoid":
             self.production = self.simple_sinusoid
             self.production_model = 'simple sinusoid'
+        elif model == "simple_sinusoid_sharp":
+            self.production = self.simple_sinusoid_sharp
+        elif model == "simple_sinusoid_prolonged":
+            self.production = self.simple_sinusoid_prolonged
         elif model == "flexible_sinusoid":
             self.production = self.flexible_sinusoid
             self.production_model = 'flexible sinusoid'
@@ -562,6 +566,58 @@ class SingleFitter(CarbonFitter):
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
+        return production
+
+    @partial(jit, static_argnums=(0,))
+    def simple_sinusoid_sharp(self, t, *args):
+        """
+        A simple sinusoid model for production rates over a period where a Miyake event is observed. Tunable parameters
+        include:
+        Start time: start time of the Miyake event
+        Duration: duration of the Miyake event
+        Phase: phase of the solar cycle during this period
+        Area: total radiocarbon delivered by this Miyake event (in production rate times years)
+        Parameters
+        ----------
+        t : ndarray
+            Time values. Scalar or vector input
+        args : ndarray | float
+            Can be passed in as a ndarray or as individual floats. Must include start time, duration, phase and area
+        Returns
+        -------
+        ndarray
+            Production rate on t
+        """
+        start_time, duration, area = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + 0.17033779539683722 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 1.9734709455912423 * 2 * np.pi / 11) + height
+        return production
+
+    @partial(jit, static_argnums=(0,))
+    def simple_sinusoid_prolonged(self, t, *args):
+        """
+        A simple sinusoid model for production rates over a period where a Miyake event is observed. Tunable parameters
+        include:
+        Start time: start time of the Miyake event
+        Duration: duration of the Miyake event
+        Phase: phase of the solar cycle during this period
+        Area: total radiocarbon delivered by this Miyake event (in production rate times years)
+        Parameters
+        ----------
+        t : ndarray
+            Time values. Scalar or vector input
+        args : ndarray | float
+            Can be passed in as a ndarray or as individual floats. Must include start time, duration, phase and area
+        Returns
+        -------
+        ndarray
+            Production rate on t
+        """
+        start_time, duration, area = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + 0.01 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 8.715836467519138 * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -1001,10 +1057,10 @@ class MultiFitter(CarbonFitter):
         Returns
         -------
         """
-        self.burn_in_time = jnp.arange(self.start - 2000, self.start, 1.)
+        self.burn_in_time = jnp.arange(self.start - 2000, self.start + 1, 1.)
         self.annual = jnp.arange(self.start, self.end + 1)
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
-                                           (self.annual.size + 1) * 1008)
+                                           (self.annual.size + 1) * self.oversample)
         for sf in self.MultiFitter:
             sf.multi_mask = jnp.in1d(self.annual, sf.time_data)
         if self.production_model == 'control points':
@@ -1499,7 +1555,7 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
 
 
 def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_models=None, cbm_label=None,
-                       hemisphere="north",
+                       hemisphere="north", merged_inverse_solver=None,
                        directory_path=None, savefig_path=None, title=None, axs=None, labels=True, interval=None,
                        markersize=6, capsize=3, markersize2=3, elinewidth=3, size=1, alpha=1,):
     if axs:
@@ -1514,6 +1570,13 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         sf.load_data(average_path)
         soln = np.load(soln_path[i], allow_pickle=True)
         sf.compile_production_model(model="control_points")
+
+        if np.all(merged_inverse_solver is not None):
+            ax2.errorbar(sf.time_data + sf.time_offset, np.median(merged_inverse_solver, axis=0), fmt="k", drawstyle="steps",
+                         alpha=0.2)
+            ax2.fill_between(sf.time_data + sf.time_offset, np.percentile(merged_inverse_solver, 32, axis=0),
+                             np.percentile(merged_inverse_solver, 68, axis=0), step='pre', alpha=0.1,
+                             color="k", edgecolor="none", lw=1.5)
 
         if sf.start < 0:
             time_data = sf.time_data * -1 - sf.time_offset
