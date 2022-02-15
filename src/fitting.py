@@ -485,6 +485,7 @@ class SingleFitter(CarbonFitter):
             self.production_model = 'affine'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
+            self.control_points_time_fine = jnp.linspace(self.start, self.end, int((self.end - self.start) * self.oversample))
             self.production = self.interp_gp
             self.production_model = 'control points'
         else:
@@ -1571,23 +1572,25 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         soln = np.load(soln_path[i], allow_pickle=True)
         sf.compile_production_model(model="control_points")
 
-        if np.all(merged_inverse_solver is not None):
-            ax2.errorbar(sf.time_data + sf.time_offset, np.median(merged_inverse_solver, axis=0), fmt="k", drawstyle="steps",
-                         alpha=0.2)
-            ax2.fill_between(sf.time_data + sf.time_offset, np.percentile(merged_inverse_solver, 32, axis=0),
-                             np.percentile(merged_inverse_solver, 68, axis=0), step='pre', alpha=0.1,
-                             color="k", edgecolor="none", lw=1.5)
-
         if sf.start < 0:
             time_data = sf.time_data * -1 - sf.time_offset
             time_data_fine = sf.time_data_fine * -1
             control_points_time = sf.control_points_time * -1
+            control_points_time_fine = sf.control_points_time_fine * -1
             ax1.invert_xaxis()
             ax2.invert_xaxis()
         else:
             time_data = sf.time_data + sf.time_offset
             control_points_time = sf.control_points_time
+            control_points_time_fine = sf.control_points_time_fine
             time_data_fine = sf.time_data_fine
+
+        if np.all(merged_inverse_solver is not None):
+            ax2.errorbar(time_data, np.median(merged_inverse_solver, axis=0), fmt="k", drawstyle="steps",
+                         alpha=0.2)
+            ax2.fill_between(time_data, np.percentile(merged_inverse_solver, 32, axis=0),
+                             np.percentile(merged_inverse_solver, 68, axis=0), step='pre', alpha=0.1,
+                             color="k", edgecolor="none", lw=1.5)
 
         if chain_path:
             chain = np.load(chain_path[i], allow_pickle=True)
@@ -1601,14 +1604,14 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
                 for param in chain[idx]:
                     ax1.plot(time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
 
-            ax2.plot(control_points_time, mu, "o", color=colors[i], markersize=markersize2)
-            ax2.plot(control_points_time, mu, color=colors[i])
-            ax2.fill_between(control_points_time, mu + std, mu - std, color=colors[i], alpha=0.3,
-                             edgecolor="none")
+            ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, mu), color=colors[i])
+            idx = np.random.randint(len(chain), size=30)
+            for param in chain[idx]:
+                ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, param),
+                         alpha=0.2, color=colors[i])
         else:
             ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
-            ax2.plot(control_points_time, soln, "o", color=colors[i], markersize=markersize2)
-            ax2.plot(control_points_time, soln, color=colors[i])
+            ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, soln), color=colors[i])
 
     ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize,
                  markersize=markersize, elinewidth=elinewidth, label="average $\Delta^{14}$C")
@@ -1659,4 +1662,3 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
     if savefig_path:
         plt.savefig(savefig_path)
-    return fig
