@@ -386,7 +386,7 @@ class SingleFitter(CarbonFitter):
             self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
-            
+
 
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
@@ -721,7 +721,7 @@ class SingleFitter(CarbonFitter):
         return box_values
 
     @partial(jit, static_argnums=(0,))
-    def dc14(self, *args):
+    def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
         Parameters
@@ -733,7 +733,6 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        params = jnp.array(*args)
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
         binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
@@ -741,7 +740,7 @@ class SingleFitter(CarbonFitter):
         return d14c[self.mask] + self.offset
 
     @partial(jit, static_argnums=(0,))
-    def dc14_fine(self, *args):
+    def dc14_fine(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data_fine.
         Parameters
@@ -753,7 +752,6 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        params = jnp.array(*args)
         burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
         event = self.run_event(y0=burnin[-1, :], params=params)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
@@ -1004,7 +1002,6 @@ class MultiFitter(CarbonFitter):
         self.steady_state_y0 = None
         self.steady_state_production = None
         self.growth = None
-        self._solver = odeint
         self.cbm = None
         self.cbm_model = None
         self.box_idx = None
