@@ -591,7 +591,7 @@ class SingleFitter(CarbonFitter):
         """
         start_time, duration, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + 1.580932349731588, * self.steady_state_production * jnp.sin(
+        production = self.steady_state_production + 1.580932349731588 * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + 0.1463655781098268 * 2 * np.pi / 11) + height
         return production
 
