@@ -617,8 +617,8 @@ class SingleFitter(CarbonFitter):
         """
         start_time, duration, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + 0.01 * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + 8.715836467519138 * 2 * np.pi / 11) + height
+        production = self.steady_state_production + 0.07420783359302356 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 0.20016528887738988 * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -1609,6 +1609,12 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
             for param in chain[idx]:
                 ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, param),
                          alpha=0.2, color=colors[i])
+            # mean = mu[0]
+            # kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
+            # gp = celerite2.jax.GaussianProcess(kernel, sf.control_points_time, mean=mean)
+            # pred, var = gp.predict(mu, t=sf.control_points_time_fine, return_var=True)
+            # ax2.fill_between(control_points_time_fine, pred - np.sqrt(var),
+            #                  pred + np.sqrt(var), color=colors[i], alpha=0.2)
         else:
             ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
             ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, soln), color=colors[i])
