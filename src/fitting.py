@@ -1058,6 +1058,8 @@ class MultiFitter(CarbonFitter):
         Returns
         -------
         """
+        if self.production_model == 'flexible sinusoid affine variant':
+            self.production = self.flexible_sinusoid_affine_variant
         self.burn_in_time = jnp.arange(self.start - 2000, self.start + 1, 1.)
         self.annual = jnp.arange(self.start, self.end + 1)
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
@@ -1095,6 +1097,40 @@ class MultiFitter(CarbonFitter):
         mu = jnp.dot(Ks, alpha)
         mu = (tval > self.start) * mu + (tval <= self.start) * mean
         return mu
+
+    @partial(jit, static_argnums=(0,))
+    def super_gaussian(self, t, start_time, duration, area):
+        """
+        Computes the density of a super gaussian function with an exponent of 16. Emulates the
+        spike in d14c data following the occurrence of a Miyake event
+        Parameters
+        ----------
+        t : ndarray
+            Scalar or vector input
+        start_time : float
+            Start time of a Miyake event
+        duration : float
+            Duration of a Miyake event
+        area : float
+            Total radiocarbon delivered by a Miyake event
+        Returns
+        -------
+        ndarray
+            Super gaussian density
+        """
+        middle = start_time + duration / 2.
+        height = area / duration
+        return height * jnp.exp(- ((t - middle) / (1. / 1.93516 * duration)) ** 16.)
+
+    @partial(jit, static_argnums=(0,))
+    def flexible_sinusoid_affine_variant(self, t, *args):
+        gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + gradient * (
+                t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t
+            + phase * 2 * np.pi / 11) + height
+        return production
 
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
