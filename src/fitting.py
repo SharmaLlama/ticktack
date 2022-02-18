@@ -591,8 +591,8 @@ class SingleFitter(CarbonFitter):
         """
         start_time, duration, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + 1.580932349731588 * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + 0.1463655781098268 * 2 * np.pi / 11) + height
+        production = self.steady_state_production + 0.1407144137150908 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 1.6147489408890556 * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -617,8 +617,8 @@ class SingleFitter(CarbonFitter):
         """
         start_time, duration, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + 0.10734924539181684 * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + 0.06395878249485243 * 2 * np.pi / 11) + height
+        production = self.steady_state_production + 0.06038572944424644 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 0.8725218996480465 * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
