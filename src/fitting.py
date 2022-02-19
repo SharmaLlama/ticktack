@@ -510,6 +510,7 @@ class SingleFitter(CarbonFitter):
             self.production_model = 'affine'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
+            self.control_points_time_fine = jnp.linspace(self.start, self.end, int((self.end - self.start) * self.oversample))
             self.production = self.interp_gp
             self.production_model = 'control points'
         else:
@@ -617,8 +618,8 @@ class SingleFitter(CarbonFitter):
         """
         start_time, duration, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + 0.17033779539683722 * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + 1.9734709455912423 * 2 * np.pi / 11) + height
+        production = self.steady_state_production + 0.1407144137150908 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 1.6147489408890556 * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -643,8 +644,8 @@ class SingleFitter(CarbonFitter):
         """
         start_time, duration, area = jnp.array(list(args)).reshape(-1)
         height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + 0.01 * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + 8.715836467519138 * 2 * np.pi / 11) + height
+        production = self.steady_state_production + 0.06038572944424644 * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t + 0.8725218996480465 * 2 * np.pi / 11) + height
         return production
 
     @partial(jit, static_argnums=(0,))
@@ -1096,6 +1097,8 @@ class MultiFitter(CarbonFitter):
         Returns
         -------
         """
+        if self.production_model == 'flexible sinusoid affine variant':
+            self.production = self.flexible_sinusoid_affine_variant
         self.burn_in_time = jnp.arange(self.start - 2000, self.start + 1, 1.)
         self.annual = jnp.arange(self.start, self.end + 1)
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
@@ -1135,6 +1138,40 @@ class MultiFitter(CarbonFitter):
         mu = jnp.dot(Ks, alpha)
         mu = (tval > self.start) * mu + (tval <= self.start) * mean
         return mu
+
+    @partial(jit, static_argnums=(0,))
+    def super_gaussian(self, t, start_time, duration, area):
+        """
+        Computes the density of a super gaussian function with an exponent of 16. Emulates the
+        spike in d14c data following the occurrence of a Miyake event
+        Parameters
+        ----------
+        t : ndarray
+            Scalar or vector input
+        start_time : float
+            Start time of a Miyake event
+        duration : float
+            Duration of a Miyake event
+        area : float
+            Total radiocarbon delivered by a Miyake event
+        Returns
+        -------
+        ndarray
+            Super gaussian density
+        """
+        middle = start_time + duration / 2.
+        height = area / duration
+        return height * jnp.exp(- ((t - middle) / (1. / 1.93516 * duration)) ** 16.)
+
+    @partial(jit, static_argnums=(0,))
+    def flexible_sinusoid_affine_variant(self, t, *args):
+        gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + gradient * (
+                t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(
+            2 * np.pi / 11 * t
+            + phase * 2 * np.pi / 11) + height
+        return production
 
     @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
@@ -1639,23 +1676,25 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         soln = np.load(soln_path[i], allow_pickle=True)
         sf.compile_production_model(model="control_points")
 
-        if np.all(merged_inverse_solver is not None):
-            ax2.errorbar(sf.time_data + sf.time_offset, np.median(merged_inverse_solver, axis=0), fmt="k", drawstyle="steps",
-                         alpha=0.2)
-            ax2.fill_between(sf.time_data + sf.time_offset, np.percentile(merged_inverse_solver, 32, axis=0),
-                             np.percentile(merged_inverse_solver, 68, axis=0), step='pre', alpha=0.1,
-                             color="k", edgecolor="none", lw=1.5)
-
         if sf.start < 0:
             time_data = sf.time_data * -1 - sf.time_offset
             time_data_fine = sf.time_data_fine * -1
             control_points_time = sf.control_points_time * -1
+            control_points_time_fine = sf.control_points_time_fine * -1
             ax1.invert_xaxis()
             ax2.invert_xaxis()
         else:
             time_data = sf.time_data + sf.time_offset
             control_points_time = sf.control_points_time
+            control_points_time_fine = sf.control_points_time_fine
             time_data_fine = sf.time_data_fine
+
+        if np.all(merged_inverse_solver is not None):
+            ax2.errorbar(time_data, np.median(merged_inverse_solver, axis=0), fmt="k", drawstyle="steps",
+                         alpha=0.2)
+            ax2.fill_between(time_data, np.percentile(merged_inverse_solver, 32, axis=0),
+                             np.percentile(merged_inverse_solver, 68, axis=0), step='pre', alpha=0.1,
+                             color="k", edgecolor="none", lw=1.5)
 
         if chain_path:
             chain = np.load(chain_path[i], allow_pickle=True)
@@ -1669,14 +1708,20 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
                 for param in chain[idx]:
                     ax1.plot(time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
 
-            ax2.plot(control_points_time, mu, "o", color=colors[i], markersize=markersize2)
-            ax2.plot(control_points_time, mu, color=colors[i])
-            ax2.fill_between(control_points_time, mu + std, mu - std, color=colors[i], alpha=0.3,
-                             edgecolor="none")
+            ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, mu), color=colors[i])
+            idx = np.random.randint(len(chain), size=30)
+            for param in chain[idx]:
+                ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, param),
+                         alpha=0.2, color=colors[i])
+            # mean = mu[0]
+            # kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
+            # gp = celerite2.jax.GaussianProcess(kernel, sf.control_points_time, mean=mean)
+            # pred, var = gp.predict(mu, t=sf.control_points_time_fine, return_var=True)
+            # ax2.fill_between(control_points_time_fine, pred - np.sqrt(var),
+            #                  pred + np.sqrt(var), color=colors[i], alpha=0.2)
         else:
             ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
-            ax2.plot(control_points_time, soln, "o", color=colors[i], markersize=markersize2)
-            ax2.plot(control_points_time, soln, color=colors[i])
+            ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, soln), color=colors[i])
 
     ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize,
                  markersize=markersize, elinewidth=elinewidth, label="average $\Delta^{14}$C")
@@ -1727,4 +1772,3 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         ax2.xaxis.set_major_locator(MaxNLocator(integer=True))
     if savefig_path:
         plt.savefig(savefig_path)
-    return fig
