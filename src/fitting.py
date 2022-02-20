@@ -35,6 +35,7 @@ class CarbonFitter:
     def MarkovChainSampler(self, params, likelihood, burnin=500, production=1000, k=2, args=()):
         """
         Runs an affine-invariant MCMC sampler on an array of initial parameters, subject to some likelihood function.
+
         Parameters
         ----------
         params : ndarray
@@ -49,6 +50,7 @@ class CarbonFitter:
             Determines the number of walkers of the sampler via:
             nwalkers = k * dim(params)
             2 by default.
+
         Returns
         -------
         ndarray
@@ -70,6 +72,7 @@ class CarbonFitter:
     def NestedSampler(self, params, likelihood, low_bound=None, high_bound=None, sampler_name='multi_ellipsoid'):
         """
         Runs Nested Sampling sampler on the parameter space of some model, subject to some likelihood function.
+
         Parameters
         ----------
         params : ndarray
@@ -82,6 +85,7 @@ class CarbonFitter:
             Upper bound of params
         sampler_name : str, optional
             Name of sampling method. Take value in ['multi_ellipsoid', 'slice']. 'multi_ellipsoid' by default.
+
         Returns
         -------
         ndarray
@@ -109,7 +113,8 @@ class CarbonFitter:
     def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False,
                       label_font_size=8, tick_font_size=8, mle=False):
         """
-        From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters
+        From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters.
+
         Parameters
         ----------
         chain : ndarray
@@ -122,8 +127,6 @@ class CarbonFitter:
             A list of parameter names
         plot_dist : bool, optional
             If True, only plot the marginal distributions of parameters
-        Returns
-        -------
         """
         if labels:
             c = ChainConsumer().add_chain(chain, walkers=walkers, parameters=labels)
@@ -154,6 +157,7 @@ class CarbonFitter:
     def correlation_plot(self, array, figsize=10, square_size=100):
         """
         Makes an accessible heatmap for visualizing correlation/covariance matrix.
+
         Parameters
         ----------
         array : ndarray
@@ -162,6 +166,7 @@ class CarbonFitter:
             Controls the size of the output figure. Should increase with the size of 'array'. 10 by default
         square_size: int, optional
             Controls the size of squares in the heatmap. Should decrease with the size of 'array'. 100 by default
+
         Returns
         -------
         figure
@@ -194,18 +199,18 @@ class CarbonFitter:
 
         ax.scatter(
             x=x, y=y, s=size * square_size, c=[value_to_color(i) for i in arr], marker='s')
-        ax.set_xticks(np.unique(x));
-        ax.set_yticks(np.unique(x));
+        ax.set_xticks(np.unique(x))
+        ax.set_yticks(np.unique(x))
 
-        ax.set_xticklabels(np.unique(x));
-        ax.set_yticklabels(reversed(np.unique(x)));
+        ax.set_xticklabels(np.unique(x))
+        ax.set_yticklabels(reversed(np.unique(x)))
 
         ax.grid(False, 'major')
         ax.grid(True, 'minor')
         ax.set_xticks([t + 0.5 for t in ax.get_xticks()], minor=True)
         ax.set_yticks([t + 0.5 for t in ax.get_yticks()], minor=True)
-        ax.set_xlim([-0.5, (n - 1) + 0.5]);
-        ax.set_ylim([-0.5, (n - 1) + 0.5]);
+        ax.set_xlim([-0.5, (n - 1) + 0.5])
+        ax.set_ylim([-0.5, (n - 1) + 0.5])
 
         ax = plt.subplot(plot_grid[:, -1])
         col_x = [0] * len(palette)
@@ -233,6 +238,7 @@ class CarbonFitter:
                              max_ticks=10, legend=True):
         """
        Overplots posterior surfaces of parameters from multiple chains.
+
         Parameters
         ----------
         chains : list
@@ -253,6 +259,7 @@ class CarbonFitter:
             Line width, in points
         plot_dists : bool, optional
             If True, only plot the marginal distributions of parameters
+
         Returns
         -------
         figure
@@ -285,7 +292,7 @@ class CarbonFitter:
         colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
         for i, model in enumerate(cbm_models):
             cbm = ticktack.load_presaved_model(model, production_rate_units='atoms/cm^2/s')
-            sf = fitting.SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
+            sf = SingleFitter(cbm, cbm_model=model, hemisphere=hemisphere)
             sf.load_data(average_path)
             chain = np.load(chains_path[i])
             sf.compile_production_model(model=production_model)
@@ -314,13 +321,13 @@ class CarbonFitter:
         custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=models[i]) for i in range(len(cbm_models))]
         custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
         ax1.legend(handles=custom_lines)
-        ax2.set_ylim(1, 10);
-        ax2.set_xlabel("Calendar Year (CE)");
-        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2);
-        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)");
+        ax2.set_ylim(1, 10)
+        ax2.set_xlabel("Calendar Year (CE)")
+        ax2.set_xlim(sf.start - 0.2, sf.end + 0.2)
+        ax2.set_ylabel("Production rate (atoms/cm$^2$/s)")
         ax2.legend(loc="upper left")
-        plt.suptitle(event);
-        plt.tight_layout();
+        plt.suptitle(event)
+        plt.tight_layout()
         if savefig_path:
             plt.savefig(savefig_path)
 
@@ -335,6 +342,7 @@ class SingleFitter(CarbonFitter):
                  hemisphere='north'):
         """
         Initializes a SingleFitter Object
+
         Parameters
         ----------
         cbm : CarbonBoxModel Object
@@ -348,8 +356,6 @@ class SingleFitter(CarbonFitter):
         hemisphere : str, optional
             The hemisphere which the SingleFitter object will model, can take values in
             ['north', 'south']. 'north' by default
-        Returns
-        -------
         """
         if isinstance(cbm, str):
             try:
@@ -386,21 +392,20 @@ class SingleFitter(CarbonFitter):
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
         Loads d14c data from specified file
+
         Parameters
         ----------
         file_name : str
             Path to the file
-        resolution : int, optional
-            1000 by default
-        fine_grid : float, optional
-            0.05 by default
         oversample : int, optional
-            1000 by default
+            number of samples per year. 1008 by default.
+        burnin_oversample : int, optional
+           number of sampler per year during burn in. 1 by default.
+        burnin_time : int, optional
+            number of years to do the burn in for. 2000 by default.
         num_offset : int, optional
             When set to x the first x data points are averaged to compute an offset, which will be subtracted from
             all data points
-        Returns
-        -------
         """
         data = Table.read(file_name, format="ascii")
         self.time_data = jnp.array(data["year"])
@@ -428,10 +433,12 @@ class SingleFitter(CarbonFitter):
     def get_growth_vector(self, growth_season):
         """
         Converts the growing season of a tree from string to 12-digit binary vector
+
         Parameters
         ----------
         growth_season : str
             Growing season of a tree. Must have the following format: "StartMonth-EndMonth"
+
         Returns
         -------
         ndarray
@@ -455,13 +462,12 @@ class SingleFitter(CarbonFitter):
     def compile_production_model(self, model=None):
         """
         Specifies the production rate model
+
         Parameters
         ----------
         model : str | callable, optional
             Specifies a built-in model or a custom model. Currently supported built-in models include ["simple_sinusoid",
             "flexible_sinusoid", "flexible_sinusoid_affine_variant", "control_points"]
-        Returns
-        -------
         """
         self.production = None
         if callable(model):
@@ -490,12 +496,14 @@ class SingleFitter(CarbonFitter):
             self.production_model = 'control points'
         else:
             raise ValueError(
-                "model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, flexible_sinusoid_affine_variant, control_points")
+                "model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, "
+                "flexible_sinusoid_affine_variant, control_points")
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
         """
         A Gaussian Process regression interpolator
+
         Parameters
         ----------
         tval : ndarray
@@ -503,6 +511,7 @@ class SingleFitter(CarbonFitter):
         args : ndarray | float
             Set of control-points. Can be passed in as ndarray or individual floats. Must have the same size as
             self.control_points_time.
+
         Returns
         -------
         ndarray
@@ -523,7 +532,8 @@ class SingleFitter(CarbonFitter):
     def super_gaussian(self, t, start_time, duration, area):
         """
         Computes the density of a super gaussian function with an exponent of 16. Emulates the
-        spike in d14c data following the occurrence of a Miyake event
+        spike in d14c data following the occurrence of a Miyake event.
+
         Parameters
         ----------
         t : ndarray
@@ -534,6 +544,7 @@ class SingleFitter(CarbonFitter):
             Duration of a Miyake event
         area : float
             Total radiocarbon delivered by a Miyake event
+
         Returns
         -------
         ndarray
@@ -552,12 +563,14 @@ class SingleFitter(CarbonFitter):
         Duration: duration of the Miyake event
         Phase: phase of the solar cycle during this period
         Area: total radiocarbon delivered by this Miyake event (in production rate times years)
+
         Parameters
         ----------
         t : ndarray
             Time values. Scalar or vector input
         args : ndarray | float
             Can be passed in as a ndarray or as individual floats. Must include start time, duration, phase and area
+
         Returns
         -------
         ndarray
@@ -578,12 +591,14 @@ class SingleFitter(CarbonFitter):
         Duration: duration of the Miyake event
         Phase: phase of the solar cycle during this period
         Area: total radiocarbon delivered by this Miyake event (in production rate times years)
+
         Parameters
         ----------
         t : ndarray
             Time values. Scalar or vector input
         args : ndarray | float
             Can be passed in as a ndarray or as individual floats. Must include start time, duration, phase and area
+
         Returns
         -------
         ndarray
@@ -604,12 +619,14 @@ class SingleFitter(CarbonFitter):
         Duration: duration of the Miyake event
         Phase: phase of the solar cycle during this period
         Area: total radiocarbon delivered by this Miyake event (in production rate times years)
+
         Parameters
         ----------
         t : ndarray
             Time values. Scalar or vector input
         args : ndarray | float
             Can be passed in as a ndarray or as individual floats. Must include start time, duration, phase and area
+
         Returns
         -------
         ndarray
@@ -631,6 +648,7 @@ class SingleFitter(CarbonFitter):
         Phase: phase of the solar cycle during this period
         Area: total radiocarbon delivered by this Miyake event (in production rate times years)
         Amplitude: Amplitude of the solar cycle during this period
+
         Parameters
         ----------
         t : ndarray
@@ -638,6 +656,7 @@ class SingleFitter(CarbonFitter):
         args : ndarray | float
             Can be passed in as a ndarray or as individual floats. Must include start time, duration, phase, area and
             amplitude
+
         Returns
         -------
         ndarray
@@ -670,14 +689,14 @@ class SingleFitter(CarbonFitter):
     def run_burnin(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a carbon box model for the burn-in period.
+
         Parameters
         ----------
-        time_values : ndarray
-            Time values
         y0 : ndarray, optional
             The initial contents of all boxes
         params : ndarray, optional
-            Parameters for self.production
+            Parameters for self.production function
+
         Returns
         -------
         ndarray
@@ -692,14 +711,14 @@ class SingleFitter(CarbonFitter):
     def run_event(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a carbon box model for the event duration.
+
         Parameters
         ----------
-        time_values : ndarray
-            Time values
         y0 : ndarray, optional
             The initial contents of all boxes
         params : ndarray, optional
-            Parameters for self.production
+            Parameters for self.production function
+
         Returns
         -------
         ndarray
@@ -716,10 +735,12 @@ class SingleFitter(CarbonFitter):
     def dc14(self, params=()):
         """
         Predict d14c on the same time sampling as self.time_data
+
         Parameters
         ----------
         params : ndarray, optional
             Parameters for self.production
+
         Returns
         -------
         ndarray
@@ -753,10 +774,12 @@ class SingleFitter(CarbonFitter):
     def log_likelihood(self, params=()):
         """
         Computes the gaussian log-likelihood of parameters of self.production
+
         Parameters
         ----------
         params : ndarray, optional
             Parameters of self.production
+
         Returns
         -------
         float
@@ -768,7 +791,8 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
         """
-        Computes the log joint likelihood of parameters of self.production
+        Computes the log joint likelihood of parameters of self.production function.
+
         Parameters
         ----------
         params : ndarray
@@ -777,6 +801,7 @@ class SingleFitter(CarbonFitter):
             Lower bound for the parameters of self.production
         up_bounds : ndarray
             Upper bound for the parameters of self.production
+
         Returns
         -------
         float
@@ -792,10 +817,12 @@ class SingleFitter(CarbonFitter):
         """
         Computes the Gaussian Process log-likelihood of a set of control-points. The Gaussian Process
         has a constant mean and a Matern-3/2 kernel with fixed parameters.
+
         Parameters
         ----------
         params : ndarray
             An array of control-points. First control point is also the mean of the Gaussian Process
+
         Returns
         -------
         float
@@ -811,10 +838,12 @@ class SingleFitter(CarbonFitter):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
         training the set of control-points via numerical optimization.
+
         Parameters
         ----------
         params : ndarray
             An array of control-points. First control point is also the mean of the Gaussian Process
+
         Returns
         -------
         float
@@ -828,10 +857,12 @@ class SingleFitter(CarbonFitter):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
         training the set of control-points via numerical optimization.
+
         Parameters
         ----------
         params : ndarray
             An array of control-points. First control point is also the mean of the Gaussian Process
+
         Returns
         -------
         float
@@ -843,10 +874,12 @@ class SingleFitter(CarbonFitter):
     def grad_neg_log_joint_likelihood_gp(self, params=()):
         """
         Computes the negative gradient of the log joint likelihood of control-points.
+
         Parameters
         ----------
         params : ndarray
             An array of control-points. First control point is also the mean of the Gaussian Process
+
         Returns
         -------
         float
@@ -857,10 +890,12 @@ class SingleFitter(CarbonFitter):
     def fit_ControlPoints(self, low_bound=0):
         """
         Fits the control-points by minimizing the negative log joint likelihood.
+
         Parameters
         ----------
         low_bound : int, optional
             The minimum value each control-point can take. 0 by default.
+
         Returns
         -------
         OptimizeResult
@@ -884,6 +919,21 @@ class SingleFitter(CarbonFitter):
     @partial(jit, static_argnums=(0, 5, 6))
     def reconstruct_production_rate(self, d14c, t_in, t_out, steady_state_solution, steady_state_production=None,
                                     target_C_14=None):
+        """ 
+
+        Parameters
+        ----------
+        d14c
+        t_in
+        t_out
+        steady_state_solution
+        steady_state_production
+        target_C_14
+
+        Returns
+        -------
+
+        """
 
         data = d14c / 1000 * steady_state_solution[self.box_idx] + steady_state_solution[self.box_idx]
         first1 = jnp.where(self.growth == 1, size=1)[0][0]
@@ -936,14 +986,28 @@ class SingleFitter(CarbonFitter):
                                                 self.cbm.get_production_coefficients()[self.box_idx])
 
     def MC_mean_std(self, iters=1000, t_in=None, t_out=None):
+        """
+
+        Parameters
+        ----------
+        iters : int, optional
+            number of iters to do the chain of.
+        t_in
+        t_out
+
+        Returns
+        -------
+
+        """
         if t_in is None:
             t_in = jnp.zeros((self.time_data.size + 1))
-            t_in = jax.ops.index_update(t_in, jnp.arange(self.time_data.size + 1)[1:], self.time_data)
-            t_in = jax.ops.index_update(t_in, 0, self.start - 1)
+            t_in = t_in.at[jnp.arange(self.time_data.size + 1)[1:]].set(self.time_data)
+            t_in = t_in.at[0].set(self.start - 1)
+            # t_in = jax.ops.index_update(t_in, jnp.arange(self.time_data.size + 1)[1:], self.time_data)
+            # t_in = jax.ops.index_update(t_in, 0, self.start - 1)
 
         if t_out is None:
             t_out = self.time_data.astype('float64')
-            # t_out = jnp.arange(jnp.min(t_out) - 1, jnp.max(t_out) + 1)
 
         production_rates = []
 
@@ -967,10 +1031,12 @@ class MultiFitter(CarbonFitter):
     def __init__(self):
         """
         Initializes a MultiFitter object. If sf is not None it should be a list of SingleFitter objects.
+
         Parameters
         ----------
         params : ndarray
             Parameters of a parametric model
+
         Returns
         -------
         float
@@ -994,12 +1060,12 @@ class MultiFitter(CarbonFitter):
     def add_SingleFitter(self, sf):
         """
         Adds a SingleFitter Object to a Multifitter Object
+
         Parameters
         ----------
         sf : SingleFitter
             SingleFitter Object
-        Returns
-        -------
+
         """
         if not self.start:
             self.start = sf.start
