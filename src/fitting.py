@@ -1508,7 +1508,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
 
 def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label=None, hemisphere="north",
                  production_model=None,
-                 directory_path=None, size=100, size2=30, alpha=0.05, alpha2=0.2, savefig_path=None, title=None,
+                 directory_path=None, size=50, size2=30, alpha=0.05, alpha2=0.1, savefig_path=None, title=None,
                  axs=None, labels=True, interval=None, capsize=3, markersize=6, elinewidth=3):
     if axs:
         ax1, ax2 = axs
@@ -1631,7 +1631,6 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         if chain_path:
             chain = np.load(chain_path[i], allow_pickle=True)
             mu = np.mean(chain, axis=0)
-            std = np.std(chain, axis=0)
 
             if size == 1:
                 ax1.plot(time_data_fine, sf.dc14_fine(mu), color=colors[i])
