@@ -1,0 +1,76 @@
+configfile: "config.yaml"
+import os
+
+def get_param_year(wildcards):
+    return float(config["event"][wildcards.event])
+
+def get_param_event_label(wildcards):
+    return config["event_label"][wildcards.event]
+
+def get_param_hem(wildcards):
+    return config["hemisphere"][wildcards.event]
+
+def get_sample_path(wildcards):
+    return "data/" + wildcards.event + ".csv"
+
+production_model = "flexible_sinusoid"
+
+rule all:
+    input:
+        expand("plots/posterior/{event}.pdf", event=config["event"]), # posterior
+        expand("plots/diagnostics/{event}_{cbm_model}.jpg", event=config["event"], cbm_model=config["cbm_model"]), # chain plot
+        expand("plots/diagnostics/{event}.jpg", event=config["event"]), # continuous sample plot
+
+rule sample:
+    input:
+        get_sample_path
+    output:
+        "chain/{event}_{cbm_model}.npy"
+    params:
+        year = get_param_year,
+        cbm_model = "{cbm_model}",
+        production_model = "flexible_sinusoid",
+        hemisphere = get_param_hem
+    script:
+        "scripts/sample.py"
+
+rule plot_posterior:
+    input:
+        expand("chain/{event}_{cbm_model}.npy", event="{event}", cbm_model=config["cbm_model"])
+    output:
+        "plots/posterior/{event}.pdf"
+    params:
+        year = get_param_year,
+        cbm_label = expand("{cbm_label}", cbm_label=config["cbm_label"].values()),
+        event_label = get_param_event_label,
+        production_model = production_model,
+    script:
+        "scripts/plot_posterior.py"
+
+rule plot_diagnostics:
+    input:
+        "chain/{event}_{cbm_model}.npy"
+    output:
+        "plots/diagnostics/{event}_{cbm_model}.jpg"
+    params:
+        event = "{event}",
+        cbm_model = "{cbm_model}",
+        production_model = production_model,
+    script:
+        "scripts/chain_diagnostics.py"
+
+rule plot_continuous_d14c:
+    input:
+        "data/{event}.csv",
+        expand("chain/{event}_{cbm_model}.npy", event="{event}", cbm_model=config["cbm_model"])
+    output:
+        "plots/diagnostics/{event}.jpg"
+    params:
+        event = "{event}",
+        cbm_model = expand("{cbm_model}", cbm_model=config["cbm_model"]),
+        cbm_label = expand("{cbm_label}", cbm_label=config["cbm_label"]),
+        production_model = production_model,
+        event_label = get_param_event_label,
+        hemisphere = get_param_hem
+    script:
+        "scripts/plot_continuous_samples.py"

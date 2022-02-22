@@ -1,0 +1,235 @@
+Building DAG of jobs...
+Using shell: /usr/bin/bash
+Provided cores: 16
+Rules claiming more threads will be scaled down.
+Job stats:
+job                     count    min threads    max threads
+--------------------  -------  -------------  -------------
+all                         1              1              1
+plot_continuous_d14c        4              1              1
+plot_diagnostics           12              1              1
+plot_posterior              4              1              1
+sample                     12              1              1
+total                      33              1              1
+
+Select jobs to execute...
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/Eastoe1052.csv
+    output: chain/Eastoe1052_Buntgen18.npy
+    jobid: 3
+    wildcards: event=Eastoe1052, cbm_model=Buntgen18
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/Eastoe1279.csv
+    output: chain/Eastoe1279_Buntgen18.npy
+    jobid: 7
+    wildcards: event=Eastoe1279, cbm_model=Buntgen18
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/ETH1052.csv
+    output: chain/ETH1052_Guttler15.npy
+    jobid: 10
+    wildcards: event=ETH1052, cbm_model=Guttler15
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/ETH1052.csv
+    output: chain/ETH1052_Brehm21.npy
+    jobid: 12
+    wildcards: event=ETH1052, cbm_model=Brehm21
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/ETH1279.csv
+    output: chain/ETH1279_Guttler15.npy
+    jobid: 14
+    wildcards: event=ETH1279, cbm_model=Guttler15
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/ETH1279.csv
+    output: chain/ETH1279_Brehm21.npy
+    jobid: 16
+    wildcards: event=ETH1279, cbm_model=Brehm21
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/Eastoe1052.csv
+    output: chain/Eastoe1052_Brehm21.npy
+    jobid: 4
+    wildcards: event=Eastoe1052, cbm_model=Brehm21
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/ETH1052.csv
+    output: chain/ETH1052_Buntgen18.npy
+    jobid: 11
+    wildcards: event=ETH1052, cbm_model=Buntgen18
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/Eastoe1279.csv
+    output: chain/Eastoe1279_Guttler15.npy
+    jobid: 6
+    wildcards: event=Eastoe1279, cbm_model=Guttler15
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/Eastoe1279.csv
+    output: chain/Eastoe1279_Brehm21.npy
+    jobid: 8
+    wildcards: event=Eastoe1279, cbm_model=Brehm21
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/ETH1279.csv
+    output: chain/ETH1279_Buntgen18.npy
+    jobid: 15
+    wildcards: event=ETH1279, cbm_model=Buntgen18
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:43 2022]
+rule sample:
+    input: data/Eastoe1052.csv
+    output: chain/Eastoe1052_Guttler15.npy
+    jobid: 2
+    wildcards: event=Eastoe1052, cbm_model=Guttler15
+    resources: tmpdir=/tmp
+
+[Tue Feb 22 17:35:53 2022]
+[Tue Feb 22 17:35:53 2022]
+Error in rule sample:
+    jobid: 15
+    output: chain/ETH1279_Buntgen18.npy
+
+Error in rule sample:
+    jobid: 4
+    output: chain/Eastoe1052_Brehm21.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmpf5bhe7j3.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmpy33two_b.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 8
+    output: chain/Eastoe1279_Brehm21.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmpsb9tdf2w.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 16
+    output: chain/ETH1279_Brehm21.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmp3a3fvu0p.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 11
+    output: chain/ETH1052_Buntgen18.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmpn13k_a3n.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 3
+    output: chain/Eastoe1052_Buntgen18.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmp730212st.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 7
+    output: chain/Eastoe1279_Buntgen18.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmp32blf217.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 12
+    output: chain/ETH1052_Brehm21.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmp2djbvf87.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 14
+    output: chain/ETH1279_Guttler15.npy
+
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 10
+    output: chain/ETH1052_Guttler15.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmp3xeiohls.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmp3m8jqey7.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 6
+    output: chain/Eastoe1279_Guttler15.npy
+
+[Tue Feb 22 17:35:54 2022]
+Error in rule sample:
+    jobid: 2
+    output: chain/Eastoe1052_Guttler15.npy
+
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmpvi275fvs.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+RuleException:
+CalledProcessError in line 35 of /mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile:
+Command 'set -euo pipefail;  /usr/bin/python3 /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/scripts/tmpuadxrafi.sample.py' returned non-zero exit status 1.
+  File "/mnt/c/Users/zhang/Documents/Code/Brehm/Snakefile", line 35, in __rule_sample
+  File "/usr/lib/python3.8/concurrent/futures/thread.py", line 57, in run
+Shutting down, this might take some time.
+Exiting because a job execution failed. Look above for error message
+Complete log: /mnt/c/Users/zhang/Documents/Code/Brehm/.snakemake/log/2022-02-22T173543.585826.snakemake.log
