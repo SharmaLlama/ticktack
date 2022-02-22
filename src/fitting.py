@@ -389,6 +389,7 @@ class SingleFitter(CarbonFitter):
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
+
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
         Loads d14c data from specified file
@@ -429,6 +430,20 @@ class SingleFitter(CarbonFitter):
             self.growth = self.get_growth_vector(data["growth_season"][0])
         except:
             pass
+
+        # define utils for inverse solver now that we have the growth season
+        if jnp.count_nonzero(self.growth) == 12:
+            def base_interp(time,t_in,data):
+                return jnp.interp(time, t_in, data)
+            self.interp_type='linear' # keep track of this in case you have to debug
+        else:
+            def base_interp(time,t_in,data):
+                return InterpolatedUnivariateSpline(t_in, data)(time)
+            self.interp_type='spline'
+
+        interp = jit(base_interp)
+        
+        self.dash = jit(grad(interp,argnums=(0)))
 
     def get_growth_vector(self, growth_season):
         """
@@ -916,6 +931,16 @@ class SingleFitter(CarbonFitter):
     # def grad_sum_interp_gp(self, *args):
     #     return grad(self.sum_interp_gp)(*args)
 
+    @partial(jit, static_argnums=(0))
+    def _reverse_convert_production_rate(self, production_rate):
+        new_rate = None
+        if self.cbm._production_rate_units == 'atoms/cm^2/s':
+            new_rate = production_rate / (14.003242 / 6.022 * 5.11 * 31536. / 1.e5)
+        elif self.cbm._production_rate_units == 'kg/yr':
+            new_rate = production_rate
+        return new_rate
+
+
     @partial(jit, static_argnums=(0, 5, 6))
     def reconstruct_production_rate(self, d14c, t_in, t_out, steady_state_solution, steady_state_production=None,
                                     target_C_14=None):
@@ -947,24 +972,9 @@ class SingleFitter(CarbonFitter):
         act = act + jnp.count_nonzero(self.growth)/2
         t_in = t_in + act / 12
 
-        @jit
-        def interp(time):
-            fn = cond(jnp.count_nonzero(self.growth) == 12, lambda x: jnp.interp(time, t_in, data),
-                      lambda x: InterpolatedUnivariateSpline(t_in, data)(time), self.growth)
-            return fn
+        dash = lambda x: self.dash(x,t_in,data)
 
-        dash = jit(grad(interp))
-
-        @partial(jit, static_argnums=(0))
-        def _reverse_convert_production_rate(cbm, production_rate):
-            new_rate = None
-            if cbm._production_rate_units == 'atoms/cm^2/s':
-                new_rate = production_rate / (14.003242 / 6.022 * 5.11 * 31536. / 1.e5)
-            elif cbm._production_rate_units == 'kg/yr':
-                new_rate = production_rate
-            return new_rate
-
-        @jit
+        # @jit
         def derivative(y, time):
             ans = jnp.matmul(self.cbm.get_matrix(), y)
             prod_coeff = self.cbm.get_production_coefficients()
@@ -982,7 +992,7 @@ class SingleFitter(CarbonFitter):
         states = odeint(derivative, steady_state, t_out, atol=1e-15, rtol=1e-15)
 
         flows = jnp.matmul(self.cbm.get_matrix(), states.T)
-        return _reverse_convert_production_rate(self.cbm, (vmap(dash)(t_out) - flows[self.box_idx, :]) /
+        return self._reverse_convert_production_rate((vmap(dash)(t_out) - flows[self.box_idx, :]) /
                                                 self.cbm.get_production_coefficients()[self.box_idx])
 
     def MC_mean_std(self, iters=1000, t_in=None, t_out=None):
