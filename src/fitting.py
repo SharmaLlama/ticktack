@@ -995,7 +995,7 @@ class SingleFitter(CarbonFitter):
         return self._reverse_convert_production_rate((vmap(dash)(t_out) - flows[self.box_idx, :]) /
                                                 self.cbm.get_production_coefficients()[self.box_idx])
 
-    def MC_mean_std(self, iters=1000, t_in=None, t_out=None):
+    def MC_reconstruct(self, iters=1000, t_in=None, t_out=None):
         """
 
         Parameters
