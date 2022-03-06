@@ -1,0 +1,27 @@
+event:
+  Eastoe1052: 1052
+  Eastoe1279: 1279
+  ETH1052: 1052
+  ETH1279: 1279
+
+event_label:
+  Eastoe1052: Eastoe 1052 CE
+  Eastoe1279: Eastoe 1279 CE
+  ETH1052: ETH 1052 CE
+  ETH1279: ETH 1279 CE
+
+hemisphere:
+  Eastoe1052: south
+  Eastoe1279: south
+  ETH1052: north
+  ETH1279: north
+
+cbm_model:
+  Guttler15: Guttler15
+  Buntgen18: Buntgen18
+  Brehm21: Brehm21
+
+cbm_label:
+  Güttler et al, 2015: "Güttler et al, 2015: 11-box"
+  Büntgen et al, 2018: "Büntgen et al, 2018: 22-box"
+  Brehm et al, 2021: "Brehm et al, 2021: 22-box"
