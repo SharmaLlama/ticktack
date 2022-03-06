@@ -3,8 +3,7 @@ import matplotlib.pyplot as plt
 import jax
 from jax.experimental.ode import odeint
 from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
-import celerite2.jax
-from celerite2.jax import terms as jax_terms
+from tinygp import kernels, GaussianProcess
 import jax.numpy as jnp
 from jax import grad, jit, random
 from functools import partial
@@ -398,7 +397,7 @@ class SingleFitter(CarbonFitter):
         file_name : str
             Path to the file
         oversample : int, optional
-            number of samples per year. 1008 by default.
+            number of samples per year. 108 by default.
         burnin_oversample : int, optional
            number of sampler per year during burn in. 1 by default.
         burnin_time : int, optional
@@ -429,6 +428,22 @@ class SingleFitter(CarbonFitter):
             self.growth = self.get_growth_vector(data["growth_season"][0])
         except:
             pass
+
+        # define utils for inverse solver now that we have the growth season
+        if jnp.count_nonzero(self.growth) == 12:
+            def base_interp(time, t_in, data):
+                return jnp.interp(time, t_in, data)
+
+            self.interp_type = 'linear'  # keep track of this in case you have to debug
+        else:
+            def base_interp(time, t_in, data):
+                return InterpolatedUnivariateSpline(t_in, data)(time)
+
+            self.interp_type = 'spline'
+
+        interp = jit(base_interp)
+
+        self.dash = jit(grad(interp, argnums=(0)))
 
     def get_growth_vector(self, growth_season):
         """
@@ -491,7 +506,8 @@ class SingleFitter(CarbonFitter):
             self.production_model = 'affine'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
-            self.control_points_time_fine = jnp.linspace(self.start, self.end, int((self.end - self.start) * self.oversample))
+            self.control_points_time_fine = jnp.linspace(self.start, self.end,
+                                                         int((self.end - self.start) * self.oversample))
             self.production = self.interp_gp
             self.production_model = 'control points'
         else:
@@ -503,7 +519,6 @@ class SingleFitter(CarbonFitter):
     def interp_gp(self, tval, *args):
         """
         A Gaussian Process regression interpolator
-
         Parameters
         ----------
         tval : ndarray
@@ -519,14 +534,10 @@ class SingleFitter(CarbonFitter):
         """
         tval = tval.reshape(-1)
         params = jnp.array(list(args)).reshape(-1)
-        mean = params[0]
-        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(kernel, self.control_points_time, mean=mean)
-        alpha = gp.apply_inverse(params)
-        Ks = kernel.get_value(tval[:, None] - self.control_points_time[None, :])
-        mu = jnp.dot(Ks, alpha)
-        mu = (tval > self.start) * mu + (tval <= self.start) * mean
-        return mu
+        kernel = kernels.Matern32(1)
+        gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
+        params = jnp.array(list(args)).reshape(-1)
+        return gp.condition(params, tval)[1].loc
 
     @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
@@ -828,10 +839,9 @@ class SingleFitter(CarbonFitter):
         float
             Gaussian Process log-likelihood
         """
-        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(kernel, mean=params[0])
-        gp.compute(self.control_points_time)
-        return gp.log_likelihood(params)
+        kernel = kernels.Matern32(1)
+        gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
+        return gp.log_probability(params)
 
     @partial(jit, static_argnums=(0,))
     def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
@@ -907,19 +917,19 @@ class SingleFitter(CarbonFitter):
                                        options={'maxiter': 100000, 'maxfun': 100000, })
         return soln
 
-    # @partial(jit, static_argnums=(0,))
-    # def sum_interp_gp(self, *args):
-    #     mu = self.interp_gp(self.annual, *args)
-    #     return jnp.sum(mu)
-    #
-    # @partial(jit, static_argnums=(0,))
-    # def grad_sum_interp_gp(self, *args):
-    #     return grad(self.sum_interp_gp)(*args)
+    @partial(jit, static_argnums=(0))
+    def _reverse_convert_production_rate(self, production_rate):
+        new_rate = None
+        if self.cbm._production_rate_units == 'atoms/cm^2/s':
+            new_rate = production_rate / (14.003242 / 6.022 * 5.11 * 31536. / 1.e5)
+        elif self.cbm._production_rate_units == 'kg/yr':
+            new_rate = production_rate
+        return new_rate
 
     @partial(jit, static_argnums=(0, 5, 6))
     def reconstruct_production_rate(self, d14c, t_in, t_out, steady_state_solution, steady_state_production=None,
                                     target_C_14=None):
-        """ 
+        """
 
         Parameters
         ----------
@@ -944,27 +954,12 @@ class SingleFitter(CarbonFitter):
         num = sub(first1, after1)
         val = cond(num == 0, lambda x: first1, lambda x: after1, num)
         act = cond(jnp.all(self.growth == 1), lambda x: 0, lambda x: val, self.growth)
-        act = act + jnp.count_nonzero(self.growth)/2
+        act = act + jnp.count_nonzero(self.growth) / 2
         t_in = t_in + act / 12
 
-        @jit
-        def interp(time):
-            fn = cond(jnp.count_nonzero(self.growth) == 12, lambda x: jnp.interp(time, t_in, data),
-                      lambda x: InterpolatedUnivariateSpline(t_in, data)(time), self.growth)
-            return fn
+        dash = lambda x: self.dash(x, t_in, data)
 
-        dash = jit(grad(interp))
-
-        @partial(jit, static_argnums=(0))
-        def _reverse_convert_production_rate(cbm, production_rate):
-            new_rate = None
-            if cbm._production_rate_units == 'atoms/cm^2/s':
-                new_rate = production_rate / (14.003242 / 6.022 * 5.11 * 31536. / 1.e5)
-            elif cbm._production_rate_units == 'kg/yr':
-                new_rate = production_rate
-            return new_rate
-
-        @jit
+        # @jit
         def derivative(y, time):
             ans = jnp.matmul(self.cbm.get_matrix(), y)
             prod_coeff = self.cbm.get_production_coefficients()
@@ -982,10 +977,10 @@ class SingleFitter(CarbonFitter):
         states = odeint(derivative, steady_state, t_out, atol=1e-15, rtol=1e-15)
 
         flows = jnp.matmul(self.cbm.get_matrix(), states.T)
-        return _reverse_convert_production_rate(self.cbm, (vmap(dash)(t_out) - flows[self.box_idx, :]) /
-                                                self.cbm.get_production_coefficients()[self.box_idx])
+        return self._reverse_convert_production_rate((vmap(dash)(t_out) - flows[self.box_idx, :]) /
+                                                     self.cbm.get_production_coefficients()[self.box_idx])
 
-    def MC_mean_std(self, iters=1000, t_in=None, t_out=None):
+    def MC_reconstruct(self, iters=1000, t_in=None, t_out=None):
         """
 
         Parameters
@@ -1155,14 +1150,10 @@ class MultiFitter(CarbonFitter):
         """
         tval = tval.reshape(-1)
         params = jnp.array(list(args)).reshape(-1)
-        mean = params[0]
-        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(kernel, self.control_points_time, mean=mean)
-        alpha = gp.apply_inverse(params)
-        Ks = kernel.get_value(tval[:, None] - self.control_points_time[None, :])
-        mu = jnp.dot(Ks, alpha)
-        mu = (tval > self.start) * mu + (tval <= self.start) * mean
-        return mu
+        kernel = kernels.Matern32(1)
+        gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
+        params = jnp.array(list(args)).reshape(-1)
+        return gp.condition(params, tval)[1].loc
 
     @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
@@ -1299,10 +1290,9 @@ class MultiFitter(CarbonFitter):
         float
             Gaussian Process log-likelihood
         """
-        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(kernel, mean=params[0])
-        gp.compute(self.control_points_time)
-        return gp.log_likelihood(params)
+        kernel = kernels.Matern32(1)
+        gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
+        return gp.log_probability(params)
 
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
         """
@@ -1660,11 +1650,11 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
 def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_models=None, cbm_label=None,
                        hemisphere="north", merged_inverse_solver=None,
                        directory_path=None, savefig_path=None, title=None, axs=None, labels=True, interval=None,
-                       markersize=6, capsize=3, markersize2=3, elinewidth=3, size=1, alpha=1,):
+                       markersize=6, capsize=3, markersize2=3, elinewidth=3, size=1, alpha=1, ):
     if axs:
         ax1, ax2 = axs
     else:
-        fig, (ax1, ax2) = plt.subplots(2, dpi=100, figsize=(8, 8),  sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        fig, (ax1, ax2) = plt.subplots(2, dpi=100, figsize=(8, 8), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
         fig.subplots_adjust(hspace=0.05)
     colors = mpl.rcParams['axes.prop_cycle'].by_key()['color']
     for i, model in enumerate(cbm_models):
@@ -1710,12 +1700,6 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
             for param in chain[idx]:
                 ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, param),
                          alpha=0.2, color=colors[i])
-            # mean = mu[0]
-            # kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-            # gp = celerite2.jax.GaussianProcess(kernel, sf.control_points_time, mean=mean)
-            # pred, var = gp.predict(mu, t=sf.control_points_time_fine, return_var=True)
-            # ax2.fill_between(control_points_time_fine, pred - np.sqrt(var),
-            #                  pred + np.sqrt(var), color=colors[i], alpha=0.2)
         else:
             ax1.plot(time_data_fine, sf.dc14_fine(soln), color=colors[i])
             ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, soln), color=colors[i])
