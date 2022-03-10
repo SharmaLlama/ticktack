@@ -655,21 +655,7 @@ class SingleFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-<<<<<<< HEAD
-        start_time, duration, phase, area, amplitude = jnp.array(
-            list(args)).reshape(-1)
-        height = self.super_gaussian(t, start_time, duration, area)
-        production = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
-            2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
-        return production
-
-    @partial(jit, static_argnums=(0,))
-    def flexible_sinusoid_affine_variant(self, t, *args):
-        gradient, start_time, duration, phase, area, amplitude = jnp.array(
-            list(args)).reshape(-1)
-=======
         gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
->>>>>>> fbafa6d31bc124bafabc7318bd6f1a0ef80d1c40
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + gradient * (
                 t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(
@@ -1128,23 +1114,10 @@ class MultiFitter(CarbonFitter):
         """
         tval = tval.reshape(-1)
         params = jnp.array(list(args)).reshape(-1)
-<<<<<<< HEAD
-        mean = params[0]
-        kernel = jax_terms.Matern32Term(sigma=2., rho=2.)
-        gp = celerite2.jax.GaussianProcess(
-            kernel, self.control_points_time, mean=mean)
-        alpha = gp.apply_inverse(params)
-        Ks = kernel.get_value(
-            tval[:, None] - self.control_points_time[None, :])
-        mu = jnp.dot(Ks, alpha)
-        mu = (tval > self.start) * mu + (tval <= self.start) * mean
-        return mu
-=======
         kernel = kernels.Matern32(1)
         gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
         params = jnp.array(list(args)).reshape(-1)
         return gp.condition(params, tval)[1].loc
->>>>>>> fbafa6d31bc124bafabc7318bd6f1a0ef80d1c40
 
     @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
