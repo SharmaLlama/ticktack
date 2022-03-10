@@ -8,7 +8,6 @@ from jax import jit
 from jax.experimental.ode import odeint
 from functools import partial
 from jax.config import config
-import numpy as np
 import pkg_resources
 from typing import Union
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
@@ -190,8 +189,8 @@ class CarbonBoxModel:
 
         Parameters
         ----------
-        nodes : list
-            list of nodes of Type Box to add to the carbon box model.
+        nodes : list | ndarray
+            A list of nodes of Type Box to add to the carbon box model.
 
         Raises
         ------
@@ -216,8 +215,8 @@ class CarbonBoxModel:
 
         Parameters
         ----------
-        flow_objs : list
-            list of Flow objects to add to the Carbon Box Model.
+        flow_objs : list | ndarray
+            A list of Flow objects to add to the Carbon Box Model.
 
         Raises
         ------
@@ -235,7 +234,7 @@ class CarbonBoxModel:
         Returns
         -------
         list
-            list of the edges (given in their string representations i.e. str(source) --> str(destination):flux_value).
+            A list of the edges (given in their string representations i.e. str(source) --> str(destination):flux_value).
         """
         return list(map(str, self._edges))
 
@@ -245,7 +244,7 @@ class CarbonBoxModel:
         Returns
         -------
         list
-            list of Flow Objects that have been added so far to the Class Object.
+            A list of Flow Objects that have been added so far to the Class Object.
 
         """
         return self._edges
@@ -256,7 +255,7 @@ class CarbonBoxModel:
         Returns
         -------
         list
-            list of node names in the order they were inserted.
+            A list of node names in the order they were inserted.
 
         """
         return [self._nodes[j].get_name() for j in range(self._n_nodes)]
@@ -267,7 +266,7 @@ class CarbonBoxModel:
         Returns
         -------
         list
-            list of the node objects in the order they were inserted.
+            A list of the node objects in the order they were inserted.
         """
         return [self._nodes[j] for j in range(self._n_nodes)]
 
@@ -277,9 +276,8 @@ class CarbonBoxModel:
 
         Returns
         -------
-        jax.numpy.array
+        DeviceArray
             2D jax numpy array which contains the fluxes where index (i,j) indicates the flux from node[i] to node[j].
-
         """
         return self._fluxes
 
@@ -289,7 +287,7 @@ class CarbonBoxModel:
 
         Returns
         -------
-        jax.numpy.array
+        DeviceArray
             2D jax numpy array which contains the unit-corrected fluxes where index (i,j) indicates the 'Gt/yr' flux
             from node[i] to node[j].
         """
@@ -301,7 +299,7 @@ class CarbonBoxModel:
 
         Returns
         -------
-        jax.numpy.array
+        DeviceArray
             jax numpy array containing the reservoir content of the nodes (returned in the order the nodes were added).
         """
         return self._reservoir_content
@@ -312,7 +310,7 @@ class CarbonBoxModel:
 
         Returns
         -------
-        jax.numpy.array
+        DeviceArray
             jax array containing the normalised production coefficients of the nodes (returned in the order the
             nodes were added).
         """
@@ -320,6 +318,13 @@ class CarbonBoxModel:
 
 
     def get_matrix(self):
+        """ Getter method for the ODE coefficient matrix to solve.
+
+        Returns
+        -------
+        DeviceArray
+            jax array of the ODE coefficient matrix to solve.
+        """
         return self._matrix
 
     @partial(jit, static_argnums=0)
@@ -432,8 +437,7 @@ class CarbonBoxModel:
 
     def equilibrate(self, target_C_14=None, production_rate=None):
         """ External equilibrate method which determines the appropriate result to return given a parameter. If
-        neither parameter is given then it throws a ValueError. If both are specified, then it treats production_rate
-        as None.
+        neither parameter is given then it throws a ValueError. If both are specified, then it ignores production_rate.
 
         Parameters
         ----------
@@ -445,18 +449,16 @@ class CarbonBoxModel:
 
         Returns
         -------
-        float
-            the initial production rate if the target C14 is specified.
-
-        List
-            C14 reservoir content of all the boxes if the production_rate is specified.
+        float | ndarray
+            if target C14 is specified, it returns the initial production rate. If the production rate is specified,
+            then it returns a ndarray of the C14 reservoir content.
 
         Raises
         ------
         ValueError
             If the both arguments are specified as None.
-
         """
+
         if target_C_14 is not None:
             return self._equilibrate_guttler(target_C_14)
 
@@ -465,13 +467,13 @@ class CarbonBoxModel:
 
         else:
             raise ValueError("Must give either target C-14 or production rate.")
-            
 
-    @partial(jit, static_argnums=(0, 2, 6, 7))
+
+    @partial(jit, static_argnums=(0, 2, 5, 6))
     def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
-        if the compile() method has not been executed first.
+        if the compile method has not been executed first.
 
         Parameters
         ----------
@@ -495,6 +497,10 @@ class CarbonBoxModel:
         target_C_14 : int, optional
             target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
              specified, this parameter is ignored.
+
+        solution : ndarray, optional
+            the equilibrium solution to the ODE system. If this is not specified, then it will be calculated internally.
+            Must be of the same length as the number of boxes.
 
         Returns
         -------
@@ -539,29 +545,28 @@ class CarbonBoxModel:
         states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
         return states, solution
 
-
     @partial(jit, static_argnums=(0, 2))
     def bin_data(self, data, time_oversample, time_out, growth):
         """ Bins the data given based on the oversample and the growth season according to Schulman's convention.
-         Currently only handles two 6 month-long growth seasons which are in October - March or April - September.
+        Can handle any contiguous growth season, even over the year.
 
         Parameters
         ----------
-        data : numpy.array
+        data : ndarray
             the data which to bin.
 
         time_oversample : int
             number of samples taken per year.
 
-        time_out : list
+        time_out : ndarray
             the time values at which to bin the data at.
 
-        growth : list
+        growth : ndarray
             the growth season with which to bin the data with respect to.
 
         Returns
         -------
-        list
+        DeviceArray
             The final binned data accounting for both growth season and Schulman's convention.
 
         Raises
@@ -592,7 +597,6 @@ class CarbonBoxModel:
         binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
         return binned_data
 
-
     @partial(jit, static_argnums=(0, 3))
     def _rebin1D(self, time_out, shifted_index, oversample, kernel, s):
         binned_data = jnp.zeros((len(time_out),))
@@ -613,7 +617,7 @@ def save_model(carbon_box_model, filename):
         the model to save.
 
     filename : str
-        file name and location where Carbon Box Model needs to be saved. Must have a a '.hd5' at end of filename.
+        file name and location where Carbon Box Model needs to be saved. Must have a '.hd5' at end of filename.
 
     Raises
     ------
@@ -693,7 +697,7 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
 
 def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
     """ Loads a pre-saved, commonly used model based on the research papers linked below. The model must be one of the
-    following: Miyake17, Brehm21, Guttler15, Buntgen18. Loads the model based on the the units for production rate
+    following: Miyake17, Brehm21, Guttler15, Buntgen18. Loads the model based on the units for production rate
     and flow rate specified.
 
     Parameters
