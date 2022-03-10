@@ -46,9 +46,7 @@ class CarbonFitter:
         production : int, optional
             Number of steps to run in production period. 1000 by default.
         k: int, optional
-            Determines the number of walkers of the sampler via:
-            nwalkers = k * dim(params)
-            2 by default.
+            Number of walkers per parameter. 2 by default.
 
         Returns
         -------
@@ -75,20 +73,20 @@ class CarbonFitter:
         Parameters
         ----------
         params : ndarray
-            Example parameters for NS sampler
+            Initial parameters for NS sampler
         likelihood : callable
-            Log-likelihood function for the set of parameters to be sampled
+            Log-likelihood function for params
         low_bound : ndarray, optional
             Lower bound of params
         high_bound : ndarray, optional
             Upper bound of params
         sampler_name : str, optional
-            Name of sampling method. Take value in ['multi_ellipsoid', 'slice']. 'multi_ellipsoid' by default.
+            The sampling method for NS sampler. Must be one in: 'multi_ellipsoid', 'slice'. 'multi_ellipsoid' by default.
 
         Returns
         -------
         ndarray
-            A chain of MCMC walk
+            A chain of NS samples
         """
 
         @jit
@@ -112,20 +110,21 @@ class CarbonFitter:
     def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False,
                       label_font_size=8, tick_font_size=8, mle=False):
         """
-        From a chain of MCMC walks apply convergence test and plot posterior surfaces of parameters.
+        Runs convergence tests and plots posteriors from a MCMC chain.
 
         Parameters
         ----------
         chain : ndarray
-            A chain of MCMC walks
+            A MCMC chain
         walkers : int
-            The number of walkers for the chain
+            The total number of walkers of the chain
         figsize : tuple, optional
             Output figure size
         labels : list[str], optional
             A list of parameter names
         plot_dist : bool, optional
-            If True, only plot the marginal distributions of parameters
+            If True, plot the marginal distributions of parameters. Else, plot both the marginal distribution
+             and the posterior surface
         """
         if labels:
             c = ChainConsumer().add_chain(chain, walkers=walkers, parameters=labels)
@@ -160,11 +159,11 @@ class CarbonFitter:
         Parameters
         ----------
         array : ndarray
-            n x n matrix for the heatmap
+            n x n matrix
         figsize : int, optional
-            Controls the size of the output figure. Should increase with the size of 'array'. 10 by default
+            Output figure size. 10 by default
         square_size: int, optional
-            Controls the size of squares in the heatmap. Should decrease with the size of 'array'. 100 by default
+            Size of squares on the heatmap. 100 by default
 
         Returns
         -------
@@ -232,32 +231,39 @@ class CarbonFitter:
         ax.yaxis.tick_right()
 
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None,
-                             colors=None,
-                             alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12, tick_font_size=8,
-                             max_ticks=10, legend=True):
+                             colors=None, alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12,
+                             tick_font_size=8, max_ticks=10, legend=True):
         """
-       Overplots posterior surfaces of parameters from multiple chains.
+       Overplots posterior surfaces from multiple chains.
 
         Parameters
         ----------
         chains : list
-            List of chains of MCMC walks
+            List of MCMC chains
         walker : int
-            The number of walkers for each chain in 'chains'
+            Number of walkers for each chain in 'chains'
         figsize : tuple, optional
             Output figure size
         params_labels : list[str], optional
-            A list of parameter names
+            List of parameter names
         labels : list[str], optional
-            Labels that distinguish different chains
+            List of labels for different chains
         colors : list[str], optional
-            A list of color names, used to distinguish different chains
+            List of colors
         alpha : float, optional
             Parameter for blending, between 0-1.
         linewidths : float, optional
             Line width, in points
         plot_dists : bool, optional
             If True, only plot the marginal distributions of parameters
+        label_font_size : int, optional
+            Label font size
+        tick_font_size : int, optional
+            Tick font size
+        max_ticks : int, optional
+            Maximum number of ticks allowed
+        legend : bool, optional
+            If True, adds a legend
 
         Returns
         -------
