@@ -3,7 +3,6 @@ import jax.numpy as jnp
 import pytest
 import ticktack
 from ticktack import fitting
-from jax.experimental.ode import odeint
 
 @pytest.fixture
 def SingleFitter_creation():
@@ -249,7 +248,4 @@ def test_fit_ControlPoints(SingleFitter_creation):
 #                                                      )
 #     SingleFitter_creation.plot_samples(chain, 8)
 #     assert True
-
-
-
 

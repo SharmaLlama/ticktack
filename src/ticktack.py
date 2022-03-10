@@ -3,23 +3,29 @@ import hdfdict
 import jax.numpy as jnp
 import jax.ops
 import scipy as scipy
+import scipy.integrate
 import scipy.optimize
 from jax import jit
-from jax.experimental.ode import odeint
 from functools import partial
 from jax.config import config
 import pkg_resources
 from typing import Union
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 
+USE_JAX = True
+if USE_JAX:
+    from jax.experimental.ode import odeint
+else:
+    from scipy.integrate import odeint
+
 config.update("jax_enable_x64", True)
+
 
 class Box:
     """ Box class which represents each individual box in the carbon model."""
 
     def __init__(self, name, reservoir, production_coefficient=0.0, hemisphere='None'):
         """ init method to initialise object.
-
         Parameters
         ----------
         name : str
@@ -41,7 +47,6 @@ class Box:
 
     def get_hemisphere(self):
         """ Getter method for the hemisphere of the Box Class.
-
         Returns
         -------
         str
@@ -51,7 +56,6 @@ class Box:
 
     def get_name(self):
         """ Getter method for the name of the Box Class.
-
         Returns
         -------
         str
@@ -61,7 +65,6 @@ class Box:
 
     def get_reservoir_content(self):
         """ Getter method for the reservoir content of the Box Class.
-
         Returns
         -------
         float
@@ -71,7 +74,6 @@ class Box:
 
     def get_production(self):
         """ Getter method for the production coefficient of the Box Class.
-
         Returns
         -------
          float
@@ -81,7 +83,6 @@ class Box:
 
     def __str__(self):
         """ Overrides the default string behaviour to display a user-friendly output.
-
         Returns
         -------
         str
@@ -96,7 +97,6 @@ class Flow:
 
     def __init__(self, source, destination, flux_rate):
         """ Init method to initialise object.
-
         Parameters
         ----------
         source : Box
@@ -113,29 +113,24 @@ class Flow:
 
     def get_source(self):
         """ Getter method for the source node of the Flow Class.
-
         Returns
         -------
         Box
             source of flow.
-
         """
         return self._source
 
     def get_destination(self):
         """ Getter method for the destination node of the Flow Class.
-
         Returns
         -------
         Box
             destination of the flow.
-
         """
         return self._destination
 
     def get_flux(self):
         """ Getter method for the flux rate of the Flow Class.
-
         Returns
         -------
         float
@@ -145,7 +140,6 @@ class Flow:
 
     def __str__(self):
         """ Overrides the default string behaviour to display a user-friendly output.
-
         Returns
         -------
         str
@@ -160,7 +154,6 @@ class CarbonBoxModel:
 
     def __init__(self, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
         """ Init method for creating an object of this class.
-
         Parameters
         ----------
         production_rate_units : str, optional
@@ -186,12 +179,10 @@ class CarbonBoxModel:
     def add_nodes(self, nodes):
         """ Adds the nodes to the Carbon Box Model. If the node already exists within the carbon box model node list,
         then it is not added. If the node is not a Box Class Instance, then it raises a ValueError.
-
         Parameters
         ----------
         nodes : list | ndarray
             A list of nodes of Type Box to add to the carbon box model.
-
         Raises
         ------
         ValueError
@@ -212,12 +203,10 @@ class CarbonBoxModel:
     def add_edges(self, flow_objs):
         """ Adds the flow objects specified in the list to the carbon box model. If any of the objects in the list are
             not an instance of Flow Class then it throws a ValueError.
-
         Parameters
         ----------
         flow_objs : list | ndarray
             A list of Flow objects to add to the Carbon Box Model.
-
         Raises
         ------
         ValueError
@@ -230,7 +219,6 @@ class CarbonBoxModel:
 
     def get_edges(self):
         """ Getter method for the name of edges.
-
         Returns
         -------
         list
@@ -240,29 +228,24 @@ class CarbonBoxModel:
 
     def get_edges_objects(self):
         """ Getter method for the edge objects themselves.
-
         Returns
         -------
         list
             A list of Flow Objects that have been added so far to the Class Object.
-
         """
         return self._edges
 
     def get_nodes(self):
         """ Getter method for the name of the nodes in the order they were added to the Carbon Box Model Object.
-
         Returns
         -------
         list
             A list of node names in the order they were inserted.
-
         """
         return [self._nodes[j].get_name() for j in range(self._n_nodes)]
 
     def get_nodes_objects(self):
         """ Getter method for the node objects in the order they were inserted.
-
         Returns
         -------
         list
@@ -273,7 +256,6 @@ class CarbonBoxModel:
     def get_fluxes(self):
         """ Getter method for the compiled fluxes in the units specified in the init_method. If the compile method has
             not been run, then it will return None.
-
         Returns
         -------
         DeviceArray
@@ -284,7 +266,6 @@ class CarbonBoxModel:
     def get_converted_fluxes(self):
         """ Getter method for the fluxes when converted to 'Gt/yr' (this is the unit that the rest of the methods work
             in internally). This returns None if the compile method has not been run.
-
         Returns
         -------
         DeviceArray
@@ -296,7 +277,6 @@ class CarbonBoxModel:
     def get_reservoir_contents(self):
         """ Getter method for the 12C reservoir content of the nodes (Boxes).. Returns None if the compile method has
         not been called.
-
         Returns
         -------
         DeviceArray
@@ -307,7 +287,6 @@ class CarbonBoxModel:
     def get_production_coefficients(self):
         """ Getter method for the normalised production coefficients of the nodes (Boxes). Returns None if compile method
         has not been called.
-
         Returns
         -------
         DeviceArray
@@ -319,7 +298,6 @@ class CarbonBoxModel:
 
     def get_matrix(self):
         """ Getter method for the ODE coefficient matrix to solve.
-
         Returns
         -------
         DeviceArray
@@ -356,11 +334,8 @@ class CarbonBoxModel:
         - production coefficients of the nodes.
         - the corrected fluxes (fluxes in unit 'Gt/yr')
         - the matrix of the coefficients for the ODEINT to solve.
-
-
         It also detects if the incoming and outgoing fluxes at every node is balanced and if not then throws ValueError
         along with which node is unbalanced.
-
         Raises
         ------
         ValueError
@@ -417,11 +392,9 @@ class CarbonBoxModel:
         def objective_function(production_rate):
             """ Function which calculates the difference between the current tropospheric C14 content and the target
             tropospheric C14 content.
-
             Parameters
             ----------
             production_rate : float
-
             Returns
             -------
             float
@@ -438,7 +411,6 @@ class CarbonBoxModel:
     def equilibrate(self, target_C_14=None, production_rate=None):
         """ External equilibrate method which determines the appropriate result to return given a parameter. If
         neither parameter is given then it throws a ValueError. If both are specified, then it ignores production_rate.
-
         Parameters
         ----------
         target_C_14 : float
@@ -446,13 +418,11 @@ class CarbonBoxModel:
             
         production_rate : float
             production rate with which to equilibrate to. Defaults to None.
-
         Returns
         -------
         float | ndarray
             if target C14 is specified, it returns the initial production rate. If the production rate is specified,
             then it returns a ndarray of the C14 reservoir content.
-
         Raises
         ------
         ValueError
@@ -468,46 +438,36 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-
     @partial(jit, static_argnums=(0, 2, 5, 6))
     def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile method has not been executed first.
-
         Parameters
         ----------
         time : list
             the time values at which to calculate the content of all the boxes.
-
         production : callable
             the production function which determines the contents of the boxes.
-
         y0 : list, optional
             the initial contents of all boxes. Defaults to None. Must be a length(n) list of the same size as the number
             of boxes.
-
         args : tuple, optional
             optional arguments to pass into the production function.
-
         steady_state_production : int, optional
             the steady state production rate with which to equilibrate with to find steady state solution. If y0 is
             specified, this parameter is ignored.
-
         target_C_14 : int, optional
             target C14 with which to equilibrate with to find steady state solution. If y0 or steady_state_production is
              specified, this parameter is ignored.
-
         solution : ndarray, optional
             the equilibrium solution to the ODE system. If this is not specified, then it will be calculated internally.
             Must be of the same length as the number of boxes.
-
         Returns
         -------
         Union[list, list]
             The value of each box in the carbon box at the specified time_values along with the steady state solution
             for the system.
-
         Raises
         ------
         ValueError
@@ -532,7 +492,7 @@ class CarbonBoxModel:
                 steady_state_production = self.equilibrate(target_C_14=target_C_14)
                 solution = self.equilibrate(production_rate=steady_state_production)
             else:
-                raise ValueError("Must give either target C-14 or production rate or steady state values of system.")
+                ValueError("Must give either target C-14 or production rate or steady state values of system.")
 
         if not callable(production):
             raise ValueError("incorrect object type for production")
@@ -549,26 +509,20 @@ class CarbonBoxModel:
     def bin_data(self, data, time_oversample, time_out, growth):
         """ Bins the data given based on the oversample and the growth season according to Schulman's convention.
         Can handle any contiguous growth season, even over the year.
-
         Parameters
         ----------
         data : ndarray
             the data which to bin.
-
         time_oversample : int
             number of samples taken per year.
-
         time_out : ndarray
             the time values at which to bin the data at.
-
         growth : ndarray
             the growth season with which to bin the data with respect to.
-
         Returns
         -------
         DeviceArray
             The final binned data accounting for both growth season and Schulman's convention.
-
         Raises
         ------
         ValueError
@@ -610,15 +564,12 @@ class CarbonBoxModel:
 def save_model(carbon_box_model, filename):
     """ Saves the Carbon Box Model in a hd5 format with the specified filename. If the first parameter is not of Type
     CarbonBoxModel, then it throws a ValueError.
-
     Parameters
     ----------
     carbon_box_model : CarbonBoxModel
         the model to save.
-
     filename : str
         file name and location where Carbon Box Model needs to be saved. Must have a '.hd5' at end of filename.
-
     Raises
     ------
     ValueError
@@ -642,23 +593,18 @@ def save_model(carbon_box_model, filename):
 def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
     """ Loads the saved Carbon Box Model from the relevant filename. Units for both production rate and flow rate can be
     specified as parameters. filename must be specified with the .hd5 extension.
-
     Parameters
     ----------
     filename : str
         the name and location (in one string) of the file where the Carbon Box Model is saved.
-
     production_rate_units : str, optional
         the production rate of the model to be loaded. Defaults to 'kg/yr'.
-
     flow_rate_units : str, optional
         the production rate of the model to be loaded. Defaults to 'Gt/yr'.
-
     Returns
     -------
     CarbonBoxModel
         Carbon Box Model which is generated from the file.
-
     Raises
     ------
     ValueError
@@ -699,23 +645,18 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
     """ Loads a pre-saved, commonly used model based on the research papers linked below. The model must be one of the
     following: Miyake17, Brehm21, Guttler15, Buntgen18. Loads the model based on the units for production rate
     and flow rate specified.
-
     Parameters
     ----------
     model : str
         the name of the model to load. Must be one in [Miyake17, Brehm21, Guttler15, Buntgen18].
-
     production_rate_units : str, optional
         the production rate of the model to be loaded. Defaults to 'kg/yr'.
-
     flow_rate_units : str, optional
         the production rate of the model to be loaded. Defaults to 'Gt/yr'.
-
     Returns
     -------
     CarbonBoxModel
         Carbon Box Model which is generated from the pre-saved file.
-
     Raises
     ------
     ValueError
@@ -728,4 +669,3 @@ def load_presaved_model(model, production_rate_units='kg/yr', flow_rate_units='G
         return carbonmodel
     else:
         raise ValueError('model parameter must be one of the following: Guttler15, Brehm21, Miyake17, Buntgen18')
-
