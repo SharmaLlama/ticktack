@@ -1,15 +1,10 @@
 import jax
 import h5py
-
-PRODUCTION_CONVERTER = jax.numpy.array(
-    [[14.003242 / 6.022 * 5.11 * 31536. / 1.e5, 0.0],
-        [0.0, 1.0]]
-)
+import functools
 
 
 @jax.jit
-def convert_production_rate(production_rate, units, /, 
-        conversion=PRODUCTION_CONVERTER):
+def convert_production_rate(production_rate, units):
     """
     Convert the production rate from units to "kg/yr"
 
@@ -18,18 +13,23 @@ def convert_production_rate(production_rate, units, /,
     production_rate : jax.numpy.float64
         The production rate at an instant in time
     units : jax.DeviceArray
+        Corresponds to [1, 0] if the units are "atoms/cm^2/s"
+        else [0, 1]
 
     Returns
     -------
     jax.numpy.float64 
         The production rate at the current time in "kg/yr"
     """
-    return production * jax.numpy.sum(conversion @ units)
+    return jax.lax.cond(units, 
+            lambda: production_rate * 14.003242 / 6.022 * 
+                5.11 * 31536. / 1.e5,
+            lambda: production_rate)
 
 
-@jax.jit
-def derivative(y, t, *args, /, production=None, matrix=None, 
-        steady_state=None, projection=None):
+@functools.partial(jax.jit, static_argnums=(6))
+def derivative(y, t, args, matrix=None, steady_state=None, 
+        projection=None, production=None):
     """
     The derivative of the carbon box model at time t and state y
 
@@ -58,14 +58,14 @@ def derivative(y, t, *args, /, production=None, matrix=None,
         The state at the new time t
     """
     state = jax.numpy.matmul(matrix, y)
-    production = production(t, *args) - steady_state
-    production = convert_production_rate(production)
-    return state + production * projection
+    production_rate = production(t, *args) - steady_state
+    production_rate = convert_production_rate(production_rate, True)
+    return state + production_rate * projection
 
 
-@jax.jit
-def run(derivative, time, y0,/, equilibrium=None, production=None, args=(),
-        matrix=None, steady_state=None, projection=None):
+@functools.partial(jax.jit, static_argnums=(7))
+def run(time, y0, equilibrium, args, matrix, steady_state, projection,
+        production):
     """
     Calculates the box values over the time series that is passed. 
     
@@ -86,11 +86,11 @@ def run(derivative, time, y0,/, equilibrium=None, production=None, args=(),
         The reservoir contents evaluated across the time array.
     """
     def dydt(y, t): 
-        return derivative(y, t, *args, production=production,
-                matrix=matrix, steady_state=steady_state, 
-                projection=projection)
+        return derivative(y, t, args, matrix=matrix, 
+                steady_state=steady_state, projection=projection,
+                production=production)
 
-    states = jax.experimental.ode.odeint(derivative, y0 - equlibrium,
+    states = jax.experimental.ode.odeint(dydt, y0 - equilibrium,
             time, atol=1e-15, rtol=1e-15) + equilibrium
 
     return states, equilibrium
@@ -156,7 +156,7 @@ def bin_data(start, end, dc14, time):
 
 
 @jax.jit 
-def equilibrate_brehm(production_rate, matrix, projection):
+def equilibrate_brehm(production_rate, matrix, projection, units):
     """
     Uses a production rate to determine the box concentrations 
     if that production is the steady state production.
@@ -175,7 +175,7 @@ def equilibrate_brehm(production_rate, matrix, projection):
     DeviceArray
         The steady state box values
     """
-    production_rate = convert_production_rate(production_rate)
+    production_rate = convert_production_rate(production_rate, units)
     production_rate = - production_rate * projection
     return jax.numpy.linalg.solve(matrix, production_rate)
 
@@ -199,8 +199,9 @@ def build_matrix(fluxes, contents, decay_rate):
     DeviceArray
         The transfer matrix of the system
     """
-    contents = contents.reshape(-1)
-    decay_matrix = jax.numpy.diag([decay_rate] * contents.size)
+    contents = contents.reshape(-1, 1)
+    decay_matrix = jax.numpy.diag(
+            jax.numpy.array([decay_rate] * contents.size))
     relative_fluxes = fluxes / contents
     box_retention = jax.numpy.diag(jax.numpy.sum(relative_fluxes, axis=1))
     return relative_fluxes.T - box_retention - decay_matrix
@@ -224,10 +225,14 @@ def load(file_name, /, production_rate_units="atoms/cm^2/s",
     model = h5py.File(file_name, "r")
     
     box_model = CarbonBoxModel(production_rate_units, flow_rate_units)
-    box_model._production_coefficients = model["production coefficients"]
-    box_model._reservoir_content = model["reservoir content"]
-    box_model._matrix = build_matrix(model["fluxes"], 
-            model["reservoir contents"], box_model.DECAY_CONSTANT) 
+    box_model._production_coefficients = jax.numpy.array(
+            model["production coefficients"])
+    box_model._reservoir_content = jax.numpy.array(
+            model["reservoir content"])
+    box_model._matrix = build_matrix(
+            jax.numpy.array(model["fluxes"]), 
+            jax.numpy.array(model["reservoir content"]), 
+            box_model.DECAY_RATE) 
     return box_model
 
 
@@ -274,11 +279,18 @@ class CarbonBoxModel:
         production_rate : jax.numpy.float64
             The seady state production
         """
+        if self._production_rate_units == "atoms/cm^2/s":
+            conversion_array = True
+        else:
+            conversion_array = False
+        
         self._steady_state_production = production_rate
         self._equilibrium = equilibrate_brehm(production_rate, 
-                self._matrix, self._production_coefficients)
+                self._matrix, self._production_coefficients, 
+                conversion_array)
 
 
+    @functools.partial(jax.jit, static_argnums=(0, 1))
     def run(self, production, time, y0, args=()):
         """
         Runs the model saving it at the values in time.
@@ -296,10 +308,11 @@ class CarbonBoxModel:
         jax.DeviceArray
             The contents of the boxes evaluated at time
         """
-        return run(derivative, time, y0 , equilibrium=self._equilibrium, 
-                production=production, args=(), matrix=self._matrix, 
+        return run(time, y0 , equilibrium=self._equilibrium, 
+                args=args, matrix=self._matrix, 
                 steady_state=self._steady_state_production, 
-                projection=self._production_coefficients)
+                projection=self._production_coefficients, 
+                production=production)
         
         
 
