@@ -96,7 +96,67 @@ def run(derivative, time, y0,/, equilibrium=None, production=None, args=(),
 
     
 @jax.jit
-def bin_data():
+def bin_data(start, end, dc14, time):
+    """
+    Takes the average of each year between start and end. This becomes
+    the value for the year.
+
+    Parameters
+    ----------
+    start : jax.numpy.float64
+        A decimal representation of the point in the year to strart 
+        collecting the simulated dc14
+    end : jax.numpy.float64
+        A decimal representation of the end point in the year to 
+        stop collection values
+    data : jax.DeviceArray(2 by n)
+        A two dimensional array containing time and dc14 simulation
+        data. The array is oriented in row major format for like 
+        values
+
+    Returns:
+    DeviceArray
+        The average dc14 in each year.
+    """
+    @jax.vmap
+    def in_year(year, /, time=time):
+        return (year <= time) & (time < (year + 1))
+
+    decimal_time = time - jax.numpy.floor(time)
+    use_values = (start < decimal_time) & (decimal_time < end)
+    years = jax.numpy.arange(time.max().floor(), time.min().floor())
+    year_mask = in_year(years)
+    year_value_mask = year_mask * years
+    
+    # The rows of the matrix that is constructed above represent 
+    # a mask for each year 
+    # 
+    # 1, 1, 1, 0, 0, 0  First year 
+    # 0, 0, 0, 1, 1, 0  Second year
+    # 0, 0, 0, 0, 0, 1  Third year
+    # 
+    # The matrix multiplication the produces a vector with the same
+    # dimesnions as the data that contains the sum of the values 
+    # isolated by each row.
+    # 
+    # 1, 1, 1, 0, 0, 0 * -14.5 = -38.2
+    # 0, 0, 0, 1, 1, 0   -12.5   -15.6
+    # 0, 0, 0, 0, 0, 1   -11.2   -6.6
+    #                    -10.2
+    #                    -5.4
+    #                    -1.2
+    # 
+    # Taking the sum along the year we can then compute the average 
+    # By dividing across elementwise.
+
+    sum_in_year = year_value_maks @ dc14
+    points_in_year = jax.numpy.sum(year_value_mask, axis=0)
+    return sum_in_year / points_in_year
+
+
+
+
+
 
 class CarbonBoxModel:
     """
