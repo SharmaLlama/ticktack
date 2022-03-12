@@ -1,4 +1,5 @@
 import jax
+import h5py
 
 PRODUCTION_CONVERTER = jax.numpy.array(
     [[14.003242 / 6.022 * 5.11 * 31536. / 1.e5, 0.0],
@@ -154,8 +155,80 @@ def bin_data(start, end, dc14, time):
     return sum_in_year / points_in_year
 
 
+@jax.jit 
+def equilibrate_brehm(production_rate, matrix, projection):
+    """
+    Uses a production rate to determine the box concentrations 
+    if that production is the steady state production.
+
+    Parameters
+    ----------
+    production_rate : jax.numpy.float64
+        A production rate in any acceptible units.
+    matrix : jax.DeviceArray
+        The transfer matrix of the system
+    projection : jax.DeviceArray
+        The projection of the production into the atmosphere
+
+    Returns
+    -------
+    DeviceArray
+        The steady state box values
+    """
+    production_rate = convert_production_rate(production_rate)
+    production_rate = - production_rate * projection
+    return jax.numpy.linalg.solve(matrix, production_rate)
 
 
+@jax.jit
+def build_matrix(fluxes, contents, decay_rate):
+    """
+    Constructs a transfer matrix for a model. 
+
+    Parameters
+    ----------
+    fluxes : jax.DeviceArray
+        The absolute fluxes of the model. Should be a square matrix
+    contents : jax.DeviceArray
+        The reservoir contents. Should be a vector
+    decay_rate : jax.numpy.float64
+        The rate of carbon decay
+
+    Returns
+    -------
+    DeviceArray
+        The transfer matrix of the system
+    """
+    contents = contents.reshape(-1)
+    decay_matrix = jax.numpy.diag([decay_rate] * contents.size)
+    relative_fluxes = fluxes / contents
+    box_retention = jax.numpy.diag(jax.numpy.sum(relative_fluxes, axis=1))
+    return relative_fluxes.T - box_retention - decay_matrix
+
+
+def load(file_name, /, production_rate_units="atoms/cm^2/s", 
+        flow_rate_units="Gt/yr"):
+    """
+    Takes the model saved in file_name which is assumed to have 
+    the .hd5 extension.
+    
+    Parameters
+    ----------
+    file_name : str
+        The address of the saved model file with a .hd5 extension
+    production_rate_units : str
+        The units of the production rate.
+    flow_rate_units : str
+        The units of the flows 
+    """
+    model = h5py.File(file_name, "r")
+    
+    box_model = CarbonBoxModel(production_rate_units, flow_rate_units)
+    box_model._production_coefficients = model["production coefficients"]
+    box_model._reservoir_content = model["reservoir content"]
+    box_model._matrix = build_matrix(model["fluxes"], 
+            model["reservoir contents"], box_model.DECAY_CONSTANT) 
+    return box_model
 
 
 class CarbonBoxModel:
@@ -185,10 +258,48 @@ class CarbonBoxModel:
         self._production_rate_units = production_rate_units
         self._flow_rate_units = flow_rate_units
         self._matrix = None # Square matrix of model dimensions 
-        self._n_nodes = None # Dimensions of the model 
         self._production_coefficients = None # Vector of dimensions
-        self._fluxes = None # Weighted adjacency matrix 
         self._reservoir_content = None # Vector of dimensions
         self._equilibrium = None # Vector of dimensions
+        self._steady_state_production = None
     
+
+    def equilibrate(self, production_rate=1.88):
+        """
+        Equilibrate the model to some production rate assumed to be the 
+        steady state production.
+
+        Parameters
+        ----------
+        production_rate : jax.numpy.float64
+            The seady state production
+        """
+        self._steady_state_production = production_rate
+        self._equilibrium = equilibrate_brehm(production_rate, 
+                self._matrix, self._production_coefficients)
+
+
+    def run(self, production, time, y0, args=()):
+        """
+        Runs the model saving it at the values in time.
+
+        Parameters
+        ----------
+        production : Function
+            The production model evaluated at time with args
+        time : jax.DeviceArray
+            The time values at which to save the box values
+        args : Tuple
+            The arguments to the production model
+
+        Return
+        jax.DeviceArray
+            The contents of the boxes evaluated at time
+        """
+        return run(derivative, time, y0 , equilibrium=self._equilibrium, 
+                production=production, args=(), matrix=self._matrix, 
+                steady_state=self._steady_state_production, 
+                projection=self._production_coefficients)
+        
+        
 
