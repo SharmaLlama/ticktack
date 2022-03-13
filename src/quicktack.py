@@ -125,7 +125,8 @@ def bin_data(start, end, dc14, time):
 
     decimal_time = time - jax.numpy.floor(time)
     use_values = (start < decimal_time) & (decimal_time < end)
-    years = jax.numpy.arange(time.max().floor(), time.min().floor())
+    years = jax.numpy.arange(jax.numpy.floor(time.max()), 
+        jax.numpy.floor(time.min()))
     year_mask = in_year(years)
     year_value_mask = year_mask * years
     
