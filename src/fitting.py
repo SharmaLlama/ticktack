@@ -502,6 +502,9 @@ class SingleFitter(CarbonFitter):
                                                          int((self.end - self.start) * self.oversample))
             self.production = self.interp_gp
             self.production_model = 'control points'
+        elif model == "inverse_solver":
+            self.production = self.interp_IS
+            self.production_model = 'inverse solver'
         else:
             raise ValueError(
                 "model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, "
@@ -528,6 +531,11 @@ class SingleFitter(CarbonFitter):
         gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
         params = jnp.array(list(args)).reshape(-1)
         return gp.condition(params, tval)[1].loc
+
+    def interp_IS(self, tval, *args):
+        tval = tval.reshape(-1)
+        y = jnp.array(list(args)).reshape(-1)
+        return jnp.interp(tval, self.time_data, y)
 
     @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
@@ -822,7 +830,7 @@ class SingleFitter(CarbonFitter):
 
     def fit_ControlPoints(self, low_bound=0):
         """
-        Fits the control-points by minimizing the negative log joint likelihood.
+        Fits control-points by minimizing the negative log joint likelihood.
         Parameters
         ----------
         low_bound : int, optional
@@ -1302,6 +1310,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
                  params=None, low_bounds=None, up_bounds=None):
     """
     Runs a Monte Carlo sampler on some data files.
+    
     Parameters
     ----------
     year : float
@@ -1322,6 +1331,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         Lower bound of params. Required when custom production rate model is used.
     up_bounds : ndarray, optional
         Upper bound of params. Required when custom production rate model is used.
+        
     Returns
     -------
     ndarray
@@ -1395,6 +1405,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
               up_bounds=None, mf=None, oversample=1008, burnin_time=2000):
     """
     Fits a Miyake event.
+
     Parameters
     ----------
     year : float
@@ -1425,6 +1436,7 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         Lower bound of params. Required when custom production rate model is used.
     up_bounds : ndarray, optional
         Upper bound of params. Required when custom production rate model is used.
+        
     Returns
     -------
     mf : MultiFitter
