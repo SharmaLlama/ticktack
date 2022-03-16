@@ -1,12 +1,12 @@
-# Documentation for `fitting`
+# Documentation for `ticktack`
 
-::: fitting
+::: ticktack
     handler: python
     selection:
       members:
-        - get_data
-        - sample_event
-        - fit_event
+        - save_model
+        - load_model
+        - load_presaved_model
     rendering:
       show_root_heading: false
       show_source: false

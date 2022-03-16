@@ -12,13 +12,17 @@ nav:
     - Home: index.md
     - 'Fitting a Carbon Box Model':
         - fitting-with-cps: notebooks/01_Injection_Recovery_ControlPoints.ipynb
-        - fitting-with-mcmc: notebooks/02_Fitting.ipynb
+        - fitting-with-mcmc-sf: notebooks/02_Fitting.ipynb
+        - fitting-with-mcmc-mf: notebooks/03_MultiFitter.ipynb
+        - fitting-with-is: notebooks/04_InverseSolver.ipynb
     - Box API Docs: box_api.md
     - Flow API Docs: flow_api.md
     - CarbonBox API Docs: cbm_api.md
     - CarbonFitter API Docs: cf_api.md
     - SingleFitter API Docs: sf_api.md
     - MultiFitter API Docs: mf_api.md
+    - ticktack API Docs: ticktack_api.md
+    - fitting API Docs: fitting_api.md
 
 theme:
   name: "material"

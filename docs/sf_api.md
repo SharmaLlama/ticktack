@@ -10,6 +10,7 @@
         - get_growth_vector
         - compile_production_model
         - interp_gp
+        - interp_IS
         - super_gaussian
         - simple_sinusoid
         - flexible_sinusoid

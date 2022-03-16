@@ -9,6 +9,8 @@
         - add_SingleFitter
         - compile
         - multi_interp_gp
+        - super_gaussian
+        - flexible_sinusoid_affine_variant
         - run_burnin
         - run_event
         - dc14_fine

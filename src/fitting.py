@@ -533,6 +533,19 @@ class SingleFitter(CarbonFitter):
         return gp.condition(params, tval)[1].loc
 
     def interp_IS(self, tval, *args):
+        """
+        A linear interpolator for inverse solver.
+        Parameters
+        ----------
+        tval : ndarray
+            Output time sampling
+        args : ndarray | float
+            Set of production rates on the same time sampling as self.time_data
+        Returns
+        -------
+        ndarray
+            Interpolation on tval
+        """
         tval = tval.reshape(-1)
         y = jnp.array(list(args)).reshape(-1)
         return jnp.interp(tval, self.time_data, y)
