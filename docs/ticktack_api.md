@@ -1,6 +1,6 @@
 # Documentation for `ticktack`
 
-::: ticktack
+::: ticktack.ticktack
     handler: python
     selection:
       members:

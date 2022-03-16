@@ -474,7 +474,7 @@ class SingleFitter(CarbonFitter):
         ----------
         model : str | callable, optional
             Built-in or custom model. Supported built-in model are: "simple_sinusoid", "flexible_sinusoid",
-            "flexible_sinusoid_affine_variant", "control_points"
+            "flexible_sinusoid_affine_variant", "control_points", "inverse_solver"
         """
         self.production = None
         if callable(model):
@@ -578,9 +578,9 @@ class SingleFitter(CarbonFitter):
     def simple_sinusoid(self, t, *args):
         """
         A simple sinusoid production rate model. Tunable parameters are,
-        Start time: start time
-        Duration: duration
-        Phase: phase of the solar cycle
+        Start time: start time\n
+        Duration: duration\n
+        Phase: phase of the solar cycle\n
         Area: total radiocarbon delivered
         Parameters
         ----------
@@ -603,10 +603,10 @@ class SingleFitter(CarbonFitter):
     def flexible_sinusoid(self, t, *args):
         """
         A flexible sinusoid production rate model. Tunable parameters are,
-        Start time: start time
-        Duration: duration
-        Phase: phase of the solar cycle
-        Area: total radiocarbon delivered
+        Start time: start time\n
+        Duration: duration\n
+        Phase: phase of the solar cycle\n
+        Area: total radiocarbon delivered\n
         Amplitude: solar amplitude
         Parameters
         ----------
@@ -629,11 +629,11 @@ class SingleFitter(CarbonFitter):
     def flexible_sinusoid_affine_variant(self, t, *args):
         """
         A flexible sinusoid production rate model with a linear gradient. Tunable parameters are,
-        Gradient: linear gradient
-        Start time: start time
-        Duration: duration
-        Phase: phase of the solar cycle
-        Area: total radiocarbon delivered
+        Gradient: linear gradient\n
+        Start time: start time\n
+        Duration: duration\n
+        Phase: phase of the solar cycle\n
+        Area: total radiocarbon delivered\n
         Amplitude: solar amplitude
         Parameters
         ----------
@@ -1100,11 +1100,11 @@ class MultiFitter(CarbonFitter):
     def flexible_sinusoid_affine_variant(self, t, *args):
         """
         A flexible sinusoid production rate model with a linear gradient. Tunable parameters are,
-        Gradient: linear gradient
-        Start time: start time
-        Duration: duration
-        Phase: phase of the solar cycle
-        Area: total radiocarbon delivered
+        Gradient: linear gradient\n
+        Start time: start time\n
+        Duration: duration\n
+        Phase: phase of the solar cycle\n
+        Area: total radiocarbon delivered\n
         Amplitude: solar amplitude
         Parameters
         ----------
