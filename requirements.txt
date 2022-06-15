@@ -5,7 +5,7 @@ emcee
 h5py==3.3.0
 hdfdict
 jax==0.2.25
-jaxlib
+jaxlib==0.1.73
 matplotlib
 numpy
 pandas
