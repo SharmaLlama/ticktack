@@ -16,7 +16,7 @@ from chainconsumer import ChainConsumer
 import scipy
 import seaborn as sns
 from jax import jit, grad, jacrev, vmap
-from jaxns.nested_sampling import NestedSampler
+from jaxns.nested_sampler import NestedSampler
 from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
 from matplotlib.lines import Line2D

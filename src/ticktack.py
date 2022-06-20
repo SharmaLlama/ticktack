@@ -1,22 +1,17 @@
 import h5py
 import hdfdict
 import jax.numpy as jnp
-import jax.ops
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
 from jax import jit
+import jax
 from functools import partial
 from jax.config import config
 import pkg_resources
 from typing import Union
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
-
-USE_JAX = True
-if USE_JAX:
-    from jax.experimental.ode import odeint
-else:
-    from scipy.integrate import odeint
+from jax.experimental.ode import odeint
 
 config.update("jax_enable_x64", True)
 
@@ -348,9 +343,8 @@ class CarbonBoxModel:
                 [[self._nodes[j].get_reservoir_content() for j in range(self._n_nodes)]])
             self._fluxes = jnp.zeros((self._n_nodes, self._n_nodes))
             for flow in self._edges:
-                self._fluxes = self._fluxes.at[jax.ops.index[self._reverse_nodes[flow.get_source()],
-                                                             self._reverse_nodes[flow.get_destination()]]].set(
-                    flow.get_flux())
+                self._fluxes = self._fluxes.at[self._reverse_nodes[flow.get_source()], 
+                    self._reverse_nodes[flow.get_destination()]].set(flow.get_flux())
 
             self._decay_matrix = jnp.diag(jnp.array([self._decay_constant] * self._n_nodes))
             self._production_coefficients = jnp.array([self._nodes[j].get_production() for j in range(self._n_nodes)])

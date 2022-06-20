@@ -4,8 +4,8 @@ chainconsumer
 emcee
 h5py==3.3.0
 hdfdict
-jax==0.2.25
-jaxlib==0.1.73
+jax==0.3.13
+jaxlib==0.3.7
 matplotlib
 numpy
 pandas
