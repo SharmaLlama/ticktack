@@ -507,8 +507,8 @@ class SingleFitter(CarbonFitter):
             self.production_model = 'inverse solver'
         else:
             raise ValueError(
-                "model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, "
-                "flexible_sinusoid_affine_variant, control_points")
+                "model is not a callable, or does not take value from: simple_sinusoid, simple_sinusoid_sharp, simple_sinusoid_prolonged, flexible_sinusoid, "
+                "flexible_sinusoid_affine_variant, affine, inverse_solver, control_points")
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
