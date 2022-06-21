@@ -4,7 +4,6 @@ import jax.numpy as jnp
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
-from jax import jit
 import jax
 from functools import partial
 from jax.config import config
@@ -300,7 +299,6 @@ class CarbonBoxModel:
         """
         return self._matrix
 
-    @partial(jit, static_argnums=0)
     def _convert_production_rate(self, production_rate):
         if self._production_rate_units == 'atoms/cm^2/s':
             new_rate = production_rate * 14.003242 / 6.022 * 5.11 * 31536. / 1.e5
@@ -382,7 +380,6 @@ class CarbonBoxModel:
         if troposphere_index is None:
             raise ValueError('there is currently no Troposphere node to equilibrate!')
 
-        @jit
         def objective_function(production_rate):
             """ Function which calculates the difference between the current tropospheric C14 content and the target
             tropospheric C14 content.
@@ -432,7 +429,6 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-    @partial(jit, static_argnums=(0, 2, 5, 6))
     def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
@@ -469,7 +465,6 @@ class CarbonBoxModel:
             If the production is not a callable function.
         """
 
-        @jit
         def derivative(y, t):
             ans = jnp.matmul(self._matrix, y)
             production_rate_constant = production(t, *args) - steady_state_production
@@ -499,7 +494,6 @@ class CarbonBoxModel:
         states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
         return states, solution
 
-    @partial(jit, static_argnums=(0, 2))
     def bin_data(self, data, time_oversample, time_out, growth):
         """ Bins the data given based on the oversample and the growth season according to Schulman's convention.
         Can handle any contiguous growth season, even over the year.
@@ -528,7 +522,6 @@ class CarbonBoxModel:
         masked = jnp.linspace(0, 1, time_oversample)
         kernel = (masked < jnp.count_nonzero(growth)/12)
         
-        @partial(jit)
         def _shifted_index_finder(seasons):
             first1 = jnp.where(seasons == 1, size=1)[0][0]
             first0 = jnp.where(seasons == 0, size=1)[0][0]
@@ -545,7 +538,6 @@ class CarbonBoxModel:
         binned_data = self._rebin1D(time_out, shifted_index, time_oversample, kernel, data)
         return binned_data
 
-    @partial(jit, static_argnums=(0, 3))
     def _rebin1D(self, time_out, shifted_index, oversample, kernel, s):
         binned_data = jnp.zeros((len(time_out),))
         fun = lambda i, val: dynamic_update_slice(val, jnp.array([jnp.sum(jnp.multiply(dynamic_slice(
