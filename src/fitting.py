@@ -85,7 +85,6 @@ class CarbonFitter:
             A chain of NS samples
         """
 
-        @jit
         def likelihood_function(params, **kwargs):
             return likelihood(params)
 
@@ -99,7 +98,7 @@ class CarbonFitter:
         prior_chain = PriorChain().push(UniformPrior('params', low=low_bound, high=high_bound))
         ns = NestedSampler(likelihood_function, prior_chain, num_live_points=100 * prior_chain.U_ndims,
                            sampler_name=sampler_name)
-        results = jit(ns)(key=random.PRNGKey(0))
+        results = ns(key=random.PRNGKey(0))
         # summary(results)
         return results
 
@@ -436,9 +435,9 @@ class SingleFitter(CarbonFitter):
 
             self.interp_type = 'spline'
 
-        interp = jit(base_interp)
+        interp = base_interp
 
-        self.dash = jit(grad(interp, argnums=(0)))
+        self.dash = grad(interp, argnums=(0))
 
     def get_growth_vector(self, growth_season):
         """
@@ -510,7 +509,6 @@ class SingleFitter(CarbonFitter):
                 "model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, "
                 "flexible_sinusoid_affine_variant, control_points")
 
-    @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
         """
         A Gaussian Process regression interpolator.
@@ -550,7 +548,6 @@ class SingleFitter(CarbonFitter):
         y = jnp.array(list(args)).reshape(-1)
         return jnp.interp(tval, self.time_data, y)
 
-    @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
         """
         Computes the density of a super gaussian of exponent 16. Used to emulates the
@@ -574,7 +571,6 @@ class SingleFitter(CarbonFitter):
         height = area / duration
         return height * jnp.exp(- ((t - middle) / (1. / 1.93516 * duration)) ** 16.)
 
-    @partial(jit, static_argnums=(0,))
     def simple_sinusoid(self, t, *args):
         """
         A simple sinusoid production rate model. Tunable parameters are,
@@ -599,7 +595,6 @@ class SingleFitter(CarbonFitter):
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
         return production
 
-    @partial(jit, static_argnums=(0,))
     def flexible_sinusoid(self, t, *args):
         """
         A flexible sinusoid production rate model. Tunable parameters are,
@@ -625,7 +620,6 @@ class SingleFitter(CarbonFitter):
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
         return production
 
-    @partial(jit, static_argnums=(0,))
     def flexible_sinusoid_affine_variant(self, t, *args):
         """
         A flexible sinusoid production rate model with a linear gradient. Tunable parameters are,
@@ -654,14 +648,6 @@ class SingleFitter(CarbonFitter):
             + phase * 2 * np.pi / 11) + height
         return production
 
-    # @partial(jit, static_argnums=(0,))
-    # def affine(self, t, *args):
-    #     gradient, start_time, duration, area = jnp.array(list(args)).reshape(-1)
-    #     height = self.super_gaussian(t, start_time, duration, area)
-    #     production = self.steady_state_production + gradient * (t - self.start) * (t >= self.start) + height
-    #     return production
-
-    @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a CBM for the burn-in period.
@@ -680,7 +666,6 @@ class SingleFitter(CarbonFitter):
                                      steady_state_production=self.steady_state_production)
         return box_values
 
-    @partial(jit, static_argnums=(0))
     def run_event(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a CBM for the production period.
@@ -701,7 +686,6 @@ class SingleFitter(CarbonFitter):
                                      steady_state_production=self.steady_state_production)
         return box_values
 
-    @partial(jit, static_argnums=(0,))
     def dc14(self, params=()):
         """
         Predict d14c on the time sampling from the data file.
@@ -720,7 +704,6 @@ class SingleFitter(CarbonFitter):
         d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
 
-    @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
         """
         Predict d14c on a sub-annual time sampling.
@@ -738,7 +721,6 @@ class SingleFitter(CarbonFitter):
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
 
-    # @partial(jit, static_argnums=(0,))
     def log_likelihood(self, params=()):
         """
         Computes the gaussian log-likelihood of production rate model parameters.
@@ -754,7 +736,6 @@ class SingleFitter(CarbonFitter):
         d14c = self.dc14(params)
         return -0.5 * jnp.sum(((self.d14c_data - d14c) / self.d14c_data_error) ** 2)
 
-    @partial(jit, static_argnums=(0,))
     def log_joint_likelihood(self, params, low_bounds, up_bounds):
         """
         Computes the log joint likelihood of production rate model parameters.
@@ -776,7 +757,6 @@ class SingleFitter(CarbonFitter):
         pos = self.log_likelihood(params)
         return lp + pos
 
-    @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
         """
         Computes the Gaussian Process log-likelihood of a set of control-points. The Gaussian Process
@@ -794,7 +774,6 @@ class SingleFitter(CarbonFitter):
         gp = GaussianProcess(kernel, self.control_points_time, mean=params[0])
         return gp.log_probability(params)
 
-    @partial(jit, static_argnums=(0,))
     def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
         """
         Computes the log joint likelihood of a set of control-points.
@@ -810,7 +789,6 @@ class SingleFitter(CarbonFitter):
         lp = jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         return self.log_likelihood(params=params) + self.log_likelihood_gp(params) + lp
 
-    @partial(jit, static_argnums=(0,))
     def neg_log_joint_likelihood_gp(self, params):
         """
         Computes the negative log joint likelihood of a set of control-points. Used as the objective function for
@@ -826,7 +804,6 @@ class SingleFitter(CarbonFitter):
         """
         return -1 * self.log_likelihood(params=params) + -1 * self.log_likelihood_gp(params)
 
-    @partial(jit, static_argnums=(0,))
     def grad_neg_log_joint_likelihood_gp(self, params=()):
         """
         Computes the negative gradient of the log joint likelihood of a set of control-points.
@@ -859,7 +836,6 @@ class SingleFitter(CarbonFitter):
                                        options={'maxiter': 100000, 'maxfun': 100000, })
         return soln
 
-    @partial(jit, static_argnums=(0))
     def _reverse_convert_production_rate(self, production_rate):
         new_rate = None
         if self.cbm._production_rate_units == 'atoms/cm^2/s':
@@ -868,7 +844,6 @@ class SingleFitter(CarbonFitter):
             new_rate = production_rate
         return new_rate
 
-    @partial(jit, static_argnums=(0, 5, 6))
     def reconstruct_production_rate(self, d14c, t_in, t_out, steady_state_solution, steady_state_production=None,
                                     target_C_14=None):
         """
@@ -898,7 +873,6 @@ class SingleFitter(CarbonFitter):
 
         dash = lambda x: self.dash(x, t_in, data)
 
-        # @jit
         def derivative(y, time):
             ans = jnp.matmul(self.cbm.get_matrix(), y)
             prod_coeff = self.cbm.get_production_coefficients()
@@ -1050,7 +1024,6 @@ class MultiFitter(CarbonFitter):
             self.production = self.multi_interp_gp
         self.steady_state_box = self.steady_state_y0[self.box_idx]
 
-    @partial(jit, static_argnums=(0,))
     def multi_interp_gp(self, tval, *args):
         """
         A Gaussian Process regression interpolator for MultiFitter.
@@ -1072,7 +1045,6 @@ class MultiFitter(CarbonFitter):
         params = jnp.array(list(args)).reshape(-1)
         return gp.condition(params, tval)[1].loc
 
-    @partial(jit, static_argnums=(0,))
     def super_gaussian(self, t, start_time, duration, area):
         """
         Computes the density of a super gaussian of exponent 16. Used to emulates the
@@ -1096,7 +1068,6 @@ class MultiFitter(CarbonFitter):
         height = area / duration
         return height * jnp.exp(- ((t - middle) / (1. / 1.93516 * duration)) ** 16.)
 
-    @partial(jit, static_argnums=(0,))
     def flexible_sinusoid_affine_variant(self, t, *args):
         """
         A flexible sinusoid production rate model with a linear gradient. Tunable parameters are,
@@ -1125,7 +1096,6 @@ class MultiFitter(CarbonFitter):
             + phase * 2 * np.pi / 11) + height
         return production
 
-    @partial(jit, static_argnums=(0))
     def run_burnin(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a CBM for the burn-in period.
@@ -1144,7 +1114,6 @@ class MultiFitter(CarbonFitter):
                                      steady_state_production=self.steady_state_production)
         return box_values
 
-    @partial(jit, static_argnums=(0))
     def run_event(self, y0=None, params=()):
         """
         Calculates the C14 content of all the boxes within a CBM for the production period.
@@ -1165,7 +1134,6 @@ class MultiFitter(CarbonFitter):
                                      steady_state_production=self.steady_state_production)
         return box_values
 
-    @partial(jit, static_argnums=(0,))
     def dc14_fine(self, params=()):
         """
                Predict d14c on a sub-annual time sampling.
@@ -1183,7 +1151,6 @@ class MultiFitter(CarbonFitter):
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c
 
-    # @partial(jit, static_argnums=(0,))
     def multi_likelihood(self, params):
         """
         Computes the ensemble log-likelihood of the parameters of self.production across multiple d14c datasets
@@ -1206,7 +1173,6 @@ class MultiFitter(CarbonFitter):
             like += jnp.sum(((sf.d14c_data - d14c_sf) / sf.d14c_data_error) ** 2) * -0.5
         return like
 
-    @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
         """
         Computes the Gaussian Process log-likelihood of a set of control-points. The Gaussian Process
