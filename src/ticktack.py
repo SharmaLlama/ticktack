@@ -1,5 +1,3 @@
-import h5py
-import hdfdict
 import jax.numpy as jnp
 import scipy as scipy
 import scipy.integrate
