@@ -2,6 +2,7 @@ import jax.numpy as jnp
 import scipy as scipy
 import scipy.integrate
 import scipy.optimize
+import diffrax
 from jax import jit
 import jax
 from functools import partial
@@ -9,7 +10,6 @@ from jax.config import config
 import pkg_resources
 from typing import Union
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
-from jax.experimental.ode import odeint
 
 config.update("jax_enable_x64", True)
 
@@ -467,7 +467,7 @@ class CarbonBoxModel:
             If the production is not a callable function.
         """
 
-        @jit
+        # @jit
         def derivative(y, t):
             ans = jnp.matmul(self._matrix, y)
             production_rate_constant = production(t, *args) - steady_state_production
@@ -494,8 +494,18 @@ class CarbonBoxModel:
         else:
             y_initial = jnp.array(solution)
 
-        states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
-        return states, solution
+        term = diffrax.ODETerm(derivative)
+        solver = diffrax.Dopri5()
+        saveat = diffrax.SaveAt(ts=time_values)
+        start = time_values[0]
+        end = time_values[-1]
+        step = 1 / 48 # 4 per month 
+        
+        states = diffrax.diffeqsolve(term, solver, t0 = start, t1 = end,
+            dt0 = step, args = args)
+
+        # states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
+        return states.ys, solution
 
     @partial(jit, static_argnums=(0, 2))
     def bin_data(self, data, time_oversample, time_out, growth):
