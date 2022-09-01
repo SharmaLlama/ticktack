@@ -4,14 +4,13 @@ chainconsumer
 emcee
 h5py==3.3.0
 hdfdict
-jax>=0.3.13
-jaxlib>=0.3.7
+jax==0.3.17
+jaxlib==0.3.15
 matplotlib
 numpy
 pandas
 scipy
 seaborn
 tqdm
-jaxns
 jax-cosmo
 tinygp

@@ -1,6 +1,5 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import jax
 from jax.experimental.ode import odeint
 from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
 from tinygp import kernels, GaussianProcess
@@ -16,8 +15,8 @@ from chainconsumer import ChainConsumer
 import scipy
 import seaborn as sns
 from jax import jit, grad, jacrev, vmap
-from jaxns.nested_sampler import NestedSampler
-from jaxns.prior_transforms import PriorChain, UniformPrior
+# from jaxns.nested_sampler import NestedSampler
+# from jaxns.prior_transforms import PriorChain, UniformPrior
 import os
 from matplotlib.lines import Line2D
 import matplotlib as mpl
@@ -64,44 +63,44 @@ class CarbonFitter:
         sampler.run_mcmc(p0, production, progress=True);
         return sampler.flatchain
 
-    def NestedSampler(self, params, likelihood, low_bound=None, high_bound=None, sampler_name='multi_ellipsoid'):
-        """
-        Runs Nested Sampling sampler on the parameter space of some model, subject to some likelihood function.
-        Parameters
-        ----------
-        params : ndarray
-            Initial parameters for NS sampler
-        likelihood : callable
-            Log-likelihood function for params
-        low_bound : ndarray, optional
-            Lower bound of params
-        high_bound : ndarray, optional
-            Upper bound of params
-        sampler_name : str, optional
-            The sampling method for NS sampler. Must be one in: 'multi_ellipsoid', 'slice'. 'multi_ellipsoid' by default.
-        Returns
-        -------
-        ndarray
-            A chain of NS samples
-        """
-
-        @jit
-        def likelihood_function(params, **kwargs):
-            return likelihood(params)
-
-        ndim = params.size
-        if low_bound is not None and high_bound is not None:
-            low_bound = jnp.array(low_bound)
-            high_bound = jnp.array(high_bound)
-        else:
-            low_bound = jnp.array(ndim * None)
-            high_bound = jnp.array(ndim * None)
-        prior_chain = PriorChain().push(UniformPrior('params', low=low_bound, high=high_bound))
-        ns = NestedSampler(likelihood_function, prior_chain, num_live_points=100 * prior_chain.U_ndims,
-                           sampler_name=sampler_name)
-        results = jit(ns)(key=random.PRNGKey(0))
-        # summary(results)
-        return results
+    # def NestedSampler(self, params, likelihood, low_bound=None, high_bound=None, sampler_name='multi_ellipsoid'):
+    #     """
+    #     Runs Nested Sampling sampler on the parameter space of some model, subject to some likelihood function.
+    #     Parameters
+    #     ----------
+    #     params : ndarray
+    #         Initial parameters for NS sampler
+    #     likelihood : callable
+    #         Log-likelihood function for params
+    #     low_bound : ndarray, optional
+    #         Lower bound of params
+    #     high_bound : ndarray, optional
+    #         Upper bound of params
+    #     sampler_name : str, optional
+    #         The sampling method for NS sampler. Must be one in: 'multi_ellipsoid', 'slice'. 'multi_ellipsoid' by default.
+    #     Returns
+    #     -------
+    #     ndarray
+    #         A chain of NS samples
+    #     """
+    #
+    #     @jit
+    #     def likelihood_function(params, **kwargs):
+    #         return likelihood(params)
+    #
+    #     ndim = params.size
+    #     if low_bound is not None and high_bound is not None:
+    #         low_bound = jnp.array(low_bound)
+    #         high_bound = jnp.array(high_bound)
+    #     else:
+    #         low_bound = jnp.array(ndim * None)
+    #         high_bound = jnp.array(ndim * None)
+    #     prior_chain = PriorChain().push(UniformPrior('params', low=low_bound, high=high_bound))
+    #     ns = NestedSampler(likelihood_function, prior_chain, num_live_points=100 * prior_chain.U_ndims,
+    #                        sampler_name=sampler_name)
+    #     results = jit(ns)(key=random.PRNGKey(0))
+    #     # summary(results)
+    #     return results
 
     def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False,
                       label_font_size=8, tick_font_size=8, mle=False):
