@@ -491,6 +491,10 @@ class SingleFitter(CarbonFitter):
         elif model == "simple_sinusoid":
             self.production = self.simple_sinusoid
             self.production_model = 'simple sinusoid'
+        elif model == "spike_only":
+            self.production = self.spike_only
+            self.production_model = 'spike only'
+            self.adaptive = False
         elif model == "simple_sinusoid_sharp":
             self.production = self.simple_sinusoid_sharp
         elif model == "simple_sinusoid_prolonged":
@@ -605,6 +609,29 @@ class SingleFitter(CarbonFitter):
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
+        return production
+
+    @partial(jit, static_argnums=(0,))
+    def spike_only(self, t, *args):
+        """
+        A simple sinusoid production rate model. Tunable parameters are,
+        Start time: start time\n
+        Duration: duration\n
+        Area: total radiocarbon delivered
+        Parameters
+        ----------
+        t : ndarray
+            Time sampling
+        args : ndarray
+            Tunable parameters. Must include, start time, duration, phase and area
+        Returns
+        -------
+        ndarray
+            Production rate on t
+        """
+        start_time, duration, area = jnp.array(list(args)).reshape(-1)
+        height = self.super_gaussian(t, start_time, duration, area)
+        production = self.steady_state_production + height
         return production
 
     @partial(jit, static_argnums=(0,))

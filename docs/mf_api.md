@@ -1,6 +1,6 @@
 # Documentation for `MultiFitter`
 
-::: fitting.MultiFitter
+::: ticktack.fitting.MultiFitter
     handler: python
     selection:
       members:
