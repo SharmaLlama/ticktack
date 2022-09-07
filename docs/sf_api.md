@@ -1,6 +1,6 @@
 # Documentation for `SingleFitter`
 
-::: fitting.SingleFitter
+::: ticktack.fitting.SingleFitter
     handler: python
     selection:
       members:

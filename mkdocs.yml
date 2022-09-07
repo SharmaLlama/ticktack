@@ -1,4 +1,4 @@
-markdown_extensions:
+lmarkdown_extensions:
   - pymdownx.arithmatex:
       generic: true
 
@@ -15,6 +15,7 @@ nav:
         - fitting-with-mcmc-sf: notebooks/02_Fitting.ipynb
         - fitting-with-mcmc-mf: notebooks/03_MultiFitter.ipynb
         - fitting-with-is: notebooks/04_InverseSolver.ipynb
+        - fitting-with-constant-samples: notebooks/05_Fitting_Flat.ipynb
     - Box API Docs: box_api.md
     - Flow API Docs: flow_api.md
     - CarbonBox API Docs: cbm_api.md

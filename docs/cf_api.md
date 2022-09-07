@@ -1,6 +1,6 @@
 # Documentation for `CarbonFitter`
 
-::: fitting.CarbonFitter
+::: ticktack.fitting.CarbonFitter
     handler: python
     selection:
       members:
