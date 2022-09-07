@@ -509,7 +509,7 @@ class CarbonBoxModel:
         max_steps = 48*jnp.size(time_values)
         
         if adaptive:
-            stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-15)
+            stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-13)
             dt0 = None
         else:
             stepsize_controller = diffrax.ConstantStepSize()
