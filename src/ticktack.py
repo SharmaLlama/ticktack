@@ -1,20 +1,23 @@
-import h5py
-import hdfdict
 import jax.numpy as jnp
-import scipy as scipy
-import scipy.integrate
-import scipy.optimize
 from jax import jit
 import jax
 from functools import partial
 from jax.config import config
+
+from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
+import diffrax
+
+import h5py
+import hdfdict
+
+import scipy as scipy
+import scipy.integrate
+import scipy.optimize
+
 import pkg_resources
 from typing import Union
-from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
-from jax.experimental.ode import odeint
 
-config.update("jax_enable_x64", True)
-
+config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
 
 class Box:
     """ Box class which represents each individual box in the carbon model."""
@@ -432,8 +435,8 @@ class CarbonBoxModel:
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-    @partial(jit, static_argnums=(0, 2, 5, 6))
-    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None):
+    @partial(jit, static_argnums=(0, 2, 5, 6, 8))
+    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None,adaptive=True):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile method has not been executed first.
@@ -469,8 +472,7 @@ class CarbonBoxModel:
             If the production is not a callable function.
         """
 
-        @jit
-        def derivative(y, t):
+        def derivative(t, y, args):
             ans = jnp.matmul(self._matrix, y)
             production_rate_constant = production(t, *args) - steady_state_production
             production_rate_constant = self._convert_production_rate(production_rate_constant)
@@ -496,8 +498,28 @@ class CarbonBoxModel:
         else:
             y_initial = jnp.array(solution)
 
-        states = odeint(derivative, y_initial-solution, time_values,  atol=1e-15, rtol=1e-15) + solution
-        return states, solution
+        term = diffrax.ODETerm(derivative)
+        solver = diffrax.Dopri5()
+        saveat = diffrax.SaveAt(ts=time_values)
+
+        # for fixed time sampling
+        start = time_values[0]
+        end = time_values[-1]
+        step = 1 / 48 # 4 per month 
+        max_steps = 48*jnp.size(time_values)
+        
+        if adaptive:
+            stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-10)
+            dt0 = None
+        else:
+            stepsize_controller = diffrax.ConstantStepSize()
+            dt0 = step
+
+        states = diffrax.diffeqsolve(term, solver, args=args, y0=y_initial-solution, t0 = start, t1 = end,
+            dt0 = dt0, stepsize_controller=stepsize_controller,saveat=saveat, 
+            max_steps=max_steps)
+
+        return states.ys+solution, solution
 
     @partial(jit, static_argnums=(0, 2))
     def bin_data(self, data, time_oversample, time_out, growth):

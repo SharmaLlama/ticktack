@@ -1,26 +1,33 @@
+import jax.numpy as jnp
+from jax import grad, jit, random, jacrev, vmap
+from jax.lax import cond, sub
+
 import numpy as np
 import matplotlib.pyplot as plt
-from jax.experimental.ode import odeint
-from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
-from tinygp import kernels, GaussianProcess
-import jax.numpy as jnp
-from jax import grad, jit, random
-from functools import partial
-import ticktack
-from astropy.table import Table
-from tqdm import tqdm
-import emcee
-from jax.lax import cond, sub
-from chainconsumer import ChainConsumer
-import scipy
-import seaborn as sns
-from jax import jit, grad, jacrev, vmap
-# from jaxns.nested_sampler import NestedSampler
-# from jaxns.prior_transforms import PriorChain, UniformPrior
-import os
 from matplotlib.lines import Line2D
 import matplotlib as mpl
 from matplotlib.ticker import MaxNLocator
+import scipy
+
+import ticktack
+
+import diffrax 
+from jax_cosmo.scipy.interpolate import InterpolatedUnivariateSpline
+from tinygp import kernels, GaussianProcess
+
+from functools import partial
+
+from astropy.table import Table
+from tqdm import tqdm
+import emcee
+
+from chainconsumer import ChainConsumer
+
+import seaborn as sns
+# from jaxns.nested_sampler import NestedSampler
+# from jaxns.prior_transforms import PriorChain, UniformPrior
+
+import os
 
 mpl.style.use('seaborn-colorblind')
 
@@ -334,7 +341,7 @@ class SingleFitter(CarbonFitter):
     """
 
     def __init__(self, cbm, cbm_model, production_rate_units='atoms/cm^2/s', target_C_14=707., box='Troposphere',
-                 hemisphere='north'):
+                 hemisphere='north',adaptive=True):
         """
         Initializes a SingleFitter Object.
         Parameters
@@ -383,6 +390,8 @@ class SingleFitter(CarbonFitter):
             self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
+
+        self.adaptive = adaptive
 
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
         """
@@ -697,7 +706,8 @@ class SingleFitter(CarbonFitter):
         time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                    (self.annual.size + 1) * self.oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params,
-                                     steady_state_production=self.steady_state_production)
+                                     steady_state_production=self.steady_state_production,
+                                     adaptive=self.adaptive)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -713,8 +723,14 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        if self.adaptive:
+            burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+            y0 = burnin[-1, :]
+        else:
+            y0 = self.steady_state_y0
+
+        event = self.run_event(y0=y0, params=params)
+
         binned_data = self.cbm.bin_data(event[:, self.box_idx], self.oversample, self.annual, growth=self.growth)
         d14c = (binned_data - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c[self.mask] + self.offset
@@ -732,8 +748,13 @@ class SingleFitter(CarbonFitter):
         ndarray
             Predicted d14c value
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        if self.adaptive:
+            burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+            y0 = burnin[-1, :]
+        else:
+            y0 = self.steady_state_y0
+
+        event = self.run_event(y0=y0, params=params)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c + self.offset
 
@@ -898,7 +919,7 @@ class SingleFitter(CarbonFitter):
         dash = lambda x: self.dash(x, t_in, data)
 
         # @jit
-        def derivative(y, time):
+        def derivative(time, y, args):
             ans = jnp.matmul(self.cbm.get_matrix(), y)
             prod_coeff = self.cbm.get_production_coefficients()
             production_rate = (dash(time) - ans[self.box_idx]) / prod_coeff[self.box_idx]
@@ -912,9 +933,20 @@ class SingleFitter(CarbonFitter):
         else:
             raise ValueError("Must give either target C-14 or production rate.")
 
-        states = odeint(derivative, steady_state, t_out, atol=1e-15, rtol=1e-15)
+        term = diffrax.ODETerm(derivative)
+        solver = diffrax.Dopri5()
+        saveat = diffrax.SaveAt(ts=t_out)
 
-        flows = jnp.matmul(self.cbm.get_matrix(), states.T)
+        # for fixed time sampling
+        step = 1 / 48. # 4 per month 
+        max_steps = 96*2*jnp.size(t_out)
+        
+        stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-10)
+
+        states = diffrax.diffeqsolve(term, solver, args=(), y0=steady_state, t0 = t_out[0], t1 = t_out[-1],
+            dt0 = step, stepsize_controller=stepsize_controller,saveat=saveat)
+
+        flows = jnp.matmul(self.cbm.get_matrix(), states.ys.T)
         return self._reverse_convert_production_rate((vmap(dash)(t_out) - flows[self.box_idx, :]) /
                                                      self.cbm.get_production_coefficients()[self.box_idx])
 
@@ -958,7 +990,7 @@ class MultiFitter(CarbonFitter):
     Does parameter fitting, likelihood evaluations, Monte Carlo sampling, plotting and more.
     """
 
-    def __init__(self):
+    def __init__(self,adaptive=True):
         """
         Initializes a MultiFitter object.
         """
@@ -976,6 +1008,7 @@ class MultiFitter(CarbonFitter):
         self.cbm = None
         self.cbm_model = None
         self.box_idx = None
+        self.adaptive=adaptive
 
     def add_SingleFitter(self, sf):
         """
@@ -1161,7 +1194,8 @@ class MultiFitter(CarbonFitter):
         time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                    (self.annual.size + 1) * self.oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params,
-                                     steady_state_production=self.steady_state_production)
+                                     steady_state_production=self.steady_state_production,
+                                     adaptive=self.adaptive)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -1177,8 +1211,12 @@ class MultiFitter(CarbonFitter):
                ndarray
                    Predicted d14c value
                """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)
+        if self.adaptive:
+            burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+            y0 = burnin[-1, :]
+        else:
+            y0 = self.steady_state_y0
+        event = self.run_event(y0=y0, params=params)
         d14c = (event[:, self.box_idx] - self.steady_state_y0[self.box_idx]) / self.steady_state_y0[self.box_idx] * 1000
         return d14c
 
@@ -1195,8 +1233,13 @@ class MultiFitter(CarbonFitter):
         float
             Log-likelihood
         """
-        burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
-        event = self.run_event(y0=burnin[-1, :], params=params)[:, self.box_idx]
+        if self.adaptive:
+            burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+            y0 = burnin[-1, :]
+        else:
+            y0 = self.steady_state_y0
+
+        event = self.run_event(y0=y0, params=params)[:, self.box_idx]
         like = 0
         for sf in self.MultiFitter:
             binned_data = self.cbm.bin_data(event, self.oversample, self.annual, growth=sf.growth)
