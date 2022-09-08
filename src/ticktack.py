@@ -436,7 +436,7 @@ class CarbonBoxModel:
             raise ValueError("Must give either target C-14 or production rate.")
 
     @partial(jit, static_argnums=(0, 2, 5, 6, 8))
-    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None,adaptive=True):
+    def run(self, time, production, y0=None, args=(), target_C_14=None, steady_state_production=None, solution=None,adaptive=True,step_ts=None):
         """ For the given production function, this calculates the C14 content of all the boxes within the carbon box
         model at the specified time values. It does this by solving a linear system of ODEs. This method will not work
         if the compile method has not been executed first.
@@ -506,14 +506,14 @@ class CarbonBoxModel:
         start = time_values[0]
         end = time_values[-1]
         step = 1 / 48 # 4 per month 
-        max_steps = 48*jnp.size(time_values)
+        max_steps = None #48*jnp.size(time_values)
         
         if adaptive:
-            stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-10)
-            dt0 = None
+            stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-10,
+                dtmin=step/2.,dtmax=step*4,force_dtmin=True,step_ts=step_ts)
         else:
             stepsize_controller = diffrax.ConstantStepSize()
-            dt0 = step
+        dt0 = step
 
         states = diffrax.diffeqsolve(term, solver, args=args, y0=y_initial-solution, t0 = start, t1 = end,
             dt0 = dt0, stepsize_controller=stepsize_controller,saveat=saveat, 

@@ -488,39 +488,46 @@ class SingleFitter(CarbonFitter):
         if callable(model):
             self.production = model
             self.production_model = 'custom'
+            self.start_time_index = None
         elif model == "simple_sinusoid":
             self.production = self.simple_sinusoid
             self.production_model = 'simple sinusoid'
+            self.start_time_index = 0
         elif model == "spike_only":
             self.production = self.spike_only
             self.production_model = 'spike only'
             self.adaptive = False
-        elif model == "simple_sinusoid_sharp":
-            self.production = self.simple_sinusoid_sharp
-        elif model == "simple_sinusoid_prolonged":
-            self.production = self.simple_sinusoid_prolonged
+            self.start_time_index = 0
+        # elif model == "simple_sinusoid_sharp":
+        #     self.production = self.simple_sinusoid_sharp
+        # elif model == "simple_sinusoid_prolonged":
+        #     self.production = self.simple_sinusoid_prolonged
         elif model == "flexible_sinusoid":
             self.production = self.flexible_sinusoid
             self.production_model = 'flexible sinusoid'
+            self.start_time_index = 0
         elif model == "flexible_sinusoid_affine_variant":
             self.production = self.flexible_sinusoid_affine_variant
             self.production_model = 'flexible sinusoid affine variant'
-        elif model == "affine":
-            self.production = self.affine
-            self.production_model = 'affine'
+            self.start_time_index = 1
+        # elif model == "affine":
+        #     self.production = self.affine
+        #     self.production_model = 'affine'
         elif model == "control_points":
             self.control_points_time = jnp.arange(self.start, self.end)
             self.control_points_time_fine = jnp.linspace(self.start, self.end,
                                                          int((self.end - self.start) * self.oversample))
             self.production = self.interp_gp
             self.production_model = 'control points'
+            self.start_time_index = None
         elif model == "inverse_solver":
             self.production = self.interp_IS
             self.production_model = 'inverse solver'
+            self.start_time_index = None
         else:
             raise ValueError(
-                "model is not a callable, or does not take value from: simple_sinusoid, simple_sinusoid_sharp, simple_sinusoid_prolonged, flexible_sinusoid, "
-                "flexible_sinusoid_affine_variant, affine, inverse_solver, control_points")
+                "model is not a callable, or does not take value from: simple_sinusoid, flexible_sinusoid, "
+                "flexible_sinusoid_affine_variant, inverse_solver, control_points")
 
     @partial(jit, static_argnums=(0,))
     def interp_gp(self, tval, *args):
@@ -591,7 +598,7 @@ class SingleFitter(CarbonFitter):
         """
         A simple sinusoid production rate model. Tunable parameters are,
         Start time: start time\n
-        Duration: duration\n
+        log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
         Area: total radiocarbon delivered
         Parameters
@@ -605,18 +612,20 @@ class SingleFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-        start_time, duration, phase, area = jnp.array(list(args)).reshape(-1)
+        start_time, log_duration, phase, log_area = jnp.array(list(args)).reshape(-1)
+        duration, area = 10**log_duration, 10**log_area
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + 0.18 * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
         return production
+
 
     @partial(jit, static_argnums=(0,))
     def spike_only(self, t, *args):
         """
         A simple sinusoid production rate model. Tunable parameters are,
         Start time: start time\n
-        Duration: duration\n
+        log_Duration: log10 duration\n
         Area: total radiocarbon delivered
         Parameters
         ----------
@@ -629,7 +638,8 @@ class SingleFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-        start_time, duration, area = jnp.array(list(args)).reshape(-1)
+        start_time, log_duration, log_area = jnp.array(list(args)).reshape(-1)
+        duration, area = 10**log_duration, 10**log_area
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + height
         return production
@@ -639,7 +649,7 @@ class SingleFitter(CarbonFitter):
         """
         A flexible sinusoid production rate model. Tunable parameters are,
         Start time: start time\n
-        Duration: duration\n
+        log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
         Area: total radiocarbon delivered\n
         Amplitude: solar amplitude
@@ -654,11 +664,14 @@ class SingleFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-        start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        start_time, log_duration, phase, log_area, amplitude = jnp.array(list(args)).reshape(-1)
+        duration, area = 10**log_duration, 10**log_area
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
         return production
+
+
 
     @partial(jit, static_argnums=(0,))
     def flexible_sinusoid_affine_variant(self, t, *args):
@@ -666,7 +679,7 @@ class SingleFitter(CarbonFitter):
         A flexible sinusoid production rate model with a linear gradient. Tunable parameters are,
         Gradient: linear gradient\n
         Start time: start time\n
-        Duration: duration\n
+        log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
         Area: total radiocarbon delivered\n
         Amplitude: solar amplitude
@@ -681,13 +694,15 @@ class SingleFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-        gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        gradient, start_time, log_duration, phase, log_area, log_amplitude = jnp.array(list(args)).reshape(-1)
+        duration, area, amplitude = 10**log_duration, 10**log_area, 10**log_amplitude
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + gradient * (
                 t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t
             + phase * 2 * np.pi / 11) + height
         return production
+
 
     # @partial(jit, static_argnums=(0,))
     # def affine(self, t, *args):
@@ -730,11 +745,17 @@ class SingleFitter(CarbonFitter):
         ndarray
             Value of each box in the CBM during the production period
         """
+        if self.start_time_index is not None:
+            start, duration = params[self.start_time_index], 10**params[self.start_time_index+1] # assumes they are adjacent - careful in future
+            # also assumes duration is log!
+            step_ts = jnp.linspace(start,start+duration,25)
+        else:
+            step_ts = None
         time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                    (self.annual.size + 1) * self.oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params,
                                      steady_state_production=self.steady_state_production,
-                                     adaptive=self.adaptive)
+                                     adaptive=self.adaptive,step_ts=step_ts)
         return box_values
 
     @partial(jit, static_argnums=(0,))
@@ -822,6 +843,7 @@ class SingleFitter(CarbonFitter):
         lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         pos = self.log_likelihood(params)
         return lp + pos
+
 
     @partial(jit, static_argnums=(0,))
     def log_likelihood_gp(self, params):
@@ -1058,11 +1080,11 @@ class MultiFitter(CarbonFitter):
         if self.production is None:
             self.production = sf.production
             self.production_model = sf.production_model
+            self.start_time_index = sf.start_time_index
         elif self.production_model is not sf.production_model:
             raise ValueError(
                 "production for SingleFitters must be consistent. Got {}, expected {}".format(sf.production_model,
                                                                                               self.production_model))
-
         if self.oversample is None:
             self.oversample = sf.oversample
         elif self.oversample < sf.oversample:
@@ -1218,6 +1240,12 @@ class MultiFitter(CarbonFitter):
         ndarray
             Value of each box in the CBM during the production period
         """
+        if self.start_time_index is not None:
+            start, duration = params[self.start_time_index], 10**params[self.start_time_index+1] # assumes they are adjacent - careful in future
+            # assumes duration is log space
+            step_ts = jnp.linspace(start,start+duration,25)
+        else:
+            step_ts = None
         time_values = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                    (self.annual.size + 1) * self.oversample)
         box_values, _ = self.cbm.run(time_values, self.production, y0=y0, args=params,
@@ -1313,6 +1341,7 @@ class MultiFitter(CarbonFitter):
         lp += jnp.any((params < low_bounds) | (params > up_bounds)) * -jnp.inf
         pos = self.multi_likelihood(params)
         return lp + pos
+
 
     def log_joint_likelihood_gp(self, params, low_bounds, up_bounds):
         """
@@ -1420,19 +1449,19 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         Monte Carlo samples
     """
     if production_model == 'simple_sinusoid':
-        default_params = np.array([year, 1. / 12, 3., 81. / 12])
+        default_params = jnp.array([year, 1. / 12, 3., 81. / 12])
         default_low_bounds = jnp.array([year - 5, 1 / 52., 0, 0.])
         default_up_bounds = jnp.array([year + 5, 5., 11, 15.])
     elif production_model == 'flexible_sinusoid':
-        default_params = np.array([year, 1. / 12, 3., 81. / 12, 0.18])
+        default_params = jnp.array([year, 1. / 12, 3., 81. / 12, 0.18])
         default_low_bounds = jnp.array([year - 5, 1 / 52., 0, 0., 0.])
         default_up_bounds = jnp.array([year + 5, 5., 11, 15., 2.])
     elif production_model == 'flexible_sinusoid_affine_variant':
-        default_params = np.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
+        default_params = jnp.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
         default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.3])
     elif production_model == 'affine':
-        default_params = np.array([0, year, 1. / 12, 81. / 12])
+        default_params = jnp.array([0, year, 1. / 12, 81. / 12])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
         default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 15.])
     elif production_model == 'control_points':
@@ -1469,14 +1498,14 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
                                           burnin=burnin,
                                           production=production,
                                           args=(low_bounds, up_bounds))
-    elif sampler == 'NS':
-        print("Running Nested Sampling...")
-        chain = mf.NestedSampler(params,
-                                 likelihood=mf.multi_likelihood,
-                                 low_bound=low_bounds,
-                                 high_bound=up_bounds
-                                 )
-        print("Done")
+    # elif sampler == 'NS':
+    #     print("Running Nested Sampling...")
+    #     chain = mf.NestedSampler(params,
+    #                              likelihood=mf.multi_likelihood,
+    #                              low_bound=low_bounds,
+    #                              high_bound=up_bounds
+    #                              )
+    #     print("Done")
     else:
         raise ValueError("Invalid sampler value. 'sampler' must be one of the following: MCMC, NS")
     return chain
