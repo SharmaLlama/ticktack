@@ -68,7 +68,7 @@ class CarbonFitter:
         print("Running production...")
         sampler.reset()
         sampler.run_mcmc(p0, production, progress=True);
-        return sampler.flatchain
+        return sampler.get_chain(flat=True)
 
     # def NestedSampler(self, params, likelihood, low_bound=None, high_bound=None, sampler_name='multi_ellipsoid'):
     #     """

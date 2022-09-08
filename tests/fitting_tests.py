@@ -80,14 +80,14 @@ def MultiFitter_creation(SingleFitter_creation):
 
 def test_multi_likelihood(MultiFitter_creation):
     out = MultiFitter_creation.multi_likelihood(params=jnp.array([205., np.log10(1. / 12), jnp.pi / 2., np.log10(81. / 12)]))
-    assert jnp.allclose(out, -271736.26950342)
+    assert jnp.allclose(out, -271745.88115096)
 
 def test_mf_log_joint_likelihood(MultiFitter_creation):
     out = MultiFitter_creation.log_joint_likelihood(jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81./12)]),
                                                          jnp.array([200., -2, -jnp.pi, 0.]),
                                                          jnp.array([210., 1, jnp.pi, 15.])
                                                          )
-    assert jnp.allclose(out, -271736.26950342)
+    assert jnp.allclose(out, -271745.88115096)
 
     out = MultiFitter_creation.log_joint_likelihood(jnp.array([211.,np.log10(1. / 12), jnp.pi / 2., np.log10(81./12)]),
                                                          jnp.array([200., -2, -jnp.pi, 0.]),
@@ -135,7 +135,7 @@ def test_simple_sinusoid(SingleFitter_creation):
 
 def test_flexible_sinusoid(SingleFitter_creation):
     out = SingleFitter_creation.flexible_sinusoid(200, jnp.array([205., np.log10(1./12), jnp.pi/2., np.log10(81./12), np.log10(0.1)]))
-    assert jnp.allclose(out, 2.04813439)
+    assert jnp.allclose(out, 0.20290487)
 
 def test_dc14(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
@@ -182,7 +182,7 @@ def test_dc14_fine(SingleFitter_creation):
 def test_log_likelihood(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_likelihood(jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81./12)]))
-    assert jnp.allclose(out, -134749.41424852)
+    assert jnp.allclose(out, -134746.42313639)
 
 def test_log_joint_likelihood(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
@@ -190,7 +190,7 @@ def test_log_joint_likelihood(SingleFitter_creation):
                                                     jnp.array([200., -2, -jnp.pi, -2.]),
                                                     jnp.array([210., 1., jnp.pi, 1.5])
                                                     )
-    assert jnp.allclose(out, -134749.41424852)
+    assert jnp.allclose(out, -134746.42313639)
 
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_joint_likelihood(jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81. / 12)]),
