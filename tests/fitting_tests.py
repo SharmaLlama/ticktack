@@ -162,7 +162,7 @@ def test_dc14_fine(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     a = SingleFitter_creation.dc14_fine(params=jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81./12)]))[-9:]
     SingleFitter_creation.compile_production_model(model="flexible_sinusoid")
-    b = SingleFitter_creation.dc14_fine(params=jnp.array([205., 1./12, jnp.pi/2., np.log10(81./12), 0.1]))[-9:]
+    b = SingleFitter_creation.dc14_fine(params=jnp.array([205., np.log10(1./12), jnp.pi/2., np.log10(81./12), np.log10(0.1)]))[-9:]
     SingleFitter_creation.compile_production_model(model="control_points")
     c = SingleFitter_creation.dc14_fine(params=jnp.ones(SingleFitter_creation.control_points_time.size))[-9:]
     assert jnp.all(
@@ -187,15 +187,15 @@ def test_log_likelihood(SingleFitter_creation):
 def test_log_joint_likelihood(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_joint_likelihood(jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81. / 12)]),
-                                                    jnp.array([200., -2, -jnp.pi, 0.]),
-                                                    jnp.array([210., 1., jnp.pi, 15.])
+                                                    jnp.array([200., -2, -jnp.pi, -2.]),
+                                                    jnp.array([210., 1., jnp.pi, 1.5.])
                                                     )
     assert jnp.allclose(out, -134749.41424852)
 
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_joint_likelihood(jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81. / 12)]),
-                                                    jnp.array([200., -2, -jnp.pi, 0.]),
-                                                    jnp.array([204., 1., jnp.pi, 15.])
+                                                    jnp.array([200., -2, -jnp.pi, -2.]),
+                                                    jnp.array([204., 1., jnp.pi, 1.5])
                                                     )
     assert jnp.allclose(out, -np.inf)
 

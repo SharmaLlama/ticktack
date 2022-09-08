@@ -1463,7 +1463,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
     elif production_model == 'affine':
         default_params = jnp.array([0, year, np.log10(1. / 12), np.log10(81. / 12)])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(1 / 52.), -2.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 2., 1.5])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 2g., 1.5])
     elif production_model == 'control_points':
         if sampler == "MCMC":
             default_params = mf.steady_state_production * jnp.ones((len(mf.control_points_time),))
