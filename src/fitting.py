@@ -1449,21 +1449,21 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         Monte Carlo samples
     """
     if production_model == 'simple_sinusoid':
-        default_params = jnp.array([year, 1. / 12, 3., 81. / 12])
-        default_low_bounds = jnp.array([year - 5, 1 / 52., 0, 0.])
-        default_up_bounds = jnp.array([year + 5, 5., 11, 15.])
+        default_params = jnp.array([year, np.log10(1. / 12), 3., np.log10(81. / 12)])
+        default_low_bounds = jnp.array([year - 5, np.log10(1 / 52.), 0, -2.])
+        default_up_bounds = jnp.array([year + 5, np.log10(5.), 11, 1.5])
     elif production_model == 'flexible_sinusoid':
-        default_params = jnp.array([year, 1. / 12, 3., 81. / 12, 0.18])
-        default_low_bounds = jnp.array([year - 5, 1 / 52., 0, 0., 0.])
-        default_up_bounds = jnp.array([year + 5, 5., 11, 15., 2.])
+        default_params = jnp.array([year, np.log10(1. / 12), 3., np.log10(81. / 12), np.log10(0.18)])
+        default_low_bounds = jnp.array([year - 5, np.log10(1 / 52.), 0, -2, -2])
+        default_up_bounds = jnp.array([year + 5, np.log10(5.), 11, 1.5, 1.5])
     elif production_model == 'flexible_sinusoid_affine_variant':
-        default_params = jnp.array([0, year, 1. / 12, 3., 81. / 12, 0.18])
+        default_params = jnp.array([0, year, np.log10(1. / 12), 3., 81. / 12, 0.18])
         default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
         default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.3])
     elif production_model == 'affine':
-        default_params = jnp.array([0, year, 1. / 12, 81. / 12])
-        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 15.])
+        default_params = jnp.array([0, year, np.log10(1. / 12), np.log10(81. / 12)])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(1 / 52.), -2.])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 2., 1.5])
     elif production_model == 'control_points':
         if sampler == "MCMC":
             default_params = mf.steady_state_production * jnp.ones((len(mf.control_points_time),))
