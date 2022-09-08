@@ -626,7 +626,7 @@ class SingleFitter(CarbonFitter):
         A simple sinusoid production rate model. Tunable parameters are,
         Start time: start time\n
         log_Duration: log10 duration\n
-        Area: total radiocarbon delivered
+        log_Area: total radiocarbon delivered
         Parameters
         ----------
         t : ndarray
@@ -664,8 +664,9 @@ class SingleFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-        start_time, log_duration, phase, log_area, amplitude = jnp.array(list(args)).reshape(-1)
-        duration, area = 10**log_duration, 10**log_area
+        start_time, log_duration, phase, log_area, log_amplitude = jnp.array(list(args)).reshape(-1)
+        duration, area, amplitude = 10**log_duration, 10**log_area, 10**log_amplitude
+
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + amplitude * self.steady_state_production * jnp.sin(
             2 * np.pi / 11 * t + phase * 2 * np.pi / 11) + height
@@ -696,6 +697,7 @@ class SingleFitter(CarbonFitter):
         """
         gradient, start_time, log_duration, phase, log_area, log_amplitude = jnp.array(list(args)).reshape(-1)
         duration, area, amplitude = 10**log_duration, 10**log_area, 10**log_amplitude
+        
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + gradient * (
                 t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(

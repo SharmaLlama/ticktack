@@ -19,9 +19,9 @@ def SingleFitter_creation():
     sf.oversample = 1008
     sf.annual = jnp.arange(sf.start, sf.end + 1)
     sf.time_data_fine = jnp.linspace(jnp.min(sf.annual), jnp.max(sf.annual) + 2, (sf.annual.size + 1) * sf.oversample)
-    sf.offset = 0
+    sf.offset = jnp.mean(sf.d14c_data[:4])
     sf.mask = jnp.in1d(sf.annual, sf.time_data)
-    sf.growth = jnp.array([0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0])
+    sf.growth = sf.get_growth_vector("april-september")
     return sf
 
 @pytest.fixture
