@@ -600,7 +600,7 @@ class SingleFitter(CarbonFitter):
         Start time: start time\n
         log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
-        Area: total radiocarbon delivered
+        log_Area: log10 total radiocarbon delivered
         Parameters
         ----------
         t : ndarray
@@ -651,8 +651,8 @@ class SingleFitter(CarbonFitter):
         Start time: start time\n
         log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
-        Area: total radiocarbon delivered\n
-        Amplitude: solar amplitude
+        log_Area: log10 total radiocarbon delivered\n
+        log_Amplitude: log10 solar amplitude
         Parameters
         ----------
         t : ndarray
@@ -682,8 +682,8 @@ class SingleFitter(CarbonFitter):
         Start time: start time\n
         log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
-        Area: total radiocarbon delivered\n
-        Amplitude: solar amplitude
+        log_Area: log10 total radiocarbon delivered\n
+        log_Amplitude: log10 solar amplitude
         Parameters
         ----------
         t : ndarray
@@ -1185,10 +1185,10 @@ class MultiFitter(CarbonFitter):
         A flexible sinusoid production rate model with a linear gradient. Tunable parameters are,
         Gradient: linear gradient\n
         Start time: start time\n
-        Duration: duration\n
+        log_Duration: log10 duration\n
         Phase: phase of the solar cycle\n
-        Area: total radiocarbon delivered\n
-        Amplitude: solar amplitude
+        log_Area: log10 total radiocarbon delivered\n
+        log_Amplitude: log10 solar amplitude
         Parameters
         ----------
         t : ndarray
@@ -1200,7 +1200,9 @@ class MultiFitter(CarbonFitter):
         ndarray
             Production rate on t
         """
-        gradient, start_time, duration, phase, area, amplitude = jnp.array(list(args)).reshape(-1)
+        gradient, start_time, log_duration, phase, log_area, log_amplitude = jnp.array(list(args)).reshape(-1)
+        duration, area, amplitude = 10**log_duration, 10**log_area, 10**log_amplitude
+
         height = self.super_gaussian(t, start_time, duration, area)
         production = self.steady_state_production + gradient * (
                 t - self.start) * (t >= self.start) + amplitude * self.steady_state_production * jnp.sin(
@@ -1459,13 +1461,13 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         default_low_bounds = jnp.array([year - 5, np.log10(1 / 52.), 0, -2, -2])
         default_up_bounds = jnp.array([year + 5, np.log10(5.), 11, 1.5, 1.5])
     elif production_model == 'flexible_sinusoid_affine_variant':
-        default_params = jnp.array([0, year, np.log10(1. / 12), 3., 81. / 12, 0.18])
-        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, 1 / 52., 0, 0., 0.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 5., 11, 15., 0.3])
-    elif production_model == 'affine':
-        default_params = jnp.array([0, year, np.log10(1. / 12), np.log10(81. / 12)])
-        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(1 / 52.), -2.])
-        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 2., 1.5])
+        default_params = jnp.array([0, year, np.log10(1. / 12), 3., np.log10(81. / 12), np.log10(0.18)])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(1 / 52.), 0, -2, -2]])
+        default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, np.log10(5.), 11, 1.5, 1.5])
+    # elif production_model == 'affine':
+    #     default_params = jnp.array([0, year, np.log10(1. / 12), np.log10(81. / 12)])
+    #     default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(1 / 52.), -2.])
+    #     default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, 2., 1.5])
     elif production_model == 'control_points':
         if sampler == "MCMC":
             default_params = mf.steady_state_production * jnp.ones((len(mf.control_points_time),))
