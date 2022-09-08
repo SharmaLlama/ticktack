@@ -188,7 +188,7 @@ def test_log_joint_likelihood(SingleFitter_creation):
     SingleFitter_creation.compile_production_model(model="simple_sinusoid")
     out = SingleFitter_creation.log_joint_likelihood(jnp.array([205.,np.log10(1. / 12), jnp.pi / 2., np.log10(81. / 12)]),
                                                     jnp.array([200., -2, -jnp.pi, -2.]),
-                                                    jnp.array([210., 1., jnp.pi, 1.5.])
+                                                    jnp.array([210., 1., jnp.pi, 1.5])
                                                     )
     assert jnp.allclose(out, -134749.41424852)
 
