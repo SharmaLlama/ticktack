@@ -511,6 +511,7 @@ class CarbonBoxModel:
         if adaptive:
             stepsize_controller = diffrax.PIDController(rtol=1e-10, atol=1e-10,
                 dtmin=step/2.,dtmax=step*4,force_dtmin=True,step_ts=step_ts)
+
         else:
             stepsize_controller = diffrax.ConstantStepSize()
         dt0 = step
