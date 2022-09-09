@@ -1576,7 +1576,10 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         file_names = get_data(path=path)
         print("Retrieving data...")
         for file_name in tqdm(file_names):
-            sf = SingleFitter(cbm, cbm_model=cbm_model, box=box, hemisphere=hemisphere)
+            if 'SH' in file_name:
+                sf = SingleFitter(cbm, cbm_model, box=box, hemisphere='south')
+            else:
+                sf = SingleFitter(cbm, cbm_model, box=box, hemisphere=hemisphere)
             sf.load_data(path + '/' + file_name, oversample=oversample, burnin_time=burnin_time)
             sf.compile_production_model(model=production_model)
             mf.add_SingleFitter(sf)
