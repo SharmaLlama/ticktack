@@ -391,6 +391,7 @@ class SingleFitter(CarbonFitter):
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
+        self.steady_state_box = self.steady_state_y0[self.box_idx]
         self.adaptive = adaptive
 
     def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
@@ -1092,11 +1093,11 @@ class MultiFitter(CarbonFitter):
         elif self.oversample < sf.oversample:
             self.oversample = sf.oversample
 
-        if not self.box_idx:
-            self.box_idx = sf.box_idx
-        elif not self.box_idx == sf.box_idx:
-            raise ValueError(
-                "'box' parameter and 'hemisphere' parameter for SingleFitters must be consistent")
+        # if not self.box_idx:
+        #     self.box_idx = sf.box_idx
+        # elif not self.box_idx == sf.box_idx:
+        #     raise ValueError(
+        #         "'box' parameter and 'hemisphere' parameter for SingleFitters must be consistent")
 
         if self.steady_state_y0 is None:
             self.steady_state_y0 = sf.steady_state_y0
@@ -1111,9 +1112,9 @@ class MultiFitter(CarbonFitter):
             self.cbm_model = sf.cbm_model
             self.cbm = ticktack.load_presaved_model(self.cbm_model, production_rate_units='atoms/cm^2/s')
             self.cbm.compile()
-        elif not self.cbm_model is sf.cbm_model:
-            raise ValueError("cbm model for SingleFitters must be consistent. Got {}, expected {}".format(sf.cbm_model,
-                                                                                                          self.cbm_model))
+        # elif not self.cbm_model is sf.cbm_model:
+        #     raise ValueError("cbm model for SingleFitters must be consistent. Got {}, expected {}".format(sf.cbm_model,
+        #                                                                                                   self.cbm_model))
         self.MultiFitter.append(sf)
 
     def compile(self):
@@ -1293,16 +1294,17 @@ class MultiFitter(CarbonFitter):
             Log-likelihood
         """
         if self.adaptive:
-            burnin = self.run_burnin(y0=self.steady_state_y0, params=params)
+            burnin = self.run_burnin(y0=self.steady_state_y0, params=params) # steady_state_y0 is hem independent
             y0 = burnin[-1, :]
         else:
             y0 = self.steady_state_y0
 
-        event = self.run_event(y0=y0, params=params)[:, self.box_idx]
+        event_mat = self.run_event(y0=y0, params=params) # gives a list of boxes
         like = 0
         for sf in self.MultiFitter:
-            binned_data = self.cbm.bin_data(event, self.oversample, self.annual, growth=sf.growth)
-            d14c = (binned_data - self.steady_state_box) / self.steady_state_box * 1000
+            event = event_mat[:, sf.box_idx] # chooses the right box using the information from sf
+            binned_data = sf.cbm.bin_data(event, self.oversample, self.annual, growth=sf.growth) # bins using sf.cbm
+            d14c = (binned_data - sf.steady_state_box) / sf.steady_state_box * 1000 # steady_state_box is hem dependent
             d14c_sf = d14c[sf.multi_mask] + sf.offset
             like += jnp.sum(((sf.d14c_data - d14c_sf) / sf.d14c_data_error) ** 2) * -0.5
         return like
@@ -1453,16 +1455,16 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
         Monte Carlo samples
     """
     if production_model == 'simple_sinusoid':
-        default_params = jnp.array([year, np.log10(1. / 12), 3., np.log10(81. / 12)])
-        default_low_bounds = jnp.array([year - 5, np.log10(1 / 52.), 0, -2.])
+        default_params = jnp.array([year, np.log10(2. / 12), 3., np.log10(81. / 12)])
+        default_low_bounds = jnp.array([year - 5, np.log10(4 / 52.), 0, -2.])
         default_up_bounds = jnp.array([year + 5, np.log10(5.), 11, 1.5])
     elif production_model == 'flexible_sinusoid':
-        default_params = jnp.array([year, np.log10(1. / 12), 3., np.log10(81. / 12), np.log10(0.18)])
-        default_low_bounds = jnp.array([year - 5, np.log10(1 / 52.), 0, -2, -2])
+        default_params = jnp.array([year, np.log10(2. / 12), 3., np.log10(81. / 12), np.log10(0.18)])
+        default_low_bounds = jnp.array([year - 5, np.log10(4 / 52.), 0, -2, -2])
         default_up_bounds = jnp.array([year + 5, np.log10(5.), 11, 1.5, 1.5])
     elif production_model == 'flexible_sinusoid_affine_variant':
-        default_params = jnp.array([0, year, np.log10(1. / 12), 3., np.log10(81. / 12), np.log10(0.18)])
-        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(1 / 52.), 0, -2, -2])
+        default_params = jnp.array([0, year, np.log10(2. / 12), 3., np.log10(81. / 12), np.log10(0.18)])
+        default_low_bounds = jnp.array([-mf.steady_state_production * 0.05 / 5, year - 5, np.log10(4 / 52.), 0, -2, -2])
         default_up_bounds = jnp.array([mf.steady_state_production * 0.05 / 5, year + 5, np.log10(5.), 11, 1.5, 1.5])
     # elif production_model == 'affine':
     #     default_params = jnp.array([0, year, np.log10(1. / 12), np.log10(81. / 12)])
