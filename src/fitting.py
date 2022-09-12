@@ -1526,7 +1526,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
 
 def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Guttler15', box='Troposphere',
               hemisphere='north', sampler=None, burnin=500, production=1000, params=None, low_bounds=None,
-              up_bounds=None, mf=None, oversample=1008, burnin_time=2000):
+              up_bounds=None, mf=None, oversample=1008, burnin_time=2000, verbose=False):
     """
     Fits a Miyake event.
 
@@ -1587,9 +1587,13 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
         for file_name in tqdm(file_names):
             if 'SH' in file_name:
                 sf = SingleFitter(cbm, cbm_model, box=box, hemisphere='south')
+                if verbose:
+                    print("South")
             else:
                 sf = SingleFitter(cbm, cbm_model, box=box, hemisphere=hemisphere)
-            sf.load_data(path + '/' + file_name, oversample=oversample, burnin_time=burnin_time)
+                if verbose:
+                    print(hemisphere)
+            sf.load_data(path + '/' + file_name, oversample=oversample, burnin_time=burnin_time, verbose=verbose)
             sf.compile_production_model(model=production_model)
             mf.add_SingleFitter(sf)
     mf.compile()
