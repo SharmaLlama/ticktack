@@ -425,20 +425,25 @@ class SingleFitter(CarbonFitter):
         self.mask = jnp.in1d(self.annual, self.time_data)
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                            (self.annual.size + 1) * self.oversample)
-        if self.hemisphere == 'north':
-            self.growth = self.get_growth_vector("april-september")
-            if verbose:
-                print('Growth april-september')
-        else:
-            self.growth = self.get_growth_vector("october-march")
-            if verbose:
-                print('Growth october-march')
         try:
             self.growth = self.get_growth_vector(data["growth_season"][0])
             if verbose:
-                print('Custom Growth Season')
+                with open('data_log.txt', 'a') as f:
+                    f.write(" Custom Growth Season")
+                    f.write("\n")
         except:
-            pass
+            if self.hemisphere == 'north':
+                self.growth = self.get_growth_vector("april-september")
+                if verbose:
+                    with open('data_log.txt', 'a') as f:
+                        f.write(" Growth april-september")
+                        f.write("\n")
+            else:
+                self.growth = self.get_growth_vector("october-march")
+                if verbose:
+                    with open('data_log.txt', 'a') as f:
+                        f.write(" Growth october-march")
+                        f.write("\n")
 
         # define utils for inverse solver now that we have the growth season
         if jnp.count_nonzero(self.growth) == 12:
@@ -1524,7 +1529,7 @@ def sample_event(year, mf, sampler='MCMC', production_model='simple_sinusoid', b
     return chain
 
 
-def fit_event(year, event=None, path=None, production_model='simple_sinusoid', cbm_model='Guttler15', box='Troposphere',
+def fit_event(year, path=None, production_model='simple_sinusoid', cbm_model='Guttler15', box='Troposphere',
               hemisphere='north', sampler=None, burnin=500, production=1000, params=None, low_bounds=None,
               up_bounds=None, mf=None, oversample=1008, burnin_time=2000, verbose=False):
     """
@@ -1571,31 +1576,22 @@ def fit_event(year, event=None, path=None, production_model='simple_sinusoid', c
     if not mf:
         mf = MultiFitter()
     cbm = ticktack.load_presaved_model(cbm_model, production_rate_units='atoms/cm^2/s')
-    if event:
-        file_names = get_data(event=event)
-        print("Retrieving data...")
-        for file in tqdm(file_names):
-            file_name = 'data/datasets/' + event + '/' + file
+    file_names = get_data(path=path)
+    print("Retrieving data...")
+    for file_name in tqdm(file_names):
+        if 'SH' in file_name:
+            sf = SingleFitter(cbm, cbm_model, box=box, hemisphere='south')
+            if verbose:
+                with open('data_log.txt', 'a') as f:
+                    f.write("%s: Hemisphere South," % file_name)
+        else:
             sf = SingleFitter(cbm, cbm_model, box=box, hemisphere=hemisphere)
-            sf.load_data(os.path.join(os.path.dirname(__file__), file_name), oversample=oversample,
-                         burnin_time=burnin_time)
-            sf.compile_production_model(model=production_model)
-            mf.add_SingleFitter(sf)
-    elif path:
-        file_names = get_data(path=path)
-        print("Retrieving data...")
-        for file_name in tqdm(file_names):
-            if 'SH' in file_name:
-                sf = SingleFitter(cbm, cbm_model, box=box, hemisphere='south')
-                if verbose:
-                    print("South")
-            else:
-                sf = SingleFitter(cbm, cbm_model, box=box, hemisphere=hemisphere)
-                if verbose:
-                    print(hemisphere)
-            sf.load_data(path + '/' + file_name, oversample=oversample, burnin_time=burnin_time, verbose=verbose)
-            sf.compile_production_model(model=production_model)
-            mf.add_SingleFitter(sf)
+            if verbose:
+                with open('data_log.txt', 'a') as f:
+                    f.write("%s: Hemisphere North," % file_name)
+        sf.load_data(path + '/' + file_name, oversample=oversample, burnin_time=burnin_time, verbose=verbose)
+        sf.compile_production_model(model=production_model)
+        mf.add_SingleFitter(sf)
     mf.compile()
     if not sampler:
         return mf
