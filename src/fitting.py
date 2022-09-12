@@ -394,7 +394,8 @@ class SingleFitter(CarbonFitter):
         self.steady_state_box = self.steady_state_y0[self.box_idx]
         self.adaptive = adaptive
 
-    def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4):
+    def load_data(self, file_name, oversample=1008, burnin_oversample=1, burnin_time=2000, num_offset=4,
+        verbose=False):
         """
         Loads d14c data from a csv file.
         Parameters
@@ -426,10 +427,16 @@ class SingleFitter(CarbonFitter):
                                            (self.annual.size + 1) * self.oversample)
         if self.hemisphere == 'north':
             self.growth = self.get_growth_vector("april-september")
+            if verbose:
+                print('Growth april-september')
         else:
             self.growth = self.get_growth_vector("october-march")
+            if verbose:
+                print('Growth october-march')
         try:
             self.growth = self.get_growth_vector(data["growth_season"][0])
+            if verbose:
+                print('Custom Growth Season')
         except:
             pass
 
