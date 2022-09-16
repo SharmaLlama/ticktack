@@ -383,11 +383,13 @@ class SingleFitter(CarbonFitter):
                 if (node.get_hemisphere() == self.hemisphere) & (node.get_name() == self.box):
                     self.box_idx = i
         elif cbm_model == "Miyake17":
-            self.steady_state_production = 1.8
+            # self.steady_state_production = 1.8
+            self.steady_state_production = 1.76
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
         elif cbm_model == "Guttler15":
-            self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
+            # self.steady_state_production = self.cbm.equilibrate(target_C_14=target_C_14)
+            self.steady_state_production = 1.76
             self.steady_state_y0 = self.cbm.equilibrate(production_rate=self.steady_state_production)
             self.box_idx = 1
 
