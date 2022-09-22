@@ -231,7 +231,7 @@ class CarbonFitter:
 
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None,
                              colors=None, alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12,
-                             tick_font_size=8, max_ticks=10, legend=True):
+                             tick_font_size=8, max_ticks=10, legend=True, truth=None):
         """
        Overplots posterior surfaces from multiple chains.
         Parameters
@@ -283,7 +283,7 @@ class CarbonFitter:
         if plot_dists:
             fig = c.plotter.plot_distributions(figsize=figsize, legend=legend)
         else:
-            fig = c.plotter.plot(figsize=figsize, legend=legend)
+            fig = c.plotter.plot(figsize=figsize, legend=legend, truth=truth)
         plt.suptitle(title)
         plt.tight_layout()
         return fig
