@@ -229,14 +229,14 @@
       
       
         <label class="md-nav__link" for="__nav_2">
-          Fitting a Carbon Box Model
+          Tutorials
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" aria-label="Fitting a Carbon Box Model" data-md-level="1">
+      <nav class="md-nav" aria-label="Tutorials" data-md-level="1">
         <label class="md-nav__title" for="__nav_2">
           <span class="md-nav__icon md-icon"></span>
-          Fitting a Carbon Box Model
+          Tutorials
         </label>
         <ul class="md-nav__list" data-md-scrollfix>
           
@@ -246,8 +246,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../notebooks/01_Injection_Recovery_ControlPoints/" class="md-nav__link">
-        Nonparametric Inference using Control Points
+      <a href="../notebooks/01_Fitting/" class="md-nav__link">
+        Fitting with ticktack and emcee
       </a>
     </li>
   
@@ -260,8 +260,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../notebooks/02_Fitting/" class="md-nav__link">
-        Tutorial on fitting with ticktack and emcee
+      <a href="../notebooks/02_MultiFitter/" class="md-nav__link">
+        Fitting multiple datasets using MultiFitter
       </a>
     </li>
   
@@ -274,8 +274,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../notebooks/03_MultiFitter/" class="md-nav__link">
-        Tutorial on fitting multiple datasets using MultiFitter
+      <a href="../notebooks/03_InverseSolver/" class="md-nav__link">
+        Fitting a single dataset using Inverse Solver
       </a>
     </li>
   
@@ -288,22 +288,22 @@
   
   
     <li class="md-nav__item">
-      <a href="../notebooks/04_InverseSolver/" class="md-nav__link">
-        Tutorial on fitting single dataset using Inverse Solver
-      </a>
-    </li>
-  
-
-            
-          
-            
-              
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../notebooks/05_Fitting_Flat/" class="md-nav__link">
+      <a href="../notebooks/04_Fitting_Flat/" class="md-nav__link">
         Fitting with flat production and constant sampling
+      </a>
+    </li>
+  
+
+            
+          
+            
+              
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../notebooks/05_Injection_Recovery_ControlPoints/" class="md-nav__link">
+        Nonparametric Inference using Control Points
       </a>
     </li>
   
@@ -796,7 +796,7 @@
 
 
 <h2 id="ticktack.fitting.fit_event" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">fit_event</span><span class="p">(</span><span class="n">year</span><span class="p">,</span> <span class="n">event</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">production_model</span><span class="o">=</span><span class="s1">&#39;simple_sinusoid&#39;</span><span class="p">,</span> <span class="n">cbm_model</span><span class="o">=</span><span class="s1">&#39;Guttler15&#39;</span><span class="p">,</span> <span class="n">box</span><span class="o">=</span><span class="s1">&#39;Troposphere&#39;</span><span class="p">,</span> <span class="n">hemisphere</span><span class="o">=</span><span class="s1">&#39;north&#39;</span><span class="p">,</span> <span class="n">sampler</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">burnin</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span> <span class="n">production</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">low_bounds</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">up_bounds</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">mf</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">oversample</span><span class="o">=</span><span class="mi">1008</span><span class="p">,</span> <span class="n">burnin_time</span><span class="o">=</span><span class="mi">2000</span><span class="p">)</span></code>
+<code class="highlight language-python"><span class="n">fit_event</span><span class="p">(</span><span class="n">year</span><span class="p">,</span> <span class="n">path</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">production_model</span><span class="o">=</span><span class="s1">&#39;simple_sinusoid&#39;</span><span class="p">,</span> <span class="n">cbm_model</span><span class="o">=</span><span class="s1">&#39;Guttler15&#39;</span><span class="p">,</span> <span class="n">box</span><span class="o">=</span><span class="s1">&#39;Troposphere&#39;</span><span class="p">,</span> <span class="n">hemisphere</span><span class="o">=</span><span class="s1">&#39;north&#39;</span><span class="p">,</span> <span class="n">sampler</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">burnin</span><span class="o">=</span><span class="mi">500</span><span class="p">,</span> <span class="n">production</span><span class="o">=</span><span class="mi">1000</span><span class="p">,</span> <span class="n">params</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">low_bounds</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">up_bounds</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">mf</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">oversample</span><span class="o">=</span><span class="mi">1008</span><span class="p">,</span> <span class="n">burnin_time</span><span class="o">=</span><span class="mi">2000</span><span class="p">,</span> <span class="n">verbose</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
 
 </h2>
 
