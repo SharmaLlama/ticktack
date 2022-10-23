@@ -147,11 +147,14 @@ class CarbonFitter:
             c.configure(spacing=0.0, usetex=False, label_font_size=label_font_size, tick_font_size=tick_font_size,
                         diagonal_tick_labels=False, )
             fig = c.plotter.plot(figsize=figsize)
+            
         if mle:
             MLE = []
             for lst in c.analysis.get_summary().values():
                 MLE.append(lst[1])
-            return MLE
+            return fig, MLE
+        else:
+            return fig
 
     def correlation_plot(self, array, figsize=10, square_size=100):
         """
