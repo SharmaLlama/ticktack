@@ -47,7 +47,7 @@ Because tree-rings can be assigned single-year dates by the science of dendrochr
 Not only is this useful for archaeology, but also for astrophysics and geophysics: this calibration curve encodes a history of the cosmic ray flux at Earth. And it contains surprises: single-year spikes in radiocarbon production, equivalent to several years' worth arriving at once, called 'Miyake events' after their discovery by @miyake12. These occur every thousand years or so, and have been used to date to single-year precision archaeological finds as significant as the first European presence in the Americas [@Kuitems2021]. The most widely accepted hypothesis is that these are the result of extreme solar particle events [@usoskin2013; @usoskin2021], orders of magnitude bigger than the largest ever observed in the instrumental era [@Cliver2022], but considerable uncertainty remains as to their origin and detailed physics.
 
 <!-- describe how you need to model the carbon cycle -->
-When radioarbon is produced, it filters through the entire Earth system, through the atmosphere, into the oceans, and into the biosphere. To quantitatively model tree-ring radiocarbon time series, both to infer long-term trends in cosmic radiation and the parameters of these Miyake events, it is therefore necessary to model the entire global carbon cycle. This is usually done with carbon box models (CBMs), in which the global carbon distribution is partitioned into discrete reservoirs (e.g. the stratosphere, troposphere, surface and deep oceans, long and short lived biota, etc), and modelled as a system of ordinary diffusion equations (ODEs) with linear couplings between reservoirs - a vectorised diffusion equation with a time-varying production term. Data are usually represented in terms of ΔC$^{14}$, or fractional difference in radiocarbon content relative to a standard, and we usually want to infer a parametric or nonparametric reconstruction of the production term with analytic or (preferably) Bayesian methods.
+When radioarbon is produced, it filters through the entire Earth system, through the atmosphere, into the oceans, and into the biosphere. To quantitatively model tree-ring radiocarbon time series, both to infer long-term trends in cosmic radiation and the parameters of these Miyake events, it is therefore necessary to model the entire global carbon cycle. This is usually done with carbon box models (CBMs) [@dorman2004], in which the global carbon distribution is partitioned into discrete reservoirs (e.g. the stratosphere, troposphere, surface and deep oceans, long and short lived biota, etc), and modelled as a system of ordinary diffusion equations (ODEs) with linear couplings between reservoirs - a vectorised diffusion equation with a time-varying production term. Data are usually represented in terms of ΔC$^{14}$, or fractional difference in radiocarbon content relative to a standard, and we usually want to infer a parametric or nonparametric reconstruction of the production term with analytic or (preferably) Bayesian methods.
 <!-- alternative carbon box models: not open source -->
 A number of implementations of such models exist [@guttler15; @miyake17; @buntgen18; @brehm21], but not only are these all closed-source codes, but also make different physical and computational assumptions so that results are not straightforwardly reproducible and comparable.
 
@@ -82,9 +82,9 @@ In the accompanying [documentation](https://sharmallama.github.io/ticktack), we 
 - control points
  -->
 
-Figures produced by the single-dataset tutorial are shown in Figure \autoref{fig1}. 
+Figures produced by the single-dataset tutorial are shown in \autoref{fig1}. 
 
-![Cornerplot of posterior samples [@chainconsumer] (left) and predictive posterior draws overlaid on data. \label{fig1}](joss_figure.png)
+![Left: Cornerplot of posterior samples [@chainconsumer]. Right: Predictive posterior draws for a super-Gaussian spike with sinusoidal 11-year solar cycle, overlaid on the original 774 CE discovery data from @miyake12. \label{fig1}](joss_figure.png)
 
 # Acknowledgements
 
