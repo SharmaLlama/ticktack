@@ -69,10 +69,10 @@ We have applied this in our team's accompanying science paper (Zhang et al, 2022
 In the accompanying [documentation](https://sharmallama.github.io/ticktack), we have several worked examples of applications of `ticktack` to real and simulated data:
 
 - [fitting a single dataset with `emcee`](https://sharmallama.github.io/ticktack/notebooks/01_Fitting/);
-- [fitting multiple datasets with a `MultiFitter`](https://sharmallama.github.io/ticktack/notebooks/02_MultiFitter/) 
-- [nonparametric direct inversion of the ODE](https://sharmallama.github.io/ticktack/notebooks/03_InverseSolver/)
-- [flat production](https://sharmallama.github.io/ticktack/notebooks/04_Fitting_Flat/), and 
-- [nonparametric inference using a Gaussian process](https://sharmallama.github.io/ticktack/notebooks/05_Injection_Recovery_ControlPoints/)
+- [fitting multiple datasets with a `MultiFitter`](https://sharmallama.github.io/ticktack/notebooks/02_MultiFitter/);
+- [nonparametric direct inversion of the ODE](https://sharmallama.github.io/ticktack/notebooks/03_InverseSolver/) using an analytic solution;
+- [flat production](https://sharmallama.github.io/ticktack/notebooks/04_Fitting_Flat/), illustrating optional features of the ODE solver;
+- [nonparametric inference using a Gaussian process](https://sharmallama.github.io/ticktack/notebooks/05_Injection_Recovery_ControlPoints/), using a GP to interpolate a more robust nonparametric inversion of the data.
 
 <!-- briefly summarize tutorials:
 - single fitter
@@ -82,9 +82,9 @@ In the accompanying [documentation](https://sharmallama.github.io/ticktack), we 
 - control points
  -->
 
-Figures produced by the single-dataset tutorial are shown in Figure \autoref{fig1}.
+Figures produced by the single-dataset tutorial are shown in Figure \autoref{fig1}. 
 
-![Cornerplot of posterior samples [@chainconsumer] (left) and posterior draws overlaid on data. \label{fig1}](joss_figure.png)
+![Cornerplot of posterior samples [@chainconsumer] (left) and predictive posterior draws overlaid on data. \label{fig1}](joss_figure.png)
 
 # Acknowledgements
 

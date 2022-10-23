@@ -11,10 +11,10 @@ site_name: ticktack for Radiocarbon Box Modelling
 nav:
     - Home: index.md
     - 'Fitting a Carbon Box Model':
-        - fitting-with-cps: notebooks/01_Injection_Recovery_ControlPoints.ipynb
-        - fitting-with-mcmc-sf: notebooks/02_Fitting.ipynb
-        - fitting-with-mcmc-mf: notebooks/03_MultiFitter.ipynb
-        - fitting-with-is: notebooks/04_InverseSolver.ipynb
+        - fitting-with-mcmc-sf: notebooks/01_Fitting.ipynb
+        - fitting-with-mcmc-mf: notebooks/02_MultiFitter.ipynb
+        - fitting-with-is: notebooks/03_InverseSolver.ipynb
+        - fitting-with-cps: notebooks/04_Injection_Recovery_ControlPoints.ipynb
         - fitting-with-constant-samples: notebooks/05_Fitting_Flat.ipynb
     - Box API Docs: box_api.md
     - Flow API Docs: flow_api.md
