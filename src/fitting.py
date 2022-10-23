@@ -110,7 +110,7 @@ class CarbonFitter:
     #     return results
 
     def chain_summary(self, chain, walkers, figsize=(10, 10), labels=None, plot_dist=False, test_convergence=False,
-                      label_font_size=8, tick_font_size=8, mle=False):
+                      label_font_size=8, tick_font_size=8, mle=False,usetex=False):
         """
         Runs convergence tests and plots posteriors from a MCMC chain.
         Parameters
@@ -144,8 +144,8 @@ class CarbonFitter:
         if plot_dist:
             fig = c.plotter.plot_distributions(figsize=figsize)
         else:
-            c.configure(spacing=0.0, usetex=False, label_font_size=label_font_size, tick_font_size=tick_font_size,
-                        diagonal_tick_labels=False, )
+            c.configure(spacing=0.0, usetex=usetex, label_font_size=label_font_size, tick_font_size=tick_font_size,
+                        diagonal_tick_labels=False)
             fig = c.plotter.plot(figsize=figsize)
             
         if mle:
@@ -234,7 +234,7 @@ class CarbonFitter:
 
     def plot_multiple_chains(self, chains, walker, figsize=(10, 10), title=None, params_labels=None, labels=None,
                              colors=None, alpha=0.5, linewidths=None, plot_dists=False, label_font_size=12,
-                             tick_font_size=8, max_ticks=10, legend=True, truth=None):
+                             tick_font_size=8, max_ticks=10, legend=True, usetex=False, truth=None):
         """
        Overplots posterior surfaces from multiple chains.
         Parameters
@@ -278,7 +278,7 @@ class CarbonFitter:
         else:
             for i in range(len(chains)):
                 c.add_chain(chains[i], walkers=walker, parameters=params_labels)
-        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=False,
+        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=usetex,
                     label_font_size=label_font_size, tick_font_size=tick_font_size, diagonal_tick_labels=False,
                     max_ticks=max_ticks)
         # legend_kwargs={"fontsize":14}
