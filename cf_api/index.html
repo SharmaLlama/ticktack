@@ -229,14 +229,14 @@
       
       
         <label class="md-nav__link" for="__nav_2">
-          Tutorials
+          Fitting a Carbon Box Model
           <span class="md-nav__icon md-icon"></span>
         </label>
       
-      <nav class="md-nav" aria-label="Tutorials" data-md-level="1">
+      <nav class="md-nav" aria-label="Fitting a Carbon Box Model" data-md-level="1">
         <label class="md-nav__title" for="__nav_2">
           <span class="md-nav__icon md-icon"></span>
-          Tutorials
+          Fitting a Carbon Box Model
         </label>
         <ul class="md-nav__list" data-md-scrollfix>
           
@@ -288,8 +288,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../notebooks/04_Fitting_Flat/" class="md-nav__link">
-        Fitting with flat production and constant sampling
+      <a href="../notebooks/04_Injection_Recovery_ControlPoints/" class="md-nav__link">
+        Nonparametric Inference using Control Points
       </a>
     </li>
   
@@ -302,8 +302,8 @@
   
   
     <li class="md-nav__item">
-      <a href="../notebooks/05_Injection_Recovery_ControlPoints/" class="md-nav__link">
-        Nonparametric Inference using Control Points
+      <a href="../notebooks/05_Fitting_Flat.ipynb" class="md-nav__link">
+        fitting-with-constant-samples
       </a>
     </li>
   
@@ -714,7 +714,7 @@
 
 
 <h2 id="ticktack.fitting.CarbonFitter.chain_summary" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">chain_summary</span><span class="p">(</span><span class="n">chain</span><span class="p">,</span> <span class="n">walkers</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dist</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">test_convergence</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">label_font_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">tick_font_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">mle</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
+<code class="highlight language-python"><span class="n">chain_summary</span><span class="p">(</span><span class="n">chain</span><span class="p">,</span> <span class="n">walkers</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dist</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">test_convergence</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">label_font_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">tick_font_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">mle</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">usetex</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
 
 </h2>
 
@@ -876,7 +876,7 @@ and the posterior surface</p></td>
 
 
 <h2 id="ticktack.fitting.CarbonFitter.plot_multiple_chains" class="doc doc-heading">
-<code class="highlight language-python"><span class="n">plot_multiple_chains</span><span class="p">(</span><span class="n">chains</span><span class="p">,</span> <span class="n">walker</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">title</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">params_labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">colors</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">linewidths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dists</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">label_font_size</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span> <span class="n">tick_font_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">max_ticks</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">legend</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">truth</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+<code class="highlight language-python"><span class="n">plot_multiple_chains</span><span class="p">(</span><span class="n">chains</span><span class="p">,</span> <span class="n">walker</span><span class="p">,</span> <span class="n">figsize</span><span class="o">=</span><span class="p">(</span><span class="mi">10</span><span class="p">,</span> <span class="mi">10</span><span class="p">),</span> <span class="n">title</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">params_labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">colors</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">alpha</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">linewidths</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">plot_dists</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">label_font_size</span><span class="o">=</span><span class="mi">12</span><span class="p">,</span> <span class="n">tick_font_size</span><span class="o">=</span><span class="mi">8</span><span class="p">,</span> <span class="n">max_ticks</span><span class="o">=</span><span class="mi">10</span><span class="p">,</span> <span class="n">legend</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">usetex</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">truth</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
 
 </h2>
 
