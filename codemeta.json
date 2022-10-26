@@ -1,0 +1,44 @@
+{
+  "@context": "https://raw.githubusercontent.com/codemeta/codemeta/master/codemeta.jsonld",
+  "@type": "Code",
+  "author": [
+    {
+      "@id": "0000-0001-8125-6494",
+      "@type": "Person",
+      "email": "j.dennis@uq.edu.au",
+      "name": "Jordan Dennis",
+      "affiliation": "University of Queensland"
+    },
+    {
+      "@id": "0000-0002-0906-8533",
+      "@type": "Person",
+      "email": "qingyuan.zhang@uq.edu.au",
+      "name": "qingyuanzhang3",
+      "affiliation": "University of Queensland"
+    },
+    {
+      "@id": "0000-0002-0771-8109",
+      "@type": "Person",
+      "email": "u.sharma@uq.net.au",
+      "name": "Utkarsh Sharma",
+      "affiliation": "University of Queensland"
+    },
+    {
+      "@id": "0000-0003-2595-9114",
+      "@type": "Person",
+      "email": "b.pope@uq.edu.au",
+      "name": "Benjamin Pope",
+      "affiliation": "University of Queensland"
+    }
+  ],
+  "identifier": "",
+  "codeRepository": "https://github.com/sharmaLlama/ticktack",
+  "datePublished": "2022-10-26",
+  "dateModified": "2022-10-26",
+  "dateCreated": "2022-10-26",
+  "description": "A Python/Jax based open source package for carbon box modelling of radiocarbon time series.",
+  "keywords": "radiocarbon, Miyake Events, carbon cycle, atmospheric carbon, solar flares",
+  "license": "MIT",
+  "title": "ticktack",
+  "version": "v1.0.0"
+}
