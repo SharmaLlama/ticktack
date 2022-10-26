@@ -62,7 +62,7 @@ We introduce a new open-source alternative, `ticktack`, written in Python and us
 We include preset configurations of the `CarbonBoxModel` that implement reservoirs and coefficients for the 11-box @guttler15, 4-box @miyake17, and 22-box @buntgen18 and @brehm21 models.
 
 <!-- cite Zhang et al 2022 -->
-We have applied this in our team's accompanying science paper (Zhang et al, 2022) to systematically analyse all extant public data on the six known Miyake events, finding no relationship to the solar cycle, and hints of a nonzero duration in several of the events. Moreover we hope that our toolkit will be adopted more widely in the radiocarbon community, and encourage other developers to contribute to the ongoing development of this open-source code base.
+We have applied this in our team's accompanying science paper [@zhang2022] to systematically analyse all extant public data on the six known Miyake events, finding no relationship to the solar cycle, and hints of a nonzero duration in several of the events. Moreover we hope that our toolkit will be adopted more widely in the radiocarbon community, and encourage other developers to contribute to the ongoing development of this open-source code base.
 
 # Documentation & Case Studies
 
