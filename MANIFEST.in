@@ -1,3 +1,5 @@
 exclude notebooks/*
 exclude src/model_builder.py
 exclude docs/*
+
+include requirements.txt

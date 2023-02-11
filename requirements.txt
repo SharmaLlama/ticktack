@@ -6,7 +6,7 @@ matplotlib
 diffrax
 chainconsumer
 emcee
-h5py==3.3.0
+h5py
 hdfdict
 pandas
 scipy
