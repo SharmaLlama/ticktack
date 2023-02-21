@@ -1,0 +1,3 @@
+Brehm21_AlpineLarch.csv; Brehm N., et al., 2021, Nature Geoscience, 14, 10; https://www.nature.com/articles/s41561-020-00674-0
+Brehm21_GermanOak.csv; Brehm N., et al., 2021, Nature Geoscience, 14, 10; https://www.nature.com/articles/s41561-020-00674-0
+Brehm21_USABristlecone.csv; Brehm N., et al., 2021, Nature Geoscience, 14, 10; https://www.nature.com/articles/s41561-020-00674-0
