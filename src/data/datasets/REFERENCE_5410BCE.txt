@@ -1,0 +1,3 @@
+Miyake21_Bristlecone.csv; Miyake F., et al., 2021, Geophys. Res. Lett., 48, e93419; https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2021GL093419
+Miyake21_Finland.csv; Miyake F., et al., 2021, Geophys. Res. Lett., 48, e93419; https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2021GL093419
+Miyake21_Switzerland.csv; Miyake F., et al., 2021, Geophys. Res. Lett., 48, e93419; https://agupubs.onlinelibrary.wiley.com/doi/10.1029/2021GL093419

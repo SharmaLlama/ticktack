@@ -1,0 +1,11 @@
+Büntgen18_CHN01.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_GER01.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_GER07.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_JAP01.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_MON03.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_RUS04.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_SWE05.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_USA02.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_USA11.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Büntgen18_USA18.csv; Büntgen U., et al., 2018, Nature Communications, 9, 3605; https://www.nature.com/articles/s41467-018-06036-0
+Scifo19_Oak.csv; Scifo A., et al., 2019, Scientific Reports, 9, 17056; https://www.nature.com/articles/s41598-019-53296-x
