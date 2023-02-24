@@ -21,10 +21,6 @@ To install from source: clone [this git repo](https://github.com/SharmaLlama/tic
 
 `python setup.py install`
 
-## Running the Unit-Tests
-
-To run the unit tests simply type `pytest`. `pytest` will automatically detect the tests in the `tests` directory and run them on your machine.
-
 ## License
 
 We invite anyone interested to use and modify this code under a MIT license.
