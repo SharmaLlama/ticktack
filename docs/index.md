@@ -21,6 +21,10 @@ To install from source: clone [this git repo](https://github.com/SharmaLlama/tic
 
 `python setup.py install`
 
+## Running the Tests
+
+To run the tests just type `pytest`. `pytest` will automatically detect the tests.
+
 ## License
 
 We invite anyone interested to use and modify this code under a MIT license.
