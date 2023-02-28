@@ -1,3 +1,5 @@
 
 notebooks/.ipynb_checkpoints/01_Injection_Recovery_ControlPoints-checkpoint.ipynb
 docs/notebooks/.ipynb_checkpoints/02_Fitting-checkpoint.ipynb
+build
+dist

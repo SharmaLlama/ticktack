@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 import os
 import codecs
 import re
@@ -28,14 +28,14 @@ with open('requirements.txt') as f:
 tests_require = ['pytest', 'pytest-cov', 'pytest-remotedata']
 
 setup(name='ticktack',
-      version=find_version("src", "__init__.py"),
+      version=find_version("src", "ticktack", "__init__.py"),
       description='Python package to build a carbon box model.',
       long_description=long_description,
       author='Utkarsh Sharma',
       author_email='u.sharma@uqconnect.edu.au',
       url='https://github.com/SharmaLlama/ticktack',
-      package_dir={'ticktack': 'src'},
-      packages=['ticktack'],
+      package_dir={'': 'src'},
+      packages=find_packages(where='src'),
       package_data={'': ['data/*.hd5', 'data/datasets/660BCE-Ew/*.csv', 'data/datasets/660BCE-Lw/*.csv',
                          'data/datasets/775AD-early-N/*.csv', 'data/datasets/775AD-early-S/*.csv',
                          'data/datasets/775AD-late-N/*.csv',
@@ -46,6 +46,7 @@ setup(name='ticktack',
       include_package_data=True,
       install_requires=install_requires,
       tests_require=tests_require,
+      extras_require={'tests': tests_require},
       license='MIT',
       classifiers=[
           "Topic :: Scientific/Engineering",
