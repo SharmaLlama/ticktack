@@ -14,3 +14,4 @@ seaborn
 tqdm
 jax-cosmo
 tinygp
+pytest
