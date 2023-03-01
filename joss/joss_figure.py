@@ -5,6 +5,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.lines import Line2D
+from chainconsumer import ChainConsumer
 
 cbm = ticktack.load_presaved_model("Guttler15", production_rate_units = "atoms/cm^2/s")
 
