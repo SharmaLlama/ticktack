@@ -16,14 +16,15 @@ nav:
         - fitting-with-is: notebooks/03_InverseSolver.ipynb
         - fitting-with-cps: notebooks/04_Injection_Recovery_ControlPoints.ipynb
         - fitting-with-constant-samples: notebooks/05_Fitting_Flat.ipynb
-    - Box API Docs: box_api.md
-    - Flow API Docs: flow_api.md
-    - CarbonBox API Docs: cbm_api.md
-    - CarbonFitter API Docs: cf_api.md
-    - SingleFitter API Docs: sf_api.md
-    - MultiFitter API Docs: mf_api.md
-    - ticktack API Docs: ticktack_api.md
-    - fitting API Docs: fitting_api.md
+    - 'API Docs':
+      - Box API Docs: box_api.md
+      - Flow API Docs: flow_api.md
+      - CarbonBox API Docs: cbm_api.md
+      - CarbonFitter API Docs: cf_api.md
+      - SingleFitter API Docs: sf_api.md
+      - MultiFitter API Docs: mf_api.md
+      - ticktack API Docs: ticktack_api.md
+      - fitting API Docs: fitting_api.md
 
 theme:
   name: "material"
