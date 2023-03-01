@@ -23,7 +23,7 @@ To install from source: clone [this git repo](https://github.com/SharmaLlama/tic
 
 ## Running the Tests
 
-To run the tests just type `pytest`. `pytest` will automatically detect the tests.
+To run the tests just, install [pytest](https://docs.pytest.org/en/7.1.x/contents.html), navigate to the `tests/` directory, and type `pytest` at the command line. `pytest` will automatically detect the tests.
 
 ## License
 
