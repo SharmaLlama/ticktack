@@ -179,7 +179,7 @@ class CarbonFitter:
         y = (n - 1) - np.tile(np.arange(n), n)
 
         plot_grid = plt.GridSpec(1, 10, hspace=0.2, wspace=0.1)
-        ax = plt.subplots(figsize=(figsize, figsize))
+        ax0 = plt.subplots(figsize=(figsize, figsize))
         ax = plt.subplot(plot_grid[:, :-1])
 
         n_colors = 256
