@@ -6,8 +6,8 @@ from scipy.interpolate import interp1d
 from functools import partial
 from jax import jit
 import jax.numpy as jnp
-import warnings
-warnings.filterwarnings("ignore")
+# import warnings
+# warnings.filterwarnings("ignore")
 
 
 class Resampler:
