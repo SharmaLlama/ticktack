@@ -29,7 +29,6 @@ import seaborn as sns
 
 import os
 
-mpl.style.use('seaborn-colorblind')
 
 
 class CarbonFitter:
