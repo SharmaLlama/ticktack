@@ -25,6 +25,7 @@ nav:
       - MultiFitter API Docs: mf_api.md
       - ticktack API Docs: ticktack_api.md
       - fitting API Docs: fitting_api.md
+    - Datasets: data.md
 
 theme:
   name: "material"

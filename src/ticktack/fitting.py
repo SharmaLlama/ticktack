@@ -29,7 +29,6 @@ import seaborn as sns
 
 import os
 
-mpl.style.use('seaborn-colorblind')
 
 
 class CarbonFitter:
@@ -180,7 +179,7 @@ class CarbonFitter:
         y = (n - 1) - np.tile(np.arange(n), n)
 
         plot_grid = plt.GridSpec(1, 10, hspace=0.2, wspace=0.1)
-        ax = plt.subplots(figsize=(figsize, figsize))
+        ax0 = plt.subplots(figsize=(figsize, figsize))
         ax = plt.subplot(plot_grid[:, :-1])
 
         n_colors = 256
@@ -306,14 +305,14 @@ class CarbonFitter:
             for param in chain[idx]:
                 ax1.plot(sf.time_data_fine, sf.dc14_fine(params=param), alpha=alpha, color=colors[i])
 
-            ax1.set_ylabel("$\Delta^{14}$C (‰)")
+            ax1.set_ylabel(r"$\Delta^{14}$C (‰)")
             fig.subplots_adjust(hspace=0.05)
 
             for param in chain[idx][:size2]:
                 ax2.plot(sf.time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
 
         ax1.errorbar(sf.time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=3,
-                     markersize=6.5, elinewidth=3, label="average $\Delta^{14}$C")
+                     markersize=6.5, elinewidth=3, label=r"average $\Delta^{14}$C")
 
         if directory_path:
             file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
@@ -324,7 +323,7 @@ class CarbonFitter:
                 ax1.plot(sf.time_data, sf.d14c_data, "o", color="gray", alpha=0.2)
 
         custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=models[i]) for i in range(len(cbm_models))]
-        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label=r"average $\Delta^{14}$C"))
         ax1.legend(handles=custom_lines)
         ax2.set_ylim(1, 10)
         ax2.set_xlabel("Calendar Year (CE)")
@@ -1639,7 +1638,7 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
             ax2.plot(time_data_fine, sf.production(sf.time_data_fine, *param), alpha=alpha2, color=colors[i])
 
     ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize, markersize=markersize,
-                 elinewidth=elinewidth, label="average $\Delta^{14}$C")
+                 elinewidth=elinewidth, label=r"average $\Delta^{14}$C")
 
     if directory_path:
         file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
@@ -1661,9 +1660,9 @@ def plot_samples(average_path=None, chains_path=None, cbm_models=None, cbm_label
         else:
             custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in
                             range(len(cbm_models))]
-        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label=r"average $\Delta^{14}$C"))
         ax1.legend(handles=custom_lines)
-        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        ax1.set_ylabel(r"$\Delta^{14}$C (‰)")
         if sf.start < 0:
             ax2.set_xlabel("Year (BCE)");
         else:
@@ -1748,7 +1747,7 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
             ax2.plot(control_points_time_fine, sf.interp_gp(sf.control_points_time_fine, soln), color=colors[i])
 
     ax1.errorbar(time_data, sf.d14c_data, yerr=sf.d14c_data_error, fmt="ok", capsize=capsize,
-                 markersize=markersize, elinewidth=elinewidth, label="average $\Delta^{14}$C")
+                 markersize=markersize, elinewidth=elinewidth, label=r"average $\Delta^{14}$C")
 
     if directory_path:
         file_names = [f for f in os.listdir(directory_path) if os.path.isfile(os.path.join(directory_path, f))]
@@ -1771,9 +1770,9 @@ def plot_ControlPoints(average_path=None, soln_path=None, chain_path=None, cbm_m
         else:
             custom_lines = [Line2D([0], [0], color=colors[i], lw=1.5, label=cbm_models[i]) for i in
                             range(len(cbm_models))]
-        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label="average $\Delta^{14}$C"))
+        custom_lines.append(Line2D([0], [0], color="k", marker="o", lw=1.5, label=r"average $\Delta^{14}$C"))
         ax1.legend(handles=custom_lines, frameon=False)
-        ax1.set_ylabel("$\Delta^{14}$C (‰)")
+        ax1.set_ylabel(r"$\Delta^{14}$C (‰)")
         if sf.start < 0:
             ax2.set_xlabel("Year (BCE)");
         else:
