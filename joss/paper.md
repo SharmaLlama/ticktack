@@ -27,7 +27,7 @@ affiliations:
    index: 1
  - name: Centre for Astrophysics, University of Southern Queensland, West Street, Toowoomba, QLD 4350, Australia
    index: 2
-date: 14 February 2022
+date: 20 March 2023
 bibliography: paper.bib
 ---
 
