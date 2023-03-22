@@ -2,6 +2,7 @@
 [![integration](https://github.com/SharmaLlama/ticktack/actions/workflows/tests.yml/badge.svg)](https://github.com/SharmaLlama/ticktack/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyPI version](https://badge.fury.io/py/ticktack.svg)](https://badge.fury.io/py/ticktack)
+[![DOI](https://zenodo.org/badge/386222197.svg)](https://zenodo.org/badge/latestdoi/386222197)
 [![DOI](https://joss.theoj.org/papers/10.21105/joss.05084/status.svg)](https://doi.org/10.21105/joss.05084)
 
 A lightweight, open-source carbon box modelling library in Python, adapted for modelling tree ring radiocarbon time series.
