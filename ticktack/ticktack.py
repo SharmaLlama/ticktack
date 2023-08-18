@@ -1,23 +1,16 @@
 import jax.numpy as jnp
-from jax import jit
+import jax.lax as jl
 import jax
-from functools import partial
-from jax.config import config
 
-from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 import diffrax
 
 import h5py
 import hdfdict
 
-import scipy as scipy
-import scipy.integrate
-import scipy.optimize
-
 import pkg_resources
-from typing import Union
+import typing 
 
-config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
+jax.config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
 
 class Box:
     """ Box class which represents each individual box in the carbon model."""
