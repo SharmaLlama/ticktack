@@ -7,7 +7,6 @@ diffrax
 chainconsumer
 emcee
 h5py
-hdfdict
 pandas
 scipy
 seaborn

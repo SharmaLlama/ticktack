@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+import numpy as np # for the non-jitted functions
 from jax import jit
 import jax
 from functools import partial
@@ -8,7 +9,6 @@ from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 import diffrax
 
 import h5py
-import hdfdict
 
 import scipy as scipy
 import scipy.integrate
@@ -18,6 +18,29 @@ import pkg_resources
 from typing import Union
 
 config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
+
+
+
+def sanitize(data):
+    # if dtype is 'object', decode, otherwise don't
+    if data.dtype == 'object':
+        return np.array([x.decode('utf-8') for x in data])
+    else:
+        return data
+    
+def hdfload(filename):
+    # load the data
+    with h5py.File(filename, 'r') as f:
+        # Get a list of the group names
+        group_names = list(f.keys())
+        data = {key: np.array(sanitize(f[key])) for key in group_names}
+    return data 
+
+def hdfsave(filename, data):
+    with h5py.File(filename, 'w') as f:
+        for key in data.keys():
+            f.create_dataset(key, data=data[key])
+    return None
 
 class Box:
     """ Box class which represents each individual box in the carbon model."""
@@ -592,8 +615,6 @@ def save_model(carbon_box_model, filename):
     ValueError
         If the first parameter is not of type CarbonBoxModel.
     """
-    file = h5py.File(filename, 'a')
-    file.clear()  # overwrites if it already exists
     if isinstance(carbon_box_model, CarbonBoxModel):
         metadata = {'fluxes': carbon_box_model.get_converted_fluxes(),
                     'reservoir content': carbon_box_model.get_reservoir_contents(),
@@ -602,9 +623,9 @@ def save_model(carbon_box_model, filename):
                     'hemispheres': [i.get_hemisphere() for i in carbon_box_model.get_nodes_objects()]}
     else:
         raise ValueError("parameter is not a Carbon Box Model!")
+    
+    hdfsave(filename, metadata)
 
-    hdfdict.dump(metadata, file)
-    file.close()
 
 
 def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr'):
@@ -629,14 +650,14 @@ def load_model(filename, production_rate_units='kg/yr', flow_rate_units='Gt/yr')
     """
 
     file = h5py.File(filename, 'r')
-    metadata = dict(hdfdict.load(file))
+    metadata = hdfload(filename)
     nodes = metadata['nodes']
     hemispheres = metadata['hemispheres']
     carbon_box_model = CarbonBoxModel(production_rate_units=production_rate_units, flow_rate_units=flow_rate_units)
     box_object_list = []
     for j in range(len(nodes)):
-        box_object_list.append(Box(nodes[j].decode("utf-8"), float(metadata['reservoir content'][0][j]),
-                                   float(metadata['production coefficients'][j]), hemispheres[j].decode("utf-8")))
+        box_object_list.append(Box(nodes[j], float(metadata['reservoir content'][0][j]),
+                                   float(metadata['production coefficients'][j]), hemispheres[j]))
 
     carbon_box_model.add_nodes(box_object_list)
 
