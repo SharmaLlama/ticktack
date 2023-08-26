@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "ticktack"
+version = "0.2.0"
+description = "Bespoke and extensible statistical analysis of carbon box models."
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.9,<4.0"
+jax = "^0.4.14"
+equinox = "^0.10.11"
+numpyro = "^0.12.1"
+hdfdict = "^0.3.1"
+h5py = "^3.9.0"
+tinygp = "^0.2.3"
+matplotlib = "^3.7.2"
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.7.0"
+pytest = "^7.4.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

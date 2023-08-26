@@ -104,42 +104,6 @@ class HemisphericBox(Box):
         if hemisphere not in ['north', 'south']:
             raise ValueError("The hemisphere must be 'noth' or 'south'.")
 
-    def get_hemisphere(self):
-        """ Getter method for the hemisphere of the Box Class.
-        Returns
-        -------
-        str
-            hemisphere the box is in.
-        """
-        return self._hemisphere
-
-    def get_name(self):
-        """ Getter method for the name of the Box Class.
-        Returns
-        -------
-        str
-            name of the Box.
-        """
-        return self._name
-
-    def get_reservoir_content(self):
-        """ Getter method for the reservoir content of the Box Class.
-        Returns
-        -------
-        float
-            reservoir content of the box.
-        """
-        return self._reservoir
-
-    def get_production(self):
-        """ Getter method for the production coefficient of the Box Class.
-        Returns
-        -------
-         float
-            production coefficient of the box.
-        """
-        return self._production
-
     def __str__(self):
         """ Overrides the default string behaviour to display a user-friendly output.
         Returns
