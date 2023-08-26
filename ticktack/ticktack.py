@@ -38,17 +38,30 @@ class CarbonBoxModel(equinox.module.Module):
         The carbon flow between the boxes.
     """
     size: int
-    boxes: typing.List[str]
+    boxes: dict
     transfer_matrix: jax.Array
 
     def __init__(self, boxes: typing.List[str]) -> CarbonBoxModel:
         self.size: int = len(boxes)
-        self.boxes: typing.List[str] = boxes
+        self.boxes: typing.List[str] = dict(zip(boxes, range(self.size))) 
         transfer_matrix: jax.Array = jnp.zeros((self.size, self.size), float)
 
-    def add_flow()
-    def add_box
+    def add_flow(
+            self, 
+            source: str, 
+            destination: str, 
+            c14_flux_kg: float
+        ) -> CarbonBoxModel:
+        """
 
+        """
+        flow = lambda carbon_box_model: 
+            carbon_box_model.transfer_matrix[
+                carbon_box_model.boxes[source], 
+                carbon_box_model.boxes[destination]
+            ]
+        return equinox.tree_at(flow, self, c14_flux)
+        
 class Hemisphere(equinox.Module):
     pass
 
