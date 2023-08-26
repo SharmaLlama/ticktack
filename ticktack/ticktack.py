@@ -1,6 +1,12 @@
+from __future__ import annotations 
+
+import typing
+
 import jax.numpy as jnp
 import jax.lax as jl
 import jax
+
+import equinox
 
 import diffrax
 
@@ -10,31 +16,93 @@ import hdfdict
 import pkg_resources
 import typing 
 
-jax.config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
+jax.config.update("jax_enable_x64", True) 
 
-class Box:
-    """ Box class which represents each individual box in the carbon model."""
+class CarbonBoxModel(equinox.module.Module):
+    """
+    A simplified model of the earth that represents the carbon cycle 
+    as a system of coupled reservoirs called boxes. C14 decays with a 
+    constant half-life in all the boxes, but is transferred between them
+    at varying rates. Typically, we are interested in the C14 content of 
+    boxes that are easy to measure such as trees/flora. 
 
-    def __init__(self, name, reservoir, production_coefficient=0.0, hemisphere='None'):
-        """ init method to initialise object.
+    Internally, 
+
+    Parameters
+    ----------
+    reservoirs: List[str]
+        The names of the reservoirs.
+    transfer_matrix: jax.Array
+        The carbon flow between the boxes.
+    """
+    reservoirs: typing.List[str]
+    transfer_matrix: jax.Array
+
+    def __init__(self, reservoirs: typing.List[str]) -> CarbonBoxModel:
+
+    def add_flow()
+    def add_box
+
+class Box(equinox.Module):
+    pass 
+
+class HemisphericBox(Box):
+    """
+    Box class which represents each individual box in the carbon model.
+    A Box is a reservoir that stores C14. C14 can leave the box by 
+    decaying or by transferring to another box. For example, if Trees are 
+    one Box then C14 entering the Soil Box represents leaves shedding.
+    C14 can be produced in a box based on a generalised production function. 
+    
+    Parameters:
+    -----------
+    name: str
+        The name of the reservoir.
+    c14_content: float
+        The amount of C14 in the reservoir. Our model assumes SI units of
+        mass, i.e. kg.
+    production_coefficient: float
+        The proportion of the total production that occurs within this Box.
+        The production coefficient should be between 0 and 1.
+    """
+    name: str
+    c14_content: float
+    production_coefficient: float
+
+    def __init__(
+            self: Box, 
+            name: str, 
+            c14_content: float, 
+            hemisphere: str,
+            production_coefficient: float = 0.0
+        ) -> Box:
+        """ 
         Parameters
         ----------
         name : str
-            name of the Box.
-        reservoir : float
-            reservoir content of the Box.
+            The name of the Box.
+        c14_content : float
+            The quantity of C14 in the Box in kg. This must be a non-negative 
+            number.
         production_coefficient : float, optional
-            production coefficient of the Box. Defaults to 0.
-        hemisphere : str, optional
-            hemisphere that this box is in. Defaults to None (i.e. this box is not part of an inter-hemispheric system).
+            The proportion of the total production occuring in the Box.
+            The production is restricted to the range [0,1]
+        hemisphere : str 
+            The hemisphere that this box is in. Defaults to None 
         """
-        self._name = name
-        self._reservoir = reservoir
-        self._production = production_coefficient
-        self._hemisphere = hemisphere
-        assert reservoir >= 0
-        assert production_coefficient >= 0
-        assert hemisphere in ['None', 'north', 'south']
+        self.name = name
+        self.c14_content = c14_content 
+        self.production_coefficient = production_coefficient
+        self.hemisphere = hemisphere
+
+        if c14_content < 0:
+            raise ValueError("The c14_content must be non-negative.")
+
+        if not 0.0 < production_coefficient < 1.0:
+            raise ValueError("The production_coefficient must be in [0,1].")
+
+        if hemisphere not in ['north', 'south']:
+            raise ValueError("The hemisphere must be 'noth' or 'south'.")
 
     def get_hemisphere(self):
         """ Getter method for the hemisphere of the Box Class.
