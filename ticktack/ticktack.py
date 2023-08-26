@@ -30,23 +30,29 @@ class CarbonBoxModel(equinox.module.Module):
 
     Parameters
     ----------
-    reservoirs: List[str]
+    size: int
+        The number of boxes.
+    boxes: List[str]
         The names of the reservoirs.
     transfer_matrix: jax.Array
         The carbon flow between the boxes.
     """
-    reservoirs: typing.List[str]
+    size: int
+    boxes: typing.List[str]
     transfer_matrix: jax.Array
 
-    def __init__(self, reservoirs: typing.List[str]) -> CarbonBoxModel:
+    def __init__(self, boxes: typing.List[str]) -> CarbonBoxModel:
+        self.size: int = len(boxes)
+        self.boxes: typing.List[str] = boxes
+        transfer_matrix: jax.Array = jnp.zeros((self.size, self.size), float)
 
     def add_flow()
     def add_box
 
-class Box(equinox.Module):
-    pass 
+class Hemisphere(equinox.Module):
+    pass
 
-class HemisphericBox(Box):
+class Box(Box):
     """
     Box class which represents each individual box in the carbon model.
     A Box is a reservoir that stores C14. C14 can leave the box by 
@@ -104,9 +110,19 @@ class HemisphericBox(Box):
         if hemisphere not in ['north', 'south']:
             raise ValueError("The hemisphere must be 'noth' or 'south'.")
 
-
 class Flow:
-    """ Flow class to imitate the fluxes between boxes in a carbon box model."""
+    """ 
+    Flow class to imitate the fluxes between boxes in a carbon box model.
+
+    Parameters:
+    -----------
+    source: Box
+        The reservoir where the C14 originates.
+    destination: Box 
+    """
+    source: Box
+    destination: Box
+    c14_flux: float 
 
     def __init__(self, source, destination, flux_rate):
         """ Init method to initialise object.
