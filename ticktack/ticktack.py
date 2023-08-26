@@ -104,16 +104,6 @@ class HemisphericBox(Box):
         if hemisphere not in ['north', 'south']:
             raise ValueError("The hemisphere must be 'noth' or 'south'.")
 
-    def __str__(self):
-        """ Overrides the default string behaviour to display a user-friendly output.
-        Returns
-        -------
-        str
-            string representation of the Box Object returned in the following form -
-            name:reservoir size:production coefficient
-        """
-        return self._name + ":" + str(self._reservoir) + ":" + str(self._production)
-
 
 class Flow:
     """ Flow class to imitate the fluxes between boxes in a carbon box model."""
