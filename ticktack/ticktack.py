@@ -1,22 +1,14 @@
 from __future__ import annotations 
-
 import typing
-
 import jax.numpy as jnp
 import jax.lax as jl
 import jax
-
 import equinox
-
 import diffrax
-
 import h5py
 import hdfdict
-
-import pkg_resources
 import typing 
 
-jax.config.update("jax_enable_x64", True) 
 
 class CarbonBoxModel(equinox.module.Module):
     """
