@@ -1,4 +1,5 @@
 import typing
+import collections
 import jax.numpy as jnp
 import jax.lax as jl
 import jax
@@ -26,12 +27,22 @@ class CarbonBoxModel(object):
         The carbon flow between the boxes.
     """
     size: int
-    boxes: dict
+    boxes: collections.OrderedDict
     transfer_matrix: jax.Array
 
-    def __init__(self, boxes: typing.List[str]) -> CarbonBoxModel:
+    def __init__(self, boxes: typing.List[str]):
+        """
+        Create a carbon box model.
+
+        Parameters
+        ----------
+        boxes: typing.List[str]
+            The names of the boxes in the model.
+        """
         self.size: int = len(boxes)
-        self.boxes: typing.List[str] = dict(zip(boxes, range(self.size))) 
+        self.boxes: typing.Dict[str, int] = collections.OrderedDict(
+            zip(boxes, range(self.size))
+        ) 
         transfer_matrix: jax.Array = jnp.zeros((self.size, self.size), float)
 
     def add_flow(
@@ -39,20 +50,16 @@ class CarbonBoxModel(object):
             source: str, 
             destination: str, 
             c14_flux_kg: float
-        ) -> CarbonBoxModel:
-        """
+        ) -> None:
+        carbon_box_model.transfer_matrix[
+            carbon_box_model.boxes[source], 
+            carbon_box_model.boxes[destination]
+        ]: float = c14_flux_kg
 
-        """
-        flow = lambda carbon_box_model: 
-            carbon_box_model.transfer_matrix[
-                carbon_box_model.boxes[source], 
-                carbon_box_model.boxes[destination]
-            ]
-        return equinox.tree_at(flow, self, c14_flux)
+    def tree_flatten(self) -> jax.Array:
+        return (self.transfer_matrix, self.boxes)
+
         
-class Hemisphere(equinox.Module):
-    pass
-
 class Box(Box):
     """
     Box class which represents each individual box in the carbon model.
