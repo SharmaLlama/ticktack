@@ -1,16 +1,12 @@
-from __future__ import annotations 
 import typing
 import jax.numpy as jnp
 import jax.lax as jl
 import jax
-import equinox
-import diffrax
 import h5py
 import hdfdict
-import typing 
 
-
-class CarbonBoxModel(equinox.module.Module):
+@register_pytree_node_class
+class CarbonBoxModel(object):
     """
     A simplified model of the earth that represents the carbon cycle 
     as a system of coupled reservoirs called boxes. C14 decays with a 
