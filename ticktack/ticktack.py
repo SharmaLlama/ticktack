@@ -1,3 +1,4 @@
+from __future__ import annotations 
 import typing
 import collections
 import jax.numpy as jnp
@@ -6,7 +7,7 @@ import jax
 import h5py
 import hdfdict
 
-@register_pytree_node_class
+@jax.tree_util.register_pytree_node_class
 class CarbonBoxModel(object):
     """
     A simplified model of the earth that represents the carbon cycle 
@@ -30,7 +31,11 @@ class CarbonBoxModel(object):
     boxes: collections.OrderedDict
     transfer_matrix: jax.Array
 
-    def __init__(self, boxes: typing.List[str]):
+    def __init__(
+            self, 
+            boxes: typing.List[str], 
+            transfer_matrix: jax.Array = None
+        ) -> :
         """
         Create a carbon box model.
 
@@ -38,12 +43,15 @@ class CarbonBoxModel(object):
         ----------
         boxes: typing.List[str]
             The names of the boxes in the model.
+        transfer_matrix: jax.Array
+            Defines the time evolution of the system. This is a matrix
+            representation of a weighted simply-connected graph.
         """
         self.size: int = len(boxes)
         self.boxes: typing.Dict[str, int] = collections.OrderedDict(
             zip(boxes, range(self.size))
         ) 
-        transfer_matrix: jax.Array = jnp.zeros((self.size, self.size), float)
+        transfer_matrix: jax.Array = transfer_matrix 
 
     def add_flow(
             self, 
@@ -51,13 +59,49 @@ class CarbonBoxModel(object):
             destination: str, 
             c14_flux_kg: float
         ) -> None:
+        """
+        Insert a flow into the transfer matrix in place.
+
+        Parameters
+        ----------
+        source: str
+            The name of the source box.
+        destination: str 
+            The name of the destination box.
+        c14_flux_kg: float
+            The flux to insert into the transfer matrix.
+        """
         carbon_box_model.transfer_matrix[
             carbon_box_model.boxes[source], 
             carbon_box_model.boxes[destination]
         ]: float = c14_flux_kg
 
-    def tree_flatten(self) -> jax.Array:
-        return (self.transfer_matrix, self.boxes)
+    def tree_flatten(self) -> typing.Tuple[jax.Array,str]:
+        """
+        A JAX internal API required to use CarbonBoxModel in a compiled 
+        context.
+
+        Returns
+        -------
+        typing.Tuple[jax.Array,str]
+            The transfer matrix and the names of the boxes in order.
+        """
+        return (self.transfer_matrix, self.boxes.keys)
+
+    @classmethod
+    def tree_unflatten(cls: type, boxes: typing.List[str], transfer_matrix: jax.Array):
+        """
+        A JAX internal API required to use CarbonBoxModel in a compiled
+        context.
+
+        Parameters
+        ----------
+        boxes: typing.List[str]
+            The names of the carbon reservoirs.
+        transfer_matrix: jax.Array
+            The transfer rule between the boxes.
+        """
+        return cls(boxes, transfer_matrix)
 
         
 class Box(Box):
