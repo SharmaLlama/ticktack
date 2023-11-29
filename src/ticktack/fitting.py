@@ -21,8 +21,9 @@ from astropy.table import Table
 from tqdm import tqdm
 import emcee
 
-from chainconsumer import ChainConsumer
+from chainconsumer import ChainConsumer, Chain, PlotConfig
 
+import pandas as pd
 import seaborn as sns
 # from jaxns.nested_sampler import NestedSampler
 # from jaxns.prior_transforms import PriorChain, UniformPrior
@@ -127,9 +128,10 @@ class CarbonFitter:
              and the posterior surface
         """
         if labels:
-            c = ChainConsumer().add_chain(chain, walkers=walkers, parameters=labels)
-        else:
-            c = ChainConsumer().add_chain(chain, walkers=walkers)
+                newchain = Chain(samples=pd.DataFrame(chain, columns=labels), walkers=walkers,name='Chain 1')
+                c = ChainConsumer().add_chain(newchain)
+        # else:
+        #     c = ChainConsumer().add_chain(chain, walkers=walkers)
 
         if test_convergence:
             gelman_rubin_converged = c.diagnostic.gelman_rubin()
@@ -143,8 +145,8 @@ class CarbonFitter:
         if plot_dist:
             fig = c.plotter.plot_distributions(figsize=figsize)
         else:
-            c.configure(spacing=0.0, usetex=usetex, label_font_size=label_font_size, tick_font_size=tick_font_size,
-                        diagonal_tick_labels=False)
+            c.set_plot_config(PlotConfig(spacing=0.0, usetex=usetex, label_font_size=label_font_size, tick_font_size=tick_font_size,
+                        diagonal_tick_labels=False))
             fig = c.plotter.plot(figsize=figsize)
             
         if mle:
@@ -273,13 +275,16 @@ class CarbonFitter:
         if labels:
             assert len(labels) == len(chains), "labels must have the same length as chains"
             for i in range(len(chains)):
-                c.add_chain(chains[i], walkers=walker, parameters=params_labels, name=labels[i])
+                newchain = Chain(samples=pd.DataFrame(chains[i], columns=params_labels), walkers=walker,name='Chain %d' % i)
+                c = ChainConsumer().add_chain(newchain)
         else:
-            for i in range(len(chains)):
-                c.add_chain(chains[i], walkers=walker, parameters=params_labels)
-        c.configure(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=usetex,
+            assert len(chains) >= 0, "chains must have labels"
+        # else:
+        #     for i in range(len(chains)):
+        #         c.add_chain(chains[i], walkers=walker, parameters=params_labels)
+        c.set_plot_config(PlotConfig(colors=colors, shade_alpha=alpha, linewidths=linewidths, usetex=usetex,
                     label_font_size=label_font_size, tick_font_size=tick_font_size, diagonal_tick_labels=False,
-                    max_ticks=max_ticks)
+                    max_ticks=max_ticks))
         # legend_kwargs={"fontsize":14}
 
         if plot_dists:
