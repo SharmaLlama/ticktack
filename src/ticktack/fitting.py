@@ -431,7 +431,7 @@ class SingleFitter(CarbonFitter):
         self.burnin_oversample = burnin_oversample
         self.offset = jnp.mean(self.d14c_data[:num_offset])
         self.annual = jnp.arange(self.start, self.end + 1)
-        self.mask = jnp.in1d(self.annual, self.time_data)
+        self.mask = jnp.isin(self.annual, self.time_data)
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                            (self.annual.size + 1) * self.oversample)
         try:
@@ -1149,7 +1149,7 @@ class MultiFitter(CarbonFitter):
         self.time_data_fine = jnp.linspace(jnp.min(self.annual), jnp.max(self.annual) + 2,
                                            (self.annual.size + 1) * self.oversample)
         for sf in self.MultiFitter:
-            sf.multi_mask = jnp.in1d(self.annual, sf.time_data)
+            sf.multi_mask = jnp.isin(self.annual, sf.time_data)
         if self.production_model == 'control points':
             self.control_points_time = jnp.arange(self.start, self.end)
             self.production = self.multi_interp_gp

@@ -3,7 +3,6 @@ import numpy as np # for the non-jitted functions
 from jax import jit
 import jax
 from functools import partial
-from jax.config import config
 
 from jax.lax import cond, dynamic_update_slice, fori_loop, dynamic_slice
 import diffrax
@@ -17,7 +16,7 @@ import scipy.optimize
 import pkg_resources
 from typing import Union
 
-config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
+jax.config.update("jax_enable_x64", True) # run in 64 bit by default or else you will lack the dynamic range required
 
 
 
