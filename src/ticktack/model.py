@@ -40,7 +40,7 @@ from .constants import (
 )
 from .data import Dataset, TreeRingSeries
 from .production import ProductionTerm
-from .solvers import AbstractSolver, ExactLinearSolver
+from .solvers import AbstractSolver, ExactLinearSolver, ModaxSolver
 
 __all__ = [
     "RadiocarbonModel",
@@ -216,8 +216,82 @@ class RadiocarbonModel(zdx.Base):
                 delta_lab=delta_lab,
             )
 
-        # Dataset: predict per series
+        # Dataset: single vectorized solver pass for ExactLinearSolver / DiffraxSolver
         dataset = dataset_or_series
+        if dataset.n_series == 0:
+            return jnp.zeros((0,), dtype=jnp.float64) if concat else ()
+
+        if not isinstance(self.solver, ModaxSolver):
+            m_max = max(int(s.sub_t_starts.shape[1]) for s in dataset.series)
+            ts_parts: list[jax.Array] = []
+            te_parts: list[jax.Array] = []
+            w_parts: list[jax.Array] = []
+            for s in dataset.series:
+                n_s, m_s = s.sub_t_starts.shape
+                w_s = jnp.broadcast_to(
+                    jnp.asarray(s.seasonal_weights.weights, dtype=jnp.float64),
+                    (n_s, m_s),
+                )
+                if m_s < m_max:
+                    pad_k = m_max - m_s
+                    ts_s = jnp.concatenate(
+                        [s.sub_t_starts, jnp.repeat(s.sub_t_starts[:, -1:], pad_k, axis=1)],
+                        axis=1,
+                    )
+                    te_s = jnp.concatenate(
+                        [s.sub_t_ends, jnp.repeat(s.sub_t_ends[:, -1:], pad_k, axis=1)],
+                        axis=1,
+                    )
+                    w_s = jnp.concatenate(
+                        [w_s, jnp.zeros((n_s, pad_k), dtype=jnp.float64)],
+                        axis=1,
+                    )
+                else:
+                    ts_s = s.sub_t_starts
+                    te_s = s.sub_t_ends
+                ts_parts.append(ts_s)
+                te_parts.append(te_s)
+                w_parts.append(w_s)
+
+            all_ts = jnp.concatenate(ts_parts, axis=0)
+            all_te = jnp.concatenate(te_parts, axis=0)
+            all_w = jnp.concatenate(w_parts, axis=0)
+            box_indices_flat = jnp.array(
+                [
+                    self._box_index_for_series(s)
+                    for s in dataset.series
+                    for _ in range(s.n_obs)
+                ],
+                dtype=jnp.int32,
+            )
+            delta_lab_flat: ArrayLike
+            if offsets is not None:
+                off_arr = jnp.asarray(offsets, dtype=jnp.float64).reshape(-1)
+                delta_lab_flat = off_arr[dataset.series_indices]
+            else:
+                delta_lab_flat = 0.0
+
+            pred_flat = self.solver.predict_d14c(
+                self.cbm,
+                self.production,
+                all_ts,
+                all_te,
+                sub_weights=all_w,
+                box_indices=box_indices_flat,
+                q_std=self.q_std,
+                alpha_unit=self.alpha_unit,
+                delta_global=delta_global,
+                delta_lab=delta_lab_flat,
+            )
+            if concat:
+                return pred_flat
+            slices: list[jax.Array] = []
+            cursor = 0
+            for s in dataset.series:
+                slices.append(pred_flat[cursor : cursor + s.n_obs])
+                cursor += s.n_obs
+            return tuple(slices)
+
         per_series: list[jax.Array] = []
         for s_idx, series in enumerate(dataset.series):
             box_idx = self._box_index_for_series(series)

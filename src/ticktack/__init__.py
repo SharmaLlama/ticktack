@@ -62,6 +62,8 @@ from .cbm import (  # noqa: E402
     CarbonBoxModel,
     EffectiveCBM,
     FixedCBM,
+    OpenCBM,
+    ReversibleCBM,
     Topology,
 )
 
@@ -113,6 +115,7 @@ from .linear import (  # noqa: E402
     canonical_pod_modes,
     harmonic_solar_design,
     hierarchical_offset_design,
+    kalman_gp_marginal,
     posterior,
     project_causal_gp,
     solin_sarkka_basis,
@@ -185,6 +188,8 @@ __all__ = [
     "CarbonBoxModel",
     "EffectiveCBM",
     "FixedCBM",
+    "OpenCBM",
+    "ReversibleCBM",
     "Topology",
     # presets
     "load_preset",
@@ -223,6 +228,7 @@ __all__ = [
     "canonical_pod_modes",
     "harmonic_solar_design",
     "hierarchical_offset_design",
+    "kalman_gp_marginal",
     "posterior",
     "project_causal_gp",
     "solin_sarkka_basis",
