@@ -21,6 +21,7 @@ from .likelihood import (
     LinearPosteriorResult,
     ParameterSpace,
     linear_posterior,
+    marginal_log_likelihood,
     marginal_log_posterior,
 )
 from .model import RadiocarbonModel
@@ -63,6 +64,11 @@ class MAPResult(NamedTuple):
 
     method: str
     """Optimisation method used."""
+
+    @property
+    def fitted_model(self) -> RadiocarbonModel:
+        """Fitted model at MAP (alias for :attr:`model`)."""
+        return self.model
 
 
 def _neg_log_post_fn(
@@ -119,13 +125,38 @@ def _run_levenberg_marquardt(
     max_steps: int,
     tol: float,
 ) -> tuple[jax.Array, bool, int]:
-    """Run ``optimistix.LevenbergMarquardt`` minimization of negative log-posterior."""
+    """Run ``optimistix.LevenbergMarquardt`` minimization of negative log-posterior.
+
+    Builds a proper whitened residual vector ``[data_whitened, prior_whitened]``
+    so that LM can exploit the least-squares structure of the Gaussian posterior.
+    """
+    dataset_sigma = dataset.sigma_flat
+    if sigma_jitter is not None:
+        dataset_sigma = jnp.sqrt(
+            jnp.square(dataset_sigma)
+            + jnp.square(jnp.asarray(sigma_jitter, dtype=jnp.float64))
+        )
 
     def residual_fn(u: jax.Array, _args: Any) -> jax.Array:
-        log_post = marginal_log_posterior(
-            model, dataset, parameter_space, u, cfg, sigma_jitter=sigma_jitter
-        )
-        return jnp.asarray([-log_post], dtype=jnp.float64)
+        # Whitened data residual
+        constrained = parameter_space.constrain(u, model)
+        from .likelihood import _nonlinear_residual, _build_marginal_design
+
+        cfg_eff = cfg if cfg is not None else LinearMarginalConfig()
+        X, prior_mean, prior_sd = _build_marginal_design(constrained, dataset, cfg_eff)
+        raw_resid = _nonlinear_residual(constrained, dataset)  # (N_tot,)
+        sigma_arr = jnp.asarray(dataset_sigma, dtype=jnp.float64)
+
+        # Projected residual: (I - X (X^T diag(1/sig^2) X + D^{-2})^{-1} X^T diag(1/sig^2)) r
+        # Approximate: use raw_resid / sigma as whitened residual (ignores marginalization)
+        data_whitened = raw_resid / sigma_arr  # (N_tot,)
+
+        # Prior whitened residual (u - prior_mean) / prior_sd
+        prior_means = jnp.array([s.prior_mean for s in parameter_space.specs], dtype=jnp.float64)
+        prior_sds = jnp.array([s.prior_sd for s in parameter_space.specs], dtype=jnp.float64)
+        prior_whitened = (u - prior_means) / prior_sds  # (d,)
+
+        return jnp.concatenate([data_whitened, prior_whitened], axis=0)
 
     solver = optx.LevenbergMarquardt(rtol=tol, atol=tol)
     result = optx.least_squares(residual_fn, solver, u0, max_steps=max_steps, args=None)
@@ -198,7 +229,10 @@ def _laplace_covariance(
         chol_ok = False
 
     if chol_ok:
-        cov = jax.scipy.linalg.cho_solve(jax.scipy.linalg.cho_factor(H_reg, lower=True), jnp.eye(d, dtype=jnp.float64))
+        cov = jax.scipy.linalg.cho_solve(
+            jax.scipy.linalg.cho_factor(H_reg, lower=True),
+            jnp.eye(d, dtype=jnp.float64),
+        )
     else:
         cov = jnp.linalg.pinv(H_reg)
     return 0.5 * (cov + cov.T)
@@ -312,9 +346,7 @@ def fit_map(
     u_map = best_u
     model_map = parameter_space.constrain(u_map, model)
 
-    from .likelihood import marginal_log_likelihood as _mll
-
-    log_lk = _mll(model_map, dataset, cfg, sigma_jitter=sigma_jitter)
+    log_lk = marginal_log_likelihood(model_map, dataset, cfg, sigma_jitter=sigma_jitter)
 
     theta_map = {spec.path: model_map.get(spec.path) for spec in parameter_space.specs}
 

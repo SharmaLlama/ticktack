@@ -14,7 +14,7 @@ wrapping a :class:`~ticktack.cbm.CarbonBoxModel`, a
   :class:`~ticktack.data.Dataset`, routing each series to its hemisphere's
   tropospheric box and optionally concatenating the per-series arrays.
 * ``predict_fine(t_eval, ...)``: ``Delta14C`` on a continuous time grid.
-* ``impulse_response(t_lag, ...)`` / ``transfer_function(omegas, ...)``:
+* ``impulse_response(t_lag, ...)`` / ``transfer_function(omegas, ...)``:\
   system identification helpers.
 * Explicit fluence reporting helpers: ``fluence_atoms_cm2(fluence)`` and
   ``fluence_q0_years(fluence, ...)``.
@@ -143,26 +143,26 @@ class RadiocarbonModel(zdx.Base):
     # Prediction on Dataset / TreeRingSeries
     # ------------------------------------------------------------------
 
-    def _box_index_for_series(self, series: TreeRingSeries) -> int | None:
+    def _box_index_for_series(self, series: TreeRingSeries) -> int:
         """Return the box index to project onto for a given series.
 
-        Uses ``series.box_name`` to look up in the CBM topology; falls back
-        to the first tropospheric box for the matching hemisphere.
+        Delegates to :meth:`~ticktack.cbm.CarbonBoxModel.box_index` with the
+        series hemisphere so that CBMs with duplicate box names (e.g. two
+        ``"Troposphere"`` boxes in Brehm21) route each series to the correct
+        hemisphere's box rather than always returning the first match.
         """
-        topo = self.cbm.topology
-        # Try exact box name first
-        if series.box_name in topo.box_names:
-            return topo.box_names.index(series.box_name)
-        # Fall back to hemisphere tropospheric box
-        hemi = series.hemisphere
-        for i, (name, h) in enumerate(zip(topo.box_names, topo.hemispheres)):
-            if h == hemi and "trop" in name.lower():
-                return i
-        # Return first tropospheric box if hemisphere match fails
-        trop_idx = topo.trop_box_indices
-        if len(trop_idx) > 0:
-            return int(trop_idx[0])
-        return None
+        # Use CBM's own box_index to handle duplicate names with hemisphere routing
+        try:
+            return self.cbm.box_index(series.box_name, hemisphere=series.hemisphere)
+        except (ValueError, AttributeError, KeyError):
+            pass
+        # Fallback: first tropospheric box for the hemisphere
+        try:
+            return self.cbm.box_index("Troposphere", hemisphere=series.hemisphere)
+        except (ValueError, AttributeError, KeyError):
+            pass
+        trop_idx = self.cbm.topology.trop_box_indices
+        return int(trop_idx[0]) if len(trop_idx) > 0 else 0
 
     def predict_d14c(
         self,
@@ -290,9 +290,12 @@ class RadiocarbonModel(zdx.Base):
         """Resolve a box index by hemisphere when ``box`` is ``None``."""
         if box is not None:
             return int(box)
+        try:
+            return self.cbm.box_index("Troposphere", hemisphere=hemisphere)
+        except (ValueError, AttributeError, KeyError):
+            pass
         topo = self.cbm.topology
-        hemi_map = {"north": "north", "south": "south"}
-        h = hemi_map.get(hemisphere, "north")
+        h = str(hemisphere)
         for i, (name, bh) in enumerate(zip(topo.box_names, topo.hemispheres)):
             if bh == h and "trop" in name.lower():
                 return i
@@ -327,7 +330,7 @@ class RadiocarbonModel(zdx.Base):
         jax.Array
             Shape ``(len(t_lag),)`` impulse response values.
         """
-        A = self.cbm.matrix_A(q_std=self.q_std, alpha_unit=self.alpha_unit)
+        A = self.cbm.matrix_A()
         b = self.cbm.production_vector()
         box_idx = self._resolve_box(box, hemisphere)
         tau_arr = jnp.asarray(t_lag, dtype=jnp.float64)
@@ -363,7 +366,7 @@ class RadiocarbonModel(zdx.Base):
             Complex ``float64`` array of shape ``(len(omegas),)`` with the
             Fourier transform of the causal impulse response.
         """
-        A = self.cbm.matrix_A(q_std=self.q_std, alpha_unit=self.alpha_unit)
+        A = self.cbm.matrix_A()
         b = self.cbm.production_vector()
         box_idx = self._resolve_box(box, hemisphere)
         w_arr = jnp.asarray(omegas, dtype=jnp.float64).reshape(-1)

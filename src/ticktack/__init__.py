@@ -13,7 +13,7 @@ inferring cosmic-ray production histories from tree-ring radiocarbon data.
     production = tt.ProductionSum(
         steady = tt.SteadyProduction(),
         spike  = tt.MiyakeSpike(t_start=774.3, duration=1.0, fluence=120.0),
-        solar  = tt.HarmonicSolar.from_polar(amplitude=0.0, phase=0.0),
+        solar  = tt.HarmonicSolar.from_polar(amplitudes=0.0, phases=0.0),
     )
     model = tt.RadiocarbonModel(cbm, production)
 

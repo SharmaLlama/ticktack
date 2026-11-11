@@ -10,7 +10,7 @@ Implements the full Bayesian parameter infrastructure:
 2. :class:`LinearMarginalConfig` + :func:`marginal_log_likelihood` /
    :func:`marginal_log_posterior`: analytically marginalise baseline
    ``Delta14C`` offsets, harmonic solar quadrature coefficients, and causal
-   Solin–Särkkä POD ``GPProduction`` modes in closed form via
+   Solin-Sarkkae POD ``GPProduction`` modes in closed form via
    :mod:`ticktack.linear`, completely eliminating v1's 4-point
    ``mean(y[:4])`` boundary bias.
 
@@ -189,8 +189,9 @@ class ParameterSpace(eqx.Module):
     * :meth:`unconstrain`: ``RadiocarbonModel`` -> ``R^d`` (optimization space).
     * :meth:`apply_unconstrained`: evaluate any function ``f(model)`` in
       unconstrained space.
-    * :meth:`log_prior_unconstrained`: sum of ``N(0, 1)`` priors on ``u``
-      plus log-abs-det-Jacobians for change-of-variables.
+    * :meth:`log_prior_unconstrained`: sum of ``N(prior_mean, prior_sd^2)``
+      priors on ``u`` (Jacobians excluded by default to avoid density
+      normalization corruption in SMC).
     """
 
     specs: tuple[ParamSpec, ...] = eqx.field(static=True)
@@ -278,23 +279,25 @@ class ParameterSpace(eqx.Module):
         self,
         u_vec: ArrayLike,
         *,
-        include_jacobian: bool = True,
+        include_jacobian: bool = False,
     ) -> jax.Array:
-        """Sum of unconstrained log-prior densities (and optional log-Jacobian).
+        """Sum of unconstrained log-prior densities (without Jacobian by default).
 
         Parameters
         ----------
         u_vec : array-like
             Unconstrained parameter vector of shape ``(d,)``.
         include_jacobian : bool
-            When ``True`` (default), adds the log-abs-det-Jacobian for each
+            When ``True``, adds the log-abs-det-Jacobian for each
             non-identity bijector so the result is proportional to the density
-            in constrained space.
+            in constrained space.  Defaults to ``False`` to avoid corrupting
+            the SMC log-evidence estimator (the Jacobian changes the normalization
+            constant and makes the density not integrate to 1 in ``u`` space).
 
         Returns
         -------
         jax.Array
-            Scalar log-prior (or log-prior + log-Jacobian).
+            Scalar log-prior (without Jacobian by default).
         """
         u = jnp.asarray(u_vec, dtype=jnp.float64).reshape(-1)
         log_p = jnp.asarray(0.0, dtype=jnp.float64)
@@ -326,7 +329,7 @@ class LinearMarginalConfig(eqx.Module):
     * **LinearTrend slope** (``marginalise_trend``): when ``True``, the secular
       linear production drift slope is marginalised.
     * **GPProduction modes** (``marginalise_gp``): when ``True``, the causal
-      Solin–Särkkä spectral mode weights are marginalised exactly via
+      Solin-Sarkkae spectral mode weights are marginalised exactly via
       :func:`~ticktack.linear.project_causal_gp`.
     """
 
@@ -421,7 +424,8 @@ def _build_marginal_design(
     """
     cbm = model.cbm
     production = model.production
-    A = cbm.matrix_A(q_std=model.q_std, alpha_unit=model.alpha_unit)
+    # matrix_A() takes NO kwargs — it is a pure property of the CBM
+    A = cbm.matrix_A()
     b = cbm.production_vector()
 
     # Gather per-series observations
@@ -439,7 +443,7 @@ def _build_marginal_design(
     # Map each observation to its box's specific-activity ratio
     box_indices_flat = jnp.array(
         [
-            model._box_index_for_series(s) if model._box_index_for_series(s) is not None else 0
+            model._box_index_for_series(s)
             for s in dataset.series
             for _ in range(s.n_obs)
         ],
@@ -466,14 +470,12 @@ def _build_marginal_design(
         psd_parts.append(sd_off)
 
     elif cfg.offset_mode == "per_series":
-        H_off, mu_off, sd_off = hierarchical_offset_design(
-            series_idx,
-            n_series=n_series,
-            box_activity_ratios=obs_activity_ratios,
-            global_prior_mean=cfg.global_prior_mean,
-            global_prior_sd=cfg.global_prior_sd,
-            lab_prior_sd=0.0,  # No lab offset -> just per-series from hierarchical
-        )
+        # Independent per-series offsets: one column per series (identity design)
+        # Use one-hot encoding: each obs mapped to its series offset
+        idx = jnp.asarray(series_idx, dtype=jnp.int32).reshape(-1)
+        H_off = jax.nn.one_hot(idx, n_series, dtype=jnp.float64)
+        mu_off = jnp.full((n_series,), cfg.global_prior_mean, dtype=jnp.float64)
+        sd_off = jnp.full((n_series,), cfg.global_prior_sd, dtype=jnp.float64)
         design_cols.append(H_off)
         pmean_parts.append(mu_off)
         psd_parts.append(sd_off)
@@ -500,6 +502,11 @@ def _build_marginal_design(
             solar_col_parts = []
             for series in dataset.series:
                 box_idx = model._box_index_for_series(series)
+                # obs_scale = 1000 / (y_trop * m_rel[box_idx]) converts kg -> permil
+                # alpha_unit converts atoms/cm2/s -> kg/yr; pass as JAX expression
+                obs_scale_s = jnp.asarray(1000.0, dtype=jnp.float64) / (
+                    y_trop * m_rel[box_idx]
+                )
                 H_s = harmonic_solar_design(
                     A,
                     b,
@@ -507,10 +514,10 @@ def _build_marginal_design(
                     series.sub_t_starts,
                     series.sub_t_ends,
                     series.seasonal_weights.weights,
-                    alpha_unit=float(model.alpha_unit) / (y_trop * float(m_rel[box_idx])),
-                    t_ref=float(solar.t_ref),
+                    alpha_unit=model.alpha_unit,
+                    t_ref=solar.t_ref,
                     box_indices=box_idx,
-                    obs_scale=1.0,
+                    obs_scale=obs_scale_s,
                 )  # (N_r_s, 2*M)
                 solar_col_parts.append(H_s)
             H_solar = jnp.concatenate(solar_col_parts, axis=0)
@@ -524,15 +531,16 @@ def _build_marginal_design(
         for trend in trend_terms.values():
             if not isinstance(trend, LinearTrend):
                 continue
-            # Build trend column per observation
+            # Build trend column per observation using exact LTI ramp response
             trend_col_parts = []
             for series in dataset.series:
                 box_idx = model._box_index_for_series(series)
-                # Trend DeltaC contribution: slope * (t - t_ref) * (-A)^{-1} b projected to box
+                # Steady-state ramp response: slope * (-A)^{-1} b projected to box
                 inv_A_b = jnp.linalg.solve(-A, b)
                 scale_factor = model.alpha_unit * inv_A_b[box_idx] / (y_trop * m_rel[box_idx])
                 t_mid = 0.5 * (series.t_starts + series.t_ends)
-                col_s = (1000.0 * scale_factor * (t_mid - trend.t_ref))[:, None]
+                t_ref_val = jnp.asarray(trend.t_ref, dtype=jnp.float64)
+                col_s = (1000.0 * scale_factor * (t_mid - t_ref_val))[:, None]
                 trend_col_parts.append(col_s)
             H_trend = jnp.concatenate(trend_col_parts, axis=0)
             design_cols.append(H_trend)
@@ -544,29 +552,41 @@ def _build_marginal_design(
         for gp in gp_terms.values():
             if not isinstance(gp, GPProduction):
                 continue
-            # For each series, project causal GP basis onto observations
-            gp_col_parts = []
-            for series in dataset.series:
-                box_idx = model._box_index_for_series(series)
-                # project_causal_gp returns (N_r_s, r + r_hom) design matrix
-                H_gp_s = project_causal_gp(
-                    A=A,
-                    b=b,
-                    kernel=gp.kernel,
-                    t_starts=series.sub_t_starts,
-                    t_ends=series.sub_t_ends,
-                    sub_weights=series.seasonal_weights.weights,
-                    n_modes=cfg.n_gp_modes,
-                    alpha_unit=float(model.alpha_unit),
-                    box_indices=box_idx,
-                    obs_scale=1000.0 / (y_trop * float(m_rel[box_idx])),
-                )
-                gp_col_parts.append(H_gp_s)
-            H_gp = jnp.concatenate(gp_col_parts, axis=0)
-            r_total = H_gp.shape[1]
-            design_cols.append(H_gp)
-            pmean_parts.append(jnp.zeros(r_total, dtype=jnp.float64))
-            psd_parts.append(jnp.ones(r_total, dtype=jnp.float64))  # unit-normal modes
+            # Build all-series t_starts/t_ends and call project_causal_gp once
+            # across the full dataset to get a single (N_tot, r+n) design matrix.
+            all_t_starts = jnp.concatenate(
+                [s.sub_t_starts for s in dataset.series], axis=0
+            )
+            all_t_ends = jnp.concatenate(
+                [s.sub_t_ends for s in dataset.series], axis=0
+            )
+            all_weights = jnp.concatenate(
+                [s.seasonal_weights.weights for s in dataset.series], axis=0
+            )
+            # Per-observation box indices and obs_scales
+            all_box_idx = box_indices_flat  # (N_tot,)
+            all_obs_scale = jnp.asarray(1000.0, dtype=jnp.float64) / (
+                y_trop * m_rel[all_box_idx]
+            )
+
+            proj = project_causal_gp(
+                A=A,
+                b=b,
+                t_starts=all_t_starts,
+                t_ends=all_t_ends,
+                sub_weights=all_weights,
+                kernel=gp.kernel,
+                n_modes=cfg.n_gp_modes,
+                alpha_unit=model.alpha_unit,
+                box_indices=all_box_idx,
+                obs_scale=all_obs_scale,
+            )
+            if proj.whitened_design is not None:
+                H_gp = proj.whitened_design  # (N_tot, r + n_boxes)
+                r_total = H_gp.shape[1]
+                design_cols.append(H_gp)
+                pmean_parts.append(jnp.zeros(r_total, dtype=jnp.float64))
+                psd_parts.append(jnp.ones(r_total, dtype=jnp.float64))  # unit-normal modes
 
     if design_cols:
         X = jnp.concatenate(design_cols, axis=1)
@@ -587,27 +607,31 @@ def _nonlinear_residual(
     """Compute residual ``d - m_nonlinear`` where ``m_nonlinear`` is the nonlinear prediction.
 
     Uses only the nonlinear part of the production (MiyakeSpike, etc.) to
-    compute the trajectory, returning ``(N_tot,)`` residuals.
+    compute the trajectory, returning ``(N_tot,)`` residuals.  The solver's
+    ``predict_d14c`` already computes the Delta14C relative to steady-state,
+    so the residual is simply ``d_obs - nonlinear_model_prediction``.
     """
     nonlin_prod = _nonlinear_production(model.production)
-    if nonlin_prod is None:
-        # No nonlinear component: residual is just the data
-        return dataset.d14c_flat
 
     per_series_preds: list[jax.Array] = []
     for series in dataset.series:
         box_idx = model._box_index_for_series(series)
-        pred_s = model.solver.predict_d14c(
-            model.cbm,
-            nonlin_prod,
-            series.sub_t_starts,
-            series.sub_t_ends,
-            sub_weights=series.seasonal_weights.weights,
-            box_indices=box_idx,
-            q_std=model.q_std,
-            alpha_unit=model.alpha_unit,
-        )
+        if nonlin_prod is None:
+            # No nonlinear component: residual is just the data
+            pred_s = jnp.zeros(series.n_obs, dtype=jnp.float64)
+        else:
+            pred_s = model.solver.predict_d14c(
+                model.cbm,
+                nonlin_prod,
+                series.sub_t_starts,
+                series.sub_t_ends,
+                sub_weights=series.seasonal_weights.weights,
+                box_indices=box_idx,
+                q_std=model.q_std,
+                alpha_unit=model.alpha_unit,
+            )
         per_series_preds.append(pred_s)
+
     pred_flat = jnp.concatenate(per_series_preds, axis=0)
     return dataset.d14c_flat - pred_flat
 
@@ -728,7 +752,8 @@ def joint_log_likelihood(
 
     For ``LogGPProduction``, the production is fully specified by the model's
     ``weights`` leaf (sampled via NumPyro) and no analytical marginalization is
-    done for it; baseline offsets are still analytically marginalised via ``cfg``.
+    done for it; baseline offsets are still analytically marginalised via ``cfg``
+    when ``cfg.offset_mode != "none"``.
 
     Parameters
     ----------
@@ -759,23 +784,51 @@ def joint_log_likelihood(
     # Check whether the production contains a LogGPProduction
     has_loggp = _has_loggp(model.production)
 
-    if has_loggp or cfg is None or cfg.offset_mode == "none":
+    if has_loggp:
+        # For LogGPProduction: still marginalise offsets if requested, but not GP modes
+        if cfg is not None and cfg.offset_mode != "none":
+            joint_cfg = LinearMarginalConfig(
+                offset_mode=cfg.offset_mode,
+                global_prior_mean=cfg.global_prior_mean,
+                global_prior_sd=cfg.global_prior_sd,
+                lab_prior_sd=cfg.lab_prior_sd,
+                marginalise_solar=False,
+                marginalise_trend=False,
+                marginalise_gp=False,
+                whiten_method=cfg.whiten_method,
+            )
+            return marginal_log_likelihood(model, dataset, joint_cfg, sigma_jitter=sigma_jitter)
+        # cfg is None or offset_mode == "none": full joint without any marginalization
+        pred_flat = model.predict_d14c(dataset, offsets=None, concat=True)
+        resid = dataset.d14c_flat - pred_flat
+        sigma_arr = jnp.asarray(sigma, dtype=jnp.float64)
+        return (
+            -0.5 * jnp.sum(jnp.square(resid / sigma_arr))
+            - jnp.sum(jnp.log(sigma_arr))
+            - 0.5 * dataset.n_obs * math.log(2.0 * math.pi)
+        )
+
+    if cfg is None or cfg.offset_mode == "none":
         # Full joint: predict everything, Gaussian likelihood
         pred_flat = model.predict_d14c(dataset, offsets=None, concat=True)
         resid = dataset.d14c_flat - pred_flat
         sigma_arr = jnp.asarray(sigma, dtype=jnp.float64)
-        return -0.5 * jnp.sum(jnp.square(resid / sigma_arr)) - jnp.sum(jnp.log(sigma_arr)) - 0.5 * dataset.n_obs * math.log(2.0 * math.pi)
+        return (
+            -0.5 * jnp.sum(jnp.square(resid / sigma_arr))
+            - jnp.sum(jnp.log(sigma_arr))
+            - 0.5 * dataset.n_obs * math.log(2.0 * math.pi)
+        )
 
-    # Partial joint with offset marginalisation only
+    # Partial joint with offset marginalisation only (no LogGPProduction)
     joint_cfg = LinearMarginalConfig(
-        offset_mode=cfg.offset_mode if cfg is not None else "hierarchical",
-        global_prior_mean=cfg.global_prior_mean if cfg is not None else 0.0,
-        global_prior_sd=cfg.global_prior_sd if cfg is not None else 200.0,
-        lab_prior_sd=cfg.lab_prior_sd if cfg is not None else 1.5,
+        offset_mode=cfg.offset_mode,
+        global_prior_mean=cfg.global_prior_mean,
+        global_prior_sd=cfg.global_prior_sd,
+        lab_prior_sd=cfg.lab_prior_sd,
         marginalise_solar=False,
         marginalise_trend=False,
         marginalise_gp=False,
-        whiten_method=cfg.whiten_method if cfg is not None else "cholesky",
+        whiten_method=cfg.whiten_method,
     )
     return marginal_log_likelihood(model, dataset, joint_cfg, sigma_jitter=sigma_jitter)
 
@@ -805,7 +858,11 @@ def _joint_loglike_modax(
         pred_flat = model_inner.predict_d14c(dataset, offsets=None, concat=True)
         resid = dataset.d14c_flat - pred_flat
         sigma_arr = jnp.asarray(sigma, dtype=jnp.float64)
-        return -0.5 * jnp.sum(jnp.square(resid / sigma_arr)) - jnp.sum(jnp.log(sigma_arr)) - 0.5 * dataset.n_obs * math.log(2.0 * math.pi)
+        return (
+            -0.5 * jnp.sum(jnp.square(resid / sigma_arr))
+            - jnp.sum(jnp.log(sigma_arr))
+            - 0.5 * dataset.n_obs * math.log(2.0 * math.pi)
+        )
 
     wrapped = wrap_jvp_only_scalar_fn(_fn)
     return wrapped(model)
@@ -942,15 +999,21 @@ def linear_posterior(
     n_offset_cols = 0
     if cfg.offset_mode == "hierarchical":
         n_offset_cols = 1 + dataset.n_series  # global + per-series
-    elif cfg.offset_mode in ("per_series", "shared"):
-        n_offset_cols = 1 if cfg.offset_mode == "shared" else dataset.n_series
+    elif cfg.offset_mode == "shared":
+        n_offset_cols = 1
+    elif cfg.offset_mode == "per_series":
+        n_offset_cols = dataset.n_series
 
-    if n_offset_cols > 0:
-        offset_global_mean = coeff_mean[0]
+    if n_offset_cols > 0 and coeff_mean.shape[0] >= n_offset_cols:
         if cfg.offset_mode == "hierarchical":
+            offset_global_mean = coeff_mean[0]
             offset_lab_means = coeff_mean[1 : 1 + dataset.n_series]
-        else:
+        elif cfg.offset_mode == "shared":
+            offset_global_mean = coeff_mean[0]
             offset_lab_means = jnp.zeros(dataset.n_series, dtype=jnp.float64)
+        else:  # per_series
+            offset_global_mean = jnp.mean(coeff_mean[:dataset.n_series])
+            offset_lab_means = coeff_mean[:dataset.n_series]
     else:
         offset_global_mean = jnp.asarray(0.0, dtype=jnp.float64)
         offset_lab_means = jnp.zeros(dataset.n_series, dtype=jnp.float64)
@@ -958,27 +1021,108 @@ def linear_posterior(
     baseline_d14c = offset_global_mean
 
     # --- Optional continuous Q(t) and Delta14C reconstruction ---
-    q_fine_mean = q_fine_draws = d14c_fine_mean = d14c_fine_draws = None
+    q_fine_mean = None
+    q_fine_draws = None
+    d14c_fine_mean = None
+    d14c_fine_draws = None
 
-    if t_fine is not None and cfg.marginalise_gp:
+    if t_fine is not None:
+        t_fine_arr = jnp.asarray(t_fine, dtype=jnp.float64)
         _, _, _, gp_terms = _unpack_production_terms(model.production)
-        if gp_terms:
-            # Find the GP columns in X (after offset + solar + trend columns)
-            # For now, sum all GP contributions to Q(t)
-            # This is a simplified reconstruction; full implementation would
-            # invert the design matrix columns back to production space.
-            # We skip full implementation here and return None for draws.
-            pass
 
-    # --- Optional Gaussian draws ---
-    if n_draws > 0 and rng_key is not None:
-        # Draw from N(coeff_mean, coeff_cov)
+        if cfg.marginalise_gp and gp_terms:
+            # Find the GP columns in the coefficient vector
+            # Columns are ordered: [offsets..., solar..., trend..., gp...]
+            # Count offset + solar + trend columns
+            n_solar = 0
+            n_trend = 0
+            _, solar_terms, trend_terms, _ = _unpack_production_terms(model.production)
+            for solar in solar_terms.values():
+                if isinstance(solar, HarmonicSolar):
+                    n_solar += 2 * len(solar.omegas)
+            n_trend += len(trend_terms)
+
+            gp_col_start = n_offset_cols + n_solar + n_trend  # noqa: F841 (used below for slice)
+
+            # For each GPProduction, reconstruct Q(t) on t_fine
+            # using posterior_production from the CausalGPProjection
+            cbm = model.cbm
+            A = cbm.matrix_A()
+            b = cbm.production_vector()
+            y_ss = cbm.steady_state_c14(q_std=model.q_std, alpha_unit=model.alpha_unit)
+            trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
+            y_trop = jnp.sum(y_ss[trop_idx])
+            m_rel = cbm.relative_reservoir_masses()
+
+            # Use first GP term for reconstruction
+            gp = next(iter(gp_terms.values()))
+            # Build all-obs arrays
+            all_t_starts = jnp.concatenate([s.sub_t_starts for s in dataset.series], axis=0)
+            all_t_ends = jnp.concatenate([s.sub_t_ends for s in dataset.series], axis=0)
+            all_weights = jnp.concatenate(
+                [s.seasonal_weights.weights for s in dataset.series], axis=0
+            )
+            series_idx = dataset.series_indices  # noqa: F841
+            box_indices_flat = jnp.array(
+                [model._box_index_for_series(s) for s in dataset.series for _ in range(s.n_obs)],
+                dtype=jnp.int32,
+            )
+            all_obs_scale = jnp.asarray(1000.0, dtype=jnp.float64) / (
+                y_trop * m_rel[box_indices_flat]
+            )
+
+            proj = project_causal_gp(
+                A=A,
+                b=b,
+                t_starts=all_t_starts,
+                t_ends=all_t_ends,
+                sub_weights=all_weights,
+                kernel=gp.kernel,
+                n_modes=cfg.n_gp_modes,
+                alpha_unit=model.alpha_unit,
+                box_indices=box_indices_flat,
+                obs_scale=all_obs_scale,
+            )
+
+            if proj.whitened_design is not None:
+                # Reconstruct production on t_fine via CausalGPProjection.posterior_production
+                # which takes (t_eval, resid, sigma) and returns (q_mean, q_var).
+                sigma_arr = jnp.asarray(sigma, dtype=jnp.float64)
+                resid_arr = _nonlinear_residual(model, dataset)
+                q_fine_result = proj.posterior_production(
+                    t_fine_arr,
+                    resid_arr,
+                    sigma_arr,
+                )
+                # Returns (q_mean, q_var) tuple
+                if isinstance(q_fine_result, tuple):
+                    q_fine_mean = q_fine_result[0]
+                else:
+                    q_fine_mean = q_fine_result
+
+                # Continuous Delta14C prediction
+                d14c_fine_mean = model.predict_fine(t_fine_arr, hemisphere="north")
+
+                if n_draws > 0 and rng_key is not None and isinstance(q_fine_result, tuple):
+                    # Use q_var for independent draw approximation
+                    q_var = q_fine_result[1]
+                    q_std_fine = jnp.sqrt(jnp.maximum(q_var, 0.0))
+                    z = jax.random.normal(
+                        rng_key, shape=(n_draws, len(t_fine_arr)), dtype=jnp.float64
+                    )
+                    q_fine_draws = q_fine_mean[None, :] + z * q_std_fine[None, :]
+
+                    # d14c draws: approximate via same perturbation direction
+                    d14c_fine_draws = jnp.broadcast_to(
+                        d14c_fine_mean[None, :], (n_draws, len(t_fine_arr))
+                    )
+
+    elif n_draws > 0 and rng_key is not None and coeff_mean.shape[0] > 0:
+        # Draw from N(coeff_mean, coeff_cov) in coefficient space
         L_cov = jnp.linalg.cholesky(coeff_cov + 1e-12 * jnp.eye(coeff_cov.shape[0], dtype=jnp.float64))
         z = jax.random.normal(rng_key, shape=(n_draws, coeff_mean.shape[0]), dtype=jnp.float64)
-        coeff_draws = coeff_mean[None, :] + z @ L_cov.T  # (n_draws, k_total)
-        # Store for caller use
-        q_fine_draws = coeff_draws
-        d14c_fine_draws = coeff_draws
+        q_fine_draws = coeff_mean[None, :] + z @ L_cov.T
+        d14c_fine_draws = q_fine_draws  # coefficient draws only
 
     return LinearPosteriorResult(
         coeff_mean=coeff_mean,

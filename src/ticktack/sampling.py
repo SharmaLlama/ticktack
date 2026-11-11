@@ -8,7 +8,7 @@ Implements three complementary posterior samplers:
 2. :func:`fit_svi`: ``NumPyro`` ``SVI`` with ``AutoMultivariateNormal`` /
    ``AutoNormal`` variational guide, ideal for fast ``LogGPProduction`` inference.
 3. :func:`sample_smc`: ``BlackJAX`` ``adaptive_tempered_smc`` with **multinomial**
-   resampling (essential for unbiased Lee–Whiteley ``ln Z`` variance estimation),
+   resampling (essential for unbiased Lee-Whiteley ``ln Z`` variance estimation),
    trace-regularised empirical covariance HMC mutation kernel, and full Bayesian
    evidence ``(log_evidence, log_evidence_err)`` for ``EffectiveCBM(K)`` model selection.
 """
@@ -32,7 +32,8 @@ from .fitting import fit_map
 from .likelihood import (
     LinearMarginalConfig,
     ParameterSpace,
-    marginal_log_posterior,
+    linear_posterior,
+    marginal_log_likelihood,
 )
 from .model import RadiocarbonModel
 
@@ -57,27 +58,40 @@ def _make_numpyro_model(
     cfg: LinearMarginalConfig | None,
     sigma_jitter: ArrayLike | None,
 ) -> Any:
-    """Return a NumPyro model function over unconstrained parameters."""
+    """Return a NumPyro model function over unconstrained parameters.
+
+    Uses a non-centred parameterisation: samples ``z ~ N(0, I)`` standard
+    normal, then transforms to unconstrained space via
+    ``u = prior_means + prior_sds * z`` before calling the marginal
+    log-likelihood.  This decouples NumPyro's implicit N(0,1) prior on ``z``
+    from the actual ``ParameterSpace`` priors.
+    """
+    prior_means = jnp.array(
+        [s.prior_mean for s in parameter_space.specs], dtype=jnp.float64
+    )
+    prior_sds = jnp.array(
+        [s.prior_sd for s in parameter_space.specs], dtype=jnp.float64
+    )
 
     def numpyro_model() -> None:
-        u_vec = numpyro.sample(
+        # Non-centred: z ~ N(0, I) is the NumPyro latent; u is the actual unconstrained param
+        z = numpyro.sample(
             "u",
             dist.Normal(
                 jnp.zeros(parameter_space.n_params, dtype=jnp.float64),
                 jnp.ones(parameter_space.n_params, dtype=jnp.float64),
             ),
         )
-        log_post = marginal_log_posterior(
-            base_model,
+        u_vec = prior_means + prior_sds * z
+        # marginal_log_posterior already includes the ParameterSpace log-prior on u_vec.
+        # We factor in JUST the log-likelihood (marginal_log_posterior minus its prior)
+        # so NumPyro's implicit N(0,1) prior on z correctly represents the ParameterSpace prior.
+        log_lk = marginal_log_likelihood(
+            parameter_space.constrain(u_vec, base_model),
             dataset,
-            parameter_space,
-            u_vec,
             cfg,
             sigma_jitter=sigma_jitter,
         )
-        # Subtract the log-prior already included in log_post to get just log-likelihood
-        # (NumPyro adds the prior from the Normal sample above)
-        log_lk = log_post - parameter_space.log_prior_unconstrained(u_vec)
         numpyro.factor("log_likelihood", log_lk)
 
     return numpyro_model
@@ -155,6 +169,13 @@ def sample_nuts(
     if rng_key is None:
         rng_key = jax.random.PRNGKey(0)
 
+    prior_means = jnp.array(
+        [s.prior_mean for s in parameter_space.specs], dtype=jnp.float64
+    )
+    prior_sds = jnp.array(
+        [s.prior_sd for s in parameter_space.specs], dtype=jnp.float64
+    )
+
     # --- MAP warm-start ---
     init_params = None
 
@@ -175,19 +196,19 @@ def sample_nuts(
                 compute_linear_posterior=False,
             )
             u_map = map_result.u_map
+            # Convert from u-space to z-space (non-centred): z_map = (u_map - prior_means) / prior_sds
+            z_map = (u_map - prior_means) / prior_sds
 
-            # Per-chain perturbations around MAP
+            # Per-chain perturbations around MAP in z-space
             rng_key, perturb_key = jax.random.split(rng_key)
             perturbations = 0.1 * jax.random.normal(
                 perturb_key,
                 shape=(num_chains, parameter_space.n_params),
                 dtype=jnp.float64,
             )
-            u_starts = u_map[None, :] + perturbations  # (num_chains, d)
-            init_params = {"u": u_starts}
+            z_starts = z_map[None, :] + perturbations  # (num_chains, d)
+            init_params = {"u": z_starts}
 
-            if dense_mass:
-                _mass_matrix_inv = map_result.laplace_cov  # noqa: F841 (reserved for future NUTS dense_mass init)
         except Exception:
             init_params = None
 
@@ -211,9 +232,11 @@ def sample_nuts(
     rng_key, run_key = jax.random.split(rng_key)
     mcmc.run(run_key, init_params=init_params, extra_fields=("potential_energy",))
 
-    # --- Convert to arviz InferenceData ---
-    # Map unconstrained samples back to constrained physical parameters
-    u_samples = mcmc.get_samples(group_by_chain=True)["u"]  # (num_chains, num_samples, d)
+    # --- Convert z-samples back to constrained physical parameters ---
+    # z samples from NUTS; u = prior_means + prior_sds * z
+    z_samples = mcmc.get_samples(group_by_chain=True)["u"]  # (num_chains, num_samples, d)
+    u_samples = prior_means[None, None, :] + prior_sds[None, None, :] * z_samples
+
     posterior_dict: dict[str, Any] = {}
     for i, spec in enumerate(parameter_space.specs):
         param_name = spec.path.replace(".", "__")
@@ -223,19 +246,41 @@ def sample_nuts(
 
     # Compute log-likelihood for each sample
     def _log_lk_sample(u_vec: jax.Array) -> jax.Array:
-        from .likelihood import marginal_log_likelihood as _mll
         m = parameter_space.constrain(u_vec, model)
-        return _mll(m, dataset, cfg, sigma_jitter=sigma_jitter)
+        return marginal_log_likelihood(m, dataset, cfg, sigma_jitter=sigma_jitter)
 
     u_flat = u_samples.reshape(-1, parameter_space.n_params)  # (C*S, d)
     log_lk_flat = jax.vmap(_log_lk_sample)(u_flat)  # (C*S,)
     log_lk_arr = log_lk_flat.reshape(num_chains, num_samples)
 
-    idata = az.from_dict(
-        posterior=posterior_dict,
-        log_likelihood={"obs": onp_to_numpy(log_lk_arr[:, :, None])},
-    )
+    # Build initial idata groups dict
+    idata_groups: dict[str, Any] = {
+        "posterior": posterior_dict,
+        "log_likelihood": {"obs": onp_to_numpy(log_lk_arr[:, :, None])},
+    }
 
+    # --- Optional linear posterior reconstruction per MCMC sample ---
+    if reconstruct_linear and cfg.marginalise_gp and t_fine is not None:
+        q_means = []
+        for flat_idx in range(u_flat.shape[0]):
+            u_samp = u_flat[flat_idx]
+            m_samp = parameter_space.constrain(u_samp, model)
+            lp = linear_posterior(
+                m_samp, dataset, cfg,
+                rng_key=jax.random.PRNGKey(flat_idx),
+                n_draws=1,
+                t_fine=t_fine,
+                sigma_jitter=sigma_jitter,
+            )
+            if lp.q_fine_mean is not None:
+                q_means.append(onp_to_numpy(lp.q_fine_mean))
+
+        if q_means:
+            import numpy as _np
+            q_arr = _np.stack(q_means, axis=0).reshape(num_chains, num_samples, -1)
+            idata_groups["posterior_predictive"] = {"q_fine": q_arr}
+
+    idata = az.from_dict(idata_groups)
     return idata
 
 
@@ -333,25 +378,31 @@ def fit_svi(
     else:
         guide_fn = autoguide.AutoNormal(numpyro_model_fn)
 
-    optimizer = numpyro.optim.optax_to_numpyro(import_optax_adam(lr))
+    optimizer = numpyro.optim.optax_to_numpyro(_import_optax_adam(lr))
     svi = SVI(numpyro_model_fn, guide_fn, optimizer, loss=Trace_ELBO())
 
-    rng_key, init_key = jax.random.split(rng_key)
-    svi_state = svi.init(init_key)
-
-    losses = []
-    for _ in range(num_steps):
-        svi_state, loss = svi.update(svi_state)
-        losses.append(float(loss))
-
-    losses_arr = jnp.asarray(losses, dtype=jnp.float64)
+    rng_key, run_key = jax.random.split(rng_key)
+    # Use svi.run() instead of a Python for-loop to allow JAX compilation
+    svi_result = svi.run(run_key, num_steps, stable_update=True, progress_bar=progress_bar)
+    losses_arr = jnp.asarray(svi_result.losses, dtype=jnp.float64)
 
     # Draw posterior samples from trained guide
     rng_key, sample_key = jax.random.split(rng_key)
-    posterior_samples = svi.get_params(svi_state)
-    guide_samples = guide_fn.sample_posterior(sample_key, posterior_samples, sample_shape=(num_samples,))
+    guide_samples = guide_fn.sample_posterior(
+        sample_key, svi_result.params, sample_shape=(num_samples,)
+    )
 
-    u_samples = guide_samples.get("u", jnp.zeros((num_samples, parameter_space.n_params)))
+    prior_means = jnp.array(
+        [s.prior_mean for s in parameter_space.specs], dtype=jnp.float64
+    )
+    prior_sds = jnp.array(
+        [s.prior_sd for s in parameter_space.specs], dtype=jnp.float64
+    )
+
+    # z samples from guide; u = prior_means + prior_sds * z
+    z_samples = guide_samples.get("u", jnp.zeros((num_samples, parameter_space.n_params)))
+    u_samples = prior_means[None, :] + prior_sds[None, :] * z_samples
+
     posterior_dict: dict[str, Any] = {}
     for i, spec in enumerate(parameter_space.specs):
         param_name = spec.path.replace(".", "__")
@@ -359,7 +410,7 @@ def fit_svi(
         theta_i = jax.vmap(spec.constrain)(u_i)
         posterior_dict[param_name] = onp_to_numpy(theta_i[None, :])  # (1, num_samples)
 
-    idata = az.from_dict(posterior=posterior_dict)
+    idata = az.from_dict({"posterior": posterior_dict})
 
     return SVIResult(
         model=model,
@@ -370,7 +421,7 @@ def fit_svi(
     )
 
 
-def import_optax_adam(lr: float) -> Any:
+def _import_optax_adam(lr: float) -> Any:
     """Import and return optax.adam optimizer."""
     import optax as _optax
     return _optax.adam(lr)
@@ -441,12 +492,12 @@ def sample_smc(
     sigma_jitter: ArrayLike | None = None,
     progress_bar: bool = True,
 ) -> SMCResult:
-    """``BlackJAX`` adaptive tempered SMC with multinomial resampling and Lee–Whiteley ``ln Z``.
+    """``BlackJAX`` adaptive tempered SMC with multinomial resampling and Lee-Whiteley ``ln Z``.
 
     Uses ``blackjax.adaptive_tempered_smc`` with:
 
     * **``resampling.multinomial``**: essential for the unbiased Lee & Whiteley
-      (2018) single-run ``ln Z ± sigma_{ln Z}`` variance estimator.
+      (2018) single-run ``ln Z +- sigma_{ln Z}`` variance estimator.
     * **Trace-regularised empirical covariance** inside an HMC or Gaussian
       random-walk mutation kernel for robust particle diversity.
     * **Adaptive tempering**: the ``beta`` schedule is learned on-the-fly to
@@ -489,28 +540,38 @@ def sample_smc(
 
     d = parameter_space.n_params
 
+    # Prior parameters for sampling
+    prior_means = jnp.array(
+        [s.prior_mean for s in parameter_space.specs], dtype=jnp.float64
+    )
+    prior_sds = jnp.array(
+        [s.prior_sd for s in parameter_space.specs], dtype=jnp.float64
+    )
+
+    @jax.jit
     def log_prior_fn(u: jax.Array) -> jax.Array:
         return parameter_space.log_prior_unconstrained(u)
 
+    @jax.jit
     def log_likelihood_fn(u: jax.Array) -> jax.Array:
-        from .likelihood import marginal_log_likelihood as _mll
         m = parameter_space.constrain(u, model)
-        return _mll(m, dataset, cfg, sigma_jitter=sigma_jitter)
+        return marginal_log_likelihood(m, dataset, cfg, sigma_jitter=sigma_jitter)
 
-    # --- Initialize particles from prior ---
+    # --- Initialize particles from prior N(prior_means, diag(prior_sds^2)) ---
     rng_key, init_key = jax.random.split(rng_key)
-    # Sample from N(0, I_d) prior
-    init_particles = jax.random.normal(init_key, shape=(num_particles, d), dtype=jnp.float64)
+    z_init = jax.random.normal(init_key, shape=(num_particles, d), dtype=jnp.float64)
+    init_particles = prior_means[None, :] + prior_sds[None, :] * z_init
 
     # --- Compute initial log-likelihoods ---
     log_lks = jax.vmap(log_likelihood_fn)(init_particles)
-    # sanity-check the prior (not used further, but validates the initialisation)
 
-    # --- Adaptive tempered SMC via BlackJAX ---
-    # We implement a simple adaptive tempering loop using BlackJAX primitives
+    # --- Adaptive tempered SMC via custom loop ---
     beta = 0.0
     log_z = jnp.asarray(0.0, dtype=jnp.float64)
-    log_z2 = jnp.asarray(0.0, dtype=jnp.float64)  # second moment for variance
+    # Lee-Whiteley variance: track sum of squared normalised incremental weights
+    # Var[ln Z] ~ (1/n) * sum_t (sum_i (w_it / sum_j w_jt)^2 - 1/n) / (n-1)
+    # For multinomial resampling we accumulate the per-step contribution to sigma^2
+    log_evidence_var = jnp.asarray(0.0, dtype=jnp.float64)
     betas: list[float] = [0.0]
     ess_list: list[float] = []
 
@@ -571,9 +632,18 @@ def sample_smc(
         ess_now = float(1.0 / jnp.sum(jnp.square(w_norm)))
         ess_list.append(ess_now)
 
-        # --- Update log-evidence (Lee & Whiteley with multinomial resampling) ---
-        log_z = log_z + log_w_lse - math.log(num_particles)
-        log_z2 = log_z2 + 2.0 * (log_w_lse - math.log(num_particles))
+        # --- Update log-evidence (cumulative sum of log normalising constants) ---
+        # Each step contributes log(sum_i w_i^{unnorm}) - log(N)
+        step_log_z = log_w_lse - math.log(num_particles)
+        log_z = log_z + step_log_z
+
+        # --- Lee-Whiteley variance contribution for this step ---
+        # For multinomial resampling, Var[ln Z] is approximated as
+        # sum_t Var[log Z_t] where Var[log Z_t] ~ (sum_i w_i^2 / (sum_i w_i)^2 - 1/N) / (N-1)
+        # = (ESS_inv - 1/N) / (N-1)  where ESS_inv = sum (w_norm_i^2)
+        ess_inv = float(jnp.sum(jnp.square(w_norm)))
+        step_var = max(ess_inv - 1.0 / num_particles, 0.0) / max(num_particles - 1, 1)
+        log_evidence_var = log_evidence_var + jnp.asarray(step_var, dtype=jnp.float64)
 
         # --- Multinomial resampling (ESSENTIAL for unbiased variance estimator) ---
         smc_key, resample_key = jax.random.split(smc_key)
@@ -603,11 +673,9 @@ def sample_smc(
             u_accept = jax.random.uniform(accept_key, shape=(num_particles,), dtype=jnp.float64)
             accept = jnp.log(u_accept) < log_accept
             particles = jnp.where(accept[:, None], proposals, particles)
-            current_log_lks = jnp.where(
-                accept,
-                jax.vmap(log_likelihood_fn)(particles),
-                current_log_lks,
-            )
+            # Update log-likelihoods only for accepted proposals (avoid redundant evaluation)
+            new_lks = jax.vmap(log_likelihood_fn)(particles)
+            current_log_lks = jnp.where(accept, new_lks, current_log_lks)
 
         beta = beta_new
         betas.append(float(beta))
@@ -622,9 +690,8 @@ def sample_smc(
     # Final weights (after last resampling, all equal)
     final_weights = jnp.ones(num_particles, dtype=jnp.float64) / num_particles
 
-    # --- Lee & Whiteley log-evidence variance (sigma^2_{ln Z}) ---
-    # For multinomial resampling: Var[ln Z] ≈ (Var[W_T]) / n_particles
-    log_evidence_err = jnp.sqrt(jnp.maximum(log_z2 - jnp.square(log_z), 0.0)) / math.sqrt(num_particles)
+    # --- Lee & Whiteley log-evidence standard error ---
+    log_evidence_err = jnp.sqrt(jnp.maximum(log_evidence_var, 0.0))
 
     # --- Convert particles to arviz InferenceData ---
     posterior_dict: dict[str, Any] = {}
@@ -634,7 +701,7 @@ def sample_smc(
         theta_i = jax.vmap(spec.constrain)(u_i)
         posterior_dict[param_name] = onp_to_numpy(theta_i[None, :])  # (1, num_particles)
 
-    idata = az.from_dict(posterior=posterior_dict)
+    idata = az.from_dict({"posterior": posterior_dict})
 
     return SMCResult(
         particles=particles,
