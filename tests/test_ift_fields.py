@@ -922,3 +922,56 @@ def test_log_evidence_extra_priors_invariant_to_linear_latent() -> None:
     np.testing.assert_allclose(lnz_rand, lnz_zero, rtol=1e-12, atol=1e-12)
     np.testing.assert_allclose(lnz_fit, lnz_zero, rtol=1e-12, atol=1e-12)
 
+
+def test_step4_shared_wiring_solver_data_and_top_level_exports() -> None:
+    """Verify ExactLinearSolver hook, Dataset/TreeRingSeries.with_error_scale, and tt.* exports."""
+    import ticktack as tt
+    import ticktack.plotting as tt_plotting
+    from ticktack.fields import predict_field_d14c
+
+    for sym in (
+        "GaussianField",
+        "LogGaussianField",
+        "MaternSpectrum",
+        "SquaredExpSpectrum",
+        "QuasiPeriodicSpectrum",
+        "CorrelatedFieldSpectrum",
+        "SumSpectrum",
+        "fit_ift_field",
+        "log_evidence",
+        "laplace_samples",
+        "error_scale",
+        "evidence_grid",
+        "optimize_gp_kernel",
+        "select_gp_kernel",
+        "plot_field_draws",
+        "plot_evidence_grid",
+    ):
+        assert hasattr(tt, sym), f"Missing top-level export tt.{sym}"
+    assert hasattr(tt_plotting, "plot_field_draws")
+    assert hasattr(tt_plotting, "plot_evidence_grid")
+
+    cbm = tt.load_preset("Brehm21")
+    s_tas = tt.load_bundled_series("775AD-early-S/Büntgen18_TAS01.csv")
+    s_kauri = tt.load_bundled_series("notebooks/775CE/Guttler15_Kauri.csv")
+    ds = tt.Dataset((s_tas, s_kauri))
+
+    # Pre-dataset burn-in [755, 795] must be honoured identically by RadiocarbonModel.predict_d14c
+    z_exc = jax.random.normal(jax.random.PRNGKey(314), (64,), dtype=jnp.float64)
+    gf = tt.GaussianField(z_exc, 755.0, 795.0, sigma=0.35, length_yr=6.0)
+    lgf = tt.LogGaussianField(0.4 * z_exc, 755.0, 795.0, sigma=0.25, length_yr=6.0)
+
+    for field_term in (gf, lgf):
+        model = tt.RadiocarbonModel(cbm, field_term, tt.ExactLinearSolver())
+        pred_model = model.predict_d14c(ds)
+        pred_ift = predict_field_d14c(model, ds, include_offsets=False)
+        np.testing.assert_allclose(pred_model, pred_ift, rtol=1e-11, atol=2e-11)
+
+    # Native TreeRingSeries.with_error_scale and Dataset.with_error_scale
+    s_scaled = s_tas.with_error_scale(0.5)
+    np.testing.assert_allclose(s_scaled.sigma_d14c, 0.5 * s_tas.sigma_d14c, rtol=1e-15)
+    ds_scaled = ds.with_error_scale({s_tas.name: 0.75, s_kauri.name: 1.25})
+    np.testing.assert_allclose(ds_scaled.series[0].sigma_d14c, 0.75 * s_tas.sigma_d14c, rtol=1e-15)
+    np.testing.assert_allclose(ds_scaled.series[1].sigma_d14c, 1.25 * s_kauri.sigma_d14c, rtol=1e-15)
+
+
