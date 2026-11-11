@@ -50,9 +50,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/benjaminpope/ticktack"
-Repository = "https://github.com/benjaminpope/ticktack"
-Issues = "https://github.com/benjaminpope/ticktack/issues"
+Homepage = "https://github.com/SharmaLlama/ticktack"
+Repository = "https://github.com/SharmaLlama/ticktack"
+Issues = "https://github.com/SharmaLlama/ticktack/issues"
 
 [project.optional-dependencies]
 dev = [
