@@ -1,32 +1,26 @@
 name: integration
-# This workflow is triggered on pushes to the repository. Testing!
-on: [push]
+
+on:
+  push:
+  pull_request:
 
 jobs:
-    build:
-      # Job name is test-mundey
-      name: test-ticktack
-      # This job runs on Linux
-      runs-on: ubuntu-latest
-      steps:
-        - name: checkout
-          uses: actions/checkout@master
+  build:
+    name: test-ticktack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-        - name: python
-          uses: actions/setup-python@v1
-          with:
-            python-version: '3.11' # Version range or exact version of a Python version to use, using semvers version range syntax.
-            architecture: 'x64' # (x64 or x86)
-        
-        - name: Install dependencies
-          run: |
-            python -m pip install --upgrade pip
-            pip install pytest
-            pip install -r requirements.txt
-              
-        - run:
-            python setup.py install
-          name: 'Install ticktack'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-        - run: pytest tests/*.py
-          name: 'Run pytest'
+      - name: Install ticktack and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest tests/
