@@ -1,0 +1,92 @@
+[project]
+name = "ticktack"
+version = "2.0.0a0"
+description = "Differentiable carbon-box modelling and Bayesian radiocarbon inference in JAX."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Utkarsh Sharma", email = "u.sharma@uqconnect.edu.au" },
+    { name = "Qingyuan Zhang" },
+    { name = "Benjamin Pope", email = "benjamin.pope@mq.edu.au" },
+    { name = "Jordan Dennis" },
+]
+keywords = [
+    "radiocarbon",
+    "dendrochronology",
+    "miyake-events",
+    "carbon-cycle",
+    "jax",
+    "autodiff",
+    "bayesian-inference",
+]
+dependencies = [
+    "jax",
+    "equinox",
+    "zodiax",
+    "diffrax",
+    "lineax",
+    "optimistix",
+    "optax",
+    "tinygp>=0.3",
+    "numpyro>=0.16",
+    "blackjax>=1.2.5",
+    "arviz",
+    "h5py",
+    "scipy",
+    "matplotlib",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+
+[project.urls]
+Homepage = "https://github.com/SharmaLlama/ticktack"
+Repository = "https://github.com/SharmaLlama/ticktack"
+Issues = "https://github.com/SharmaLlama/ticktack/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+cuda = [
+    "modax-solvers",
+]
+legacy = [
+    "astropy",
+]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ticktack = [
+    "data/*.hd5",
+    "data/datasets/**/*.csv",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W605"]
+ignore = ["E402", "E501", "F722"]
