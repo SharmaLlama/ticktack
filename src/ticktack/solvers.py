@@ -896,6 +896,8 @@ class ExactLinearSolver(AbstractSolver):
         q_std: ArrayLike,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Return ``(t0_grid, dt, delta_q_grid)`` for a general/gridded FOH term."""
+        if hasattr(term, "to_gridded"):
+            term = term.to_gridded(q_std=q_std)
         if isinstance(term, GriddedProduction):
             tg = term.t_grid
             # Check if tg is concrete and uniform and covers [t_min_req, t_max_req]

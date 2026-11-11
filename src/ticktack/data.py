@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import csv
 import dataclasses
-from collections.abc import Sequence
+import math
+from collections.abc import Mapping, Sequence
 from importlib import resources
 from pathlib import Path
 from typing import Literal
@@ -524,6 +525,20 @@ class TreeRingSeries(zdx.Base):
         """Return ``(sub_t_starts, sub_t_ends, sub_weights)`` for seasonal integration."""
         return self.sub_t_starts, self.sub_t_ends, self.seasonal_weights.weights
 
+    def with_error_scale(self, scale: float | Mapping[str, float]) -> TreeRingSeries:
+        """Return a copy of this series with ``sigma_d14c`` multiplied by ``scale > 0``."""
+        if isinstance(scale, Mapping):
+            if self.name not in scale:
+                raise KeyError(
+                    f"Series {self.name!r} missing from scale mapping {list(scale)}."
+                )
+            s_val = float(scale[self.name])
+        else:
+            s_val = float(scale)
+        if not (math.isfinite(s_val) and s_val > 0.0):
+            raise ValueError(f"Error scale must be finite and positive, got {s_val}.")
+        return eqx.tree_at(lambda s: s.sigma_d14c, self, self.sigma_d14c * s_val)
+
     @classmethod
     def from_csv(
         cls,
@@ -760,6 +775,29 @@ class Dataset(zdx.Base):
         return (idx[:, None] == jnp.arange(self.n_series, dtype=jnp.int32)[None, :]).astype(
             jnp.float64
         )
+
+    def with_error_scale(self, scale: float | Mapping[str, float]) -> Dataset:
+        """Return a copy of this dataset with ``sigma_d14c`` multiplied by ``scale``."""
+        if isinstance(scale, Mapping):
+            if len(set(self.series_names)) != self.n_series:
+                raise ValueError(
+                    "Per-series error scaling via a Mapping requires unique TreeRingSeries "
+                    f"names in Dataset; got {self.series_names}."
+                )
+            unknown = set(scale) - set(self.series_names)
+            if unknown:
+                raise KeyError(
+                    f"Unknown series names {sorted(unknown)} in scale mapping; "
+                    f"dataset has {self.series_names}."
+                )
+            new_series = tuple(
+                s.with_error_scale(scale[s.name]) if s.name in scale else s
+                for s in self.series
+            )
+        else:
+            s_val = float(scale)
+            new_series = tuple(s.with_error_scale(s_val) for s in self.series)
+        return Dataset(new_series, name=self.name)
 
     @classmethod
     def from_csvs(

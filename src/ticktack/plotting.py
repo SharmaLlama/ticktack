@@ -741,3 +741,16 @@ def plot_cbm_eigenmodes(
         target_ax.set_title(title)
 
     return fig, target_ax
+
+
+from .fields import plot_evidence_grid, plot_field_draws  # noqa: E402
+
+__all__ = [
+    "plot_cbm_eigenmodes",
+    "plot_d14c_fit",
+    "plot_evidence_grid",
+    "plot_field_draws",
+    "plot_fisher_spectrum",
+    "plot_production_posterior",
+]
+
