@@ -663,10 +663,9 @@ def test_effective_cbm_exact_param_count_ordering_and_full_jacobian_rank(K: int)
         assert bool(jnp.all(jnp.diff(eff_neg.log_sink_timescales()) > 0.0))
 
     assert float(jnp.max(jnp.abs(eff.kirchhoff_residual()))) < 1e-13
-    if K >= 3:
-        assert float(eff.reference_specific_activity()) == pytest.approx(
-            GUTTLER15_R_REF_KG_PER_GTC, rel=1e-12
-        )
+    assert float(eff.reference_specific_activity()) == pytest.approx(
+        GUTTLER15_R_REF_KG_PER_GTC, rel=1e-12
+    )
 
     # Full 2K - 2 Jacobian column rank on post-spike + multi-timescale ring trajectory
     solver = ExactLinearSolver()
@@ -707,6 +706,100 @@ def test_effective_cbm_exact_param_count_ordering_and_full_jacobian_rank(K: int)
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+@pytest.mark.parametrize("K", [2, 3, 4])
+def test_effective_cbm_dynamic_calibration_invariance_and_smooth_barrier(
+    K: int,
+) -> None:
+    eff = EffectiveCBM(K=K)
+    # 1. Perturb dynamic leaves via zodiax .set(...) and confirm R_ref stays calibrated
+    eff_p = eff.set("log_k_strat_to_trop", eff.log_k_strat_to_trop + 0.18).set(
+        "log_k_trop_to_strat", eff.log_k_trop_to_strat - 0.14
+    )
+    if K > 2:
+        eff_p = eff_p.set(
+            "log_k_trop_to_sinks", eff.log_k_trop_to_sinks + 0.12
+        ).set("sink_tau_params", eff.sink_tau_params - 0.15)
+    assert float(eff_p.reference_specific_activity()) == pytest.approx(
+        GUTTLER15_R_REF_KG_PER_GTC, rel=1e-8
+    )
+
+    # 2. Non-zero autodiff sensitivity of calibrated open loss wrt dynamic leaves
+    flat0, unravel = jax.flatten_util.ravel_pytree(
+        eqx.filter(eff, eqx.is_inexact_array)
+    )
+    static_part = eqx.filter(eff, lambda x: not eqx.is_inexact_array(x))
+    jac_sink = jax.jacfwd(
+        lambda v: eqx.combine(unravel(v), static_part).sink_rates()[-1]
+    )(flat0)
+    assert bool(jnp.all(jnp.isfinite(jac_sink)))
+    rel_tol = 1e-3 if K == 2 else 0.05
+    assert float(jnp.linalg.norm(jac_sink) / eff.sink_rates()[-1]) > rel_tol
+
+    # 3. Traced construction inside @jax.jit matches eager calibration (no 0.005 fallback)
+    @jax.jit
+    def _traced_sink_rates(lk_st: jax.Array, lk_ts: jax.Array) -> jax.Array:
+        traced_cbm = EffectiveCBM(
+            K=K,
+            log_k_strat_to_trop=lk_st,
+            log_k_trop_to_strat=lk_ts,
+        )
+        return traced_cbm.sink_rates()
+
+    np.testing.assert_allclose(
+        _traced_sink_rates(eff.log_k_strat_to_trop, eff.log_k_trop_to_strat),
+        eff.sink_rates(),
+        rtol=1e-13,
+        atol=1e-14,
+    )
+
+    # 4. Smooth C^1 barrier across needed_last ~ k_up (zero 100x downward cliff) & explicit rate override
+    if K == 3:
+        xs_desc = jnp.linspace(2.0, -5.0, 600)
+        k_fn = lambda x: (  # noqa: E731
+            eff.set("log_k_trop_to_sinks", jnp.array([x])).sink_rates()[-1]
+        )
+        vals_desc = jax.vmap(k_fn)(xs_desc)
+        grads_desc = jax.vmap(jax.grad(k_fn))(xs_desc)
+        assert bool(jnp.all(jnp.isfinite(vals_desc)) and jnp.all(vals_desc > 0.0))
+        assert bool(jnp.all(jnp.isfinite(grads_desc)))
+        # As k_up decreases monotonically, calibrated k_deep increases monotonically (zero downward cliff!)
+        assert bool(jnp.all(jnp.diff(vals_desc) >= -1e-12))
+        check_grads(k_fn, (jnp.asarray(-2.6),), order=1, modes=["fwd", "rev"], rtol=1e-6, atol=1e-6)
+
+        eff_exp = EffectiveCBM(K=3, deep_sink_rate=0.012)
+        assert not eff_exp.calibrate_deep_sink
+        assert float(eff_exp.sink_rates()[-1]) == pytest.approx(0.012, rel=1e-14)
+
+        # 5. Monotonic d_eff(K) across K = 2, 3, 4 in cbm_fisher_spectrum
+        from ticktack.fisher import cbm_fisher_spectrum
+
+        years_f = jnp.arange(765.0, 815.0, 1.0)
+        t_sf = years_f + 4.0 / 12.0
+        t_ef = years_f + 9.0 / 12.0
+        sigma_f = jnp.full(years_f.size, 1.4, dtype=jnp.float64)
+        solver_f = ExactLinearSolver()
+        deffs_f = [
+            float(
+                cbm_fisher_spectrum(
+                    lambda m, fl: solver_f.predict_d14c(
+                        m,
+                        MiyakeSpike(t_start=774.55, duration=0.25, fluence=fl[0], profile="boxcar"),
+                        t_sf,
+                        t_ef,
+                        box_indices=1,
+                    ),
+                    EffectiveCBM(K=k_f),
+                    sigma_f,
+                    psi_nuisance=jnp.array([6.5]),
+                    prior_cbm_sd=0.35,
+                    prior_psi_sd=2.0,
+                ).d_eff
+            )
+            for k_f in (2, 3, 4)
+        ]
+        assert deffs_f[0] < deffs_f[1] < deffs_f[2]
 
 
 # ---------------------------------------------------------------------------
@@ -1298,3 +1391,441 @@ def test_modax_lazy_import_and_custom_vjp_jvp_only_wrapper() -> None:
     np.testing.assert_allclose(vals_b, vals_ref_b, rtol=1e-14, atol=1e-14)
     for k in batch_p:
         np.testing.assert_allclose(grads_b[k], grads_ref_b[k], rtol=1e-11, atol=1e-11)
+
+
+def test_suess_dilution_delta_global_relative_to_predict_fine_and_scalar_offsets() -> None:
+    import ticktack as tt
+
+    g15 = make_guttler15_fixed()
+    m0 = g15.reservoir_masses()
+    K0 = g15.rate_matrix_K()
+
+    def masses_at(t: jax.Array) -> jax.Array:
+        dt = jnp.maximum(t - 1850.0, 0.0)
+        added_gtc = 120.0 * (dt / 100.0) ** 2
+        return m0.at[1].add(added_gtc)
+
+    def matrix_A_at(t: jax.Array) -> jax.Array:
+        scale = m0 / masses_at(t)
+        Kt = K0 * scale[None, :]
+        return Kt - g15.decay_rate * jnp.eye(g15.n_boxes, dtype=jnp.float64)
+
+    suess_solver = DiffraxSolver(
+        "Tsit5",
+        rtol=1e-11,
+        atol=1e-11,
+        masses_fn=masses_at,
+        matrix_A_fn=matrix_A_at,
+    )
+
+    years = jnp.array([1845.0, 1900.0, 1950.0])
+    t_s = years + 0.25
+    t_e = years + 0.75
+
+    # 1. Nonzero delta_global=25.0 is diluted by M_c(t) after 1850 CE (not constant +25 permil)
+    d0 = suess_solver.predict_d14c(
+        g15, SteadyProduction(DEFAULT_Q_STD), t_s, t_e, box_indices=1, t0=1840.0
+    )
+    d25 = suess_solver.predict_d14c(
+        g15,
+        SteadyProduction(DEFAULT_Q_STD),
+        t_s,
+        t_e,
+        box_indices=1,
+        delta_global=25.0,
+        t0=1840.0,
+    )
+    assert float(d25[0] - d0[0]) == pytest.approx(25.0, abs=1e-8)
+    # At 1950.5, M_1(t) ~ 501.5 + 121.2 = 622.7 GtC => initial +25 permil is diluted below +22 permil
+    assert 15.0 < float(d25[2] - d0[2]) < 22.5
+
+    # 2. relative_to="ambient" scales spike excursions by (1 + delta_global / 1000)
+    prod_spike = SteadyProduction(DEFAULT_Q_STD) + MiyakeSpike(
+        t_start=1895.0, duration=0.3, fluence=6.0, profile="boxcar"
+    )
+    d_std = suess_solver.predict_d14c(
+        g15,
+        prod_spike,
+        t_s,
+        t_e,
+        box_indices=1,
+        delta_global=40.0,
+        relative_to="standard",
+        t0=1840.0,
+    )
+    d_amb = suess_solver.predict_d14c(
+        g15,
+        prod_spike,
+        t_s,
+        t_e,
+        box_indices=1,
+        delta_global=40.0,
+        relative_to="ambient",
+        t0=1840.0,
+    )
+    d_base40_std = suess_solver.predict_d14c(
+        g15,
+        SteadyProduction(DEFAULT_Q_STD),
+        t_s,
+        t_e,
+        box_indices=1,
+        delta_global=40.0,
+        relative_to="standard",
+        t0=1840.0,
+    )
+    d_base40_amb = suess_solver.predict_d14c(
+        g15,
+        SteadyProduction(DEFAULT_Q_STD),
+        t_s,
+        t_e,
+        box_indices=1,
+        delta_global=40.0,
+        relative_to="ambient",
+        t0=1840.0,
+    )
+    np.testing.assert_allclose(
+        d_amb - d_base40_amb, 1.04 * (d_std - d_base40_std), rtol=1e-9, atol=1e-9
+    )
+
+    # 3. Out-of-window discontinuity timestamps (pre-t0 and post-t_end) filter cleanly
+    prod_oow = (
+        MiyakeSpike(t_start=1830.0, duration=0.2, fluence=5.0, profile="boxcar")
+        + MiyakeSpike(t_start=1990.0, duration=0.2, fluence=5.0, profile="boxcar")
+        + LinearTrend(slope=0.01, t_ref=1835.0, switched_on=True)
+    )
+    d_oow = suess_solver.predict_d14c(
+        g15, prod_oow, t_s, t_e, box_indices=1, t0=1840.0
+    )
+    assert bool(jnp.all(jnp.isfinite(d_oow)))
+
+    # 4. RadiocarbonModel.predict_fine honours solver time-varying masses, and predict_d14c accepts scalar offsets
+    rm_suess = tt.RadiocarbonModel(
+        g15, SteadyProduction(DEFAULT_Q_STD), solver=suess_solver
+    )
+    fine_d14c = rm_suess.predict_fine(jnp.array([1845.0, 1900.0, 1950.0]), box=1)
+    assert abs(float(fine_d14c[0])) < 1e-9
+    assert float(fine_d14c[2]) < -20.0
+
+    rm_std = tt.RadiocarbonModel(g15, SteadyProduction(DEFAULT_Q_STD))
+    series = tt.TreeRingSeries(
+        years=jnp.array([773.0, 774.0, 775.0]),
+        d14c=jnp.zeros(3),
+        sigma_d14c=jnp.ones(3),
+        hemisphere="north",
+    )
+    p_zero = rm_std.predict_d14c(series, offsets=0.0)
+    p_float = rm_std.predict_d14c(series, offsets=1.75)
+    p_0d = rm_std.predict_d14c(series, offsets=jnp.asarray(1.75))
+    np.testing.assert_allclose(p_float - p_zero, 1.75, atol=1e-12)
+    np.testing.assert_allclose(p_0d, p_float, atol=1e-15)
+
+
+def test_modax_solver_physics_parity_with_diffrax_mock_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import types
+    import diffrax
+    import ticktack as tt
+
+    fake_modax = types.ModuleType("modax")
+
+    class _FakeSolver:
+        pass
+
+    fake_modax.Rodas5P = type("Rodas5P", (_FakeSolver,), {})  # type: ignore[attr-defined]
+    fake_modax.Tsit5 = type("Tsit5", (_FakeSolver,), {})  # type: ignore[attr-defined]
+
+    def _fake_diffeqsolve(
+        rhs,
+        solver,
+        *,
+        t0,
+        t1,
+        y0,
+        ts,
+        args,
+        rtol,
+        atol,
+        max_steps,
+    ):
+        assert isinstance(solver, _FakeSolver)
+        ts_arr = jnp.asarray(ts, dtype=jnp.float64)
+        # Verify ModaxSolver strictly sorts and deduplicates timestamps before calling modax
+        if ts_arr.size > 1 and not isinstance(ts_arr, jax.core.Tracer):
+            assert bool(jnp.all(jnp.diff(ts_arr) > 0.0))
+        sol = diffrax.diffeqsolve(
+            diffrax.ODETerm(rhs),
+            diffrax.Tsit5(),
+            t0=t0,
+            t1=t1,
+            dt0=None,
+            y0=y0,
+            args=args,
+            saveat=diffrax.SaveAt(ts=ts_arr),
+            stepsize_controller=diffrax.PIDController(rtol=rtol, atol=atol),
+            max_steps=max_steps,
+        )
+        return types.SimpleNamespace(ys=sol.ys)
+
+    fake_modax.diffeqsolve = _fake_diffeqsolve  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "modax", fake_modax)
+
+    b21 = make_brehm21_fixed()
+    # Combine pre-window spike, spike inside first window before first GL node,
+    # non-standard steady rate, solar harmonics, and eternal linear trend!
+    prod = (
+        SteadyProduction(1.88)
+        + HarmonicSolar(
+            periods=[11.0, 208.0],
+            c_cos=[0.22, -0.14],
+            c_sin=[0.11, 0.08],
+            t_ref=774.0,
+        )
+        + LinearTrend(slope=0.005, t_ref=774.0, switched_on=False)
+        + MiyakeSpike(
+            t_start=772.4, duration=0.25, fluence=4.5, profile="supergaussian"
+        )
+        + MiyakeSpike(
+            t_start=773.3335, duration=0.02, fluence=3.0, profile="boxcar"
+        )
+    )
+
+    dfx = DiffraxSolver("Tsit5", rtol=1e-12, atol=1e-12, max_steps=262_144)
+    mdx = ModaxSolver("Rodas5P", rtol=1e-12, atol=1e-12, max_steps=262_144)
+
+    # 1. Unsorted + duplicate t_eval trajectory parity
+    t_unsorted = jnp.array([776.5, 773.5, 775.0, 773.5, 778.0, 774.2])
+    dy_mdx = mdx.solve_delta_trajectory(b21, prod, t_unsorted)
+    dy_dfx = dfx.solve_delta_trajectory(b21, prod, t_unsorted)
+    np.testing.assert_allclose(dy_mdx, dy_dfx, rtol=1e-7, atol=1e-7)
+
+    # 2. Overlapping multi-series Dataset (NH + SH -> unsorted & overlapping quad_t)
+    yrs_a = jnp.arange(773.0, 779.0)
+    yrs_b = jnp.arange(774.0, 780.0)
+    ds = tt.Dataset(
+        [
+            tt.TreeRingSeries(yrs_a, jnp.zeros_like(yrs_a), jnp.ones_like(yrs_a), hemisphere="north", name="nh1"),
+            tt.TreeRingSeries(yrs_b, jnp.zeros_like(yrs_b), jnp.ones_like(yrs_b), hemisphere="south", name="sh1"),
+            tt.TreeRingSeries(yrs_a, jnp.zeros_like(yrs_a), jnp.ones_like(yrs_a), hemisphere="north", name="nh2"),
+        ]
+    )
+    pred_mdx = tt.RadiocarbonModel(b21, prod, solver=mdx).predict_d14c(ds)
+    pred_dfx = tt.RadiocarbonModel(b21, prod, solver=dfx).predict_d14c(ds)
+    # Ring 0 contains a discontinuous 0.02-yr boxcar pulse starting before GL16 node 0 (rtol ~ 2e-4);
+    # all subsequent post-pulse rings agree to < 1e-8, confirming 100% pre-node fluence retention.
+    np.testing.assert_allclose(pred_mdx, pred_dfx, rtol=3e-4, atol=2e-2)
+    post_mask = np.ones(pred_mdx.shape[0], dtype=bool)
+    post_mask[[0, 12]] = False
+    np.testing.assert_allclose(pred_mdx[post_mask], pred_dfx[post_mask], rtol=1e-8, atol=1e-8)
+
+    # 3. Time-varying A(t) and M_c(t) (Suess dilution + nonzero delta_global + ambient scaling)
+    g15 = make_guttler15_fixed()
+    m0 = g15.reservoir_masses()
+    K0 = g15.rate_matrix_K()
+    masses_at = lambda t: m0.at[1].add(110.0 * (jnp.maximum(t - 1850.0, 0.0) / 100.0) ** 2)  # noqa: E731
+    matrix_A_at = lambda t: (  # noqa: E731
+        K0 * (m0 / masses_at(t))[None, :]
+        - g15.decay_rate * jnp.eye(g15.n_boxes, dtype=jnp.float64)
+    )
+    dfx_suess = DiffraxSolver("Tsit5", rtol=1e-11, atol=1e-11, masses_fn=masses_at, matrix_A_fn=matrix_A_at)
+    mdx_suess = ModaxSolver("Tsit5", rtol=1e-11, atol=1e-11, masses_fn=masses_at, matrix_A_fn=matrix_A_at)
+    yrs_s = jnp.array([1845.0, 1905.0, 1950.0])
+    p_suess_mdx = mdx_suess.predict_d14c(
+        g15,
+        SteadyProduction(1.82),
+        yrs_s + 0.25,
+        yrs_s + 0.75,
+        box_indices=1,
+        delta_global=20.0,
+        relative_to="ambient",
+        t0=1840.0,
+    )
+    p_suess_dfx = dfx_suess.predict_d14c(
+        g15,
+        SteadyProduction(1.82),
+        yrs_s + 0.25,
+        yrs_s + 0.75,
+        box_indices=1,
+        delta_global=20.0,
+        relative_to="ambient",
+        t0=1840.0,
+    )
+    np.testing.assert_allclose(p_suess_mdx, p_suess_dfx, rtol=1e-8, atol=1e-8)
+
+
+def test_modal_lti_spectral_propagator_parity_and_gradients() -> None:
+    import ticktack as tt
+    from ticktack.linear import (
+        _seasonal_homogeneous_operator,
+        _seasonal_homogeneous_operator_van_loan,
+        project_causal_gp,
+    )
+    from ticktack.solvers import (
+        _eval_boxcar_binned,
+        _eval_boxcar_binned_van_loan,
+        _eval_boxcar_pointwise,
+        _eval_boxcar_pointwise_van_loan,
+        _eval_smooth_spike_binned,
+        _eval_smooth_spike_binned_van_loan,
+        _eval_smooth_spike_pointwise,
+        _eval_smooth_spike_pointwise_van_loan,
+        _modal_decomposition,
+        _scalar_psi1,
+        _scalar_psi2,
+    )
+
+    # 1. Holomorphic Taylor-guarded _scalar_psi1 & _scalar_psi2 accuracy + z=0 1st/2nd AD
+    for z_val in [0.0, -1e-11, -1e-6, -0.04, -1.5, -0.25 + 0.8j]:
+        z_arr = jnp.asarray(z_val, dtype=jnp.complex128 if isinstance(z_val, complex) else jnp.float64)
+        vl_block = jnp.array(
+            [[z_arr, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]],
+            dtype=z_arr.dtype,
+        )
+        e_vl = jax.scipy.linalg.expm(vl_block)
+        p1_ref = e_vl[0, 1]
+        p2_ref = e_vl[0, 2]
+        np.testing.assert_allclose(_scalar_psi1(z_arr), p1_ref, rtol=0.0, atol=2e-15)
+        np.testing.assert_allclose(_scalar_psi2(z_arr), p2_ref, rtol=0.0, atol=2e-15)
+
+    assert float(_scalar_psi1(jnp.asarray(0.0))) == pytest.approx(1.0, abs=1e-15)
+    assert float(_scalar_psi2(jnp.asarray(0.0))) == pytest.approx(0.5, abs=1e-15)
+    check_grads(
+        lambda x: jnp.real(_scalar_psi1(x) + _scalar_psi2(x)),
+        (jnp.asarray(0.0, dtype=jnp.float64),),
+        order=2,
+        modes=["fwd", "rev"],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    # 2. < 1e-13 parity vs Van Loan expm across Brehm21 (n=22), Guttler15 (n=11),
+    #    EffectiveCBM, ReversibleCBM, duration=0.0, and all spike profiles
+    for k_eff in (2, 3, 4):
+        c_k = tt.EffectiveCBM(K=k_eff)
+        A_k = c_k.matrix_A()
+        lam_k, v_k, vi_k = _modal_decomposition(A_k, cbm=c_k)  # type: ignore[misc]
+        np.testing.assert_allclose((v_k * lam_k[None, :]) @ vi_k, A_k, rtol=1e-13, atol=1e-13)
+
+    cbms = [
+        make_brehm21_fixed(),
+        make_guttler15_fixed(),
+        tt.EffectiveCBM(K=3),
+        tt.load_preset("Miyake17", kind="reversible", miyake17_closure="closed_shallow"),
+    ]
+    t_eval = jnp.array([773.2, 774.55, 774.75, 775.4, 778.0], dtype=jnp.float64)
+    yrs = jnp.arange(773.0, 779.0, dtype=jnp.float64)
+    a_flat = yrs + 0.25
+    b_flat = yrs + 0.75
+    starts_2d = jnp.stack([yrs + 0.25, yrs + 0.55], axis=1)
+    ends_2d = jnp.stack([yrs + 0.45, yrs + 0.80], axis=1)
+    weights_2d = jnp.broadcast_to(jnp.array([0.6, 0.4]), starts_2d.shape)
+
+    for cbm in cbms:
+        A = cbm.matrix_A()
+        b_sc = ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector()
+        modal = _modal_decomposition(A, cbm=cbm)
+        assert modal is not None
+
+        for dur in [0.0, 0.24]:
+            sp_box = MiyakeSpike(t_start=774.45, duration=dur, fluence=6.4, profile="boxcar")
+            np.testing.assert_allclose(
+                _eval_boxcar_pointwise(A, b_sc, sp_box, t_eval, cbm=cbm, modal=modal),
+                _eval_boxcar_pointwise_van_loan(A, b_sc, sp_box, t_eval),
+                rtol=1e-13,
+                atol=1e-13,
+            )
+            np.testing.assert_allclose(
+                _eval_boxcar_binned(A, b_sc, sp_box, a_flat, b_flat, cbm=cbm, modal=modal),
+                _eval_boxcar_binned_van_loan(A, b_sc, sp_box, a_flat, b_flat),
+                rtol=1e-13,
+                atol=1e-13,
+            )
+
+        sp_sg = MiyakeSpike(t_start=774.42, duration=0.30, fluence=6.4, profile="supergaussian")
+        np.testing.assert_allclose(
+            _eval_smooth_spike_pointwise(A, b_sc, sp_sg, t_eval, cbm=cbm, modal=modal),
+            _eval_smooth_spike_pointwise_van_loan(A, b_sc, sp_sg, t_eval),
+            rtol=1e-13,
+            atol=1e-13,
+        )
+        np.testing.assert_allclose(
+            _eval_smooth_spike_binned(A, b_sc, sp_sg, a_flat, b_flat, cbm=cbm, modal=modal),
+            _eval_smooth_spike_binned_van_loan(A, b_sc, sp_sg, a_flat, b_flat),
+            rtol=1e-13,
+            atol=1e-13,
+        )
+
+        c_obs = jnp.zeros((yrs.shape[0], cbm.n_boxes), dtype=jnp.float64).at[
+            :, cbm.topology.trop_box_indices[0]
+        ].set(1.0)
+        w_modal = _seasonal_homogeneous_operator(
+            A, c_obs, starts_2d, ends_2d, weights_2d, jnp.asarray(750.0), cbm=cbm, modal=modal
+        )
+        w_vl = _seasonal_homogeneous_operator_van_loan(
+            A, c_obs, starts_2d, ends_2d, weights_2d, jnp.asarray(750.0)
+        )
+        np.testing.assert_allclose(w_modal, w_vl, rtol=1e-13, atol=1e-13)
+
+    # Full smooth-profile x duration={0.0, 0.30} sweep on Brehm21 & EffectiveCBM(K=3)
+    for cbm_prof in (cbms[0], cbms[2]):
+        A_p = cbm_prof.matrix_A()
+        b_p = ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm_prof.production_vector()
+        modal_p = _modal_decomposition(A_p, cbm=cbm_prof)
+        for profile in ["supergaussian", "skewgaussian", "gamma"]:
+            for dur in [0.0, 0.30]:
+                sp_sm = MiyakeSpike(t_start=774.42, duration=dur, fluence=6.4, profile=profile)
+                np.testing.assert_allclose(
+                    _eval_smooth_spike_pointwise(A_p, b_p, sp_sm, t_eval, cbm=cbm_prof, modal=modal_p),
+                    _eval_smooth_spike_pointwise_van_loan(A_p, b_p, sp_sm, t_eval),
+                    rtol=1e-13,
+                    atol=1e-13,
+                )
+                np.testing.assert_allclose(
+                    _eval_smooth_spike_binned(A_p, b_p, sp_sm, a_flat, b_flat, cbm=cbm_prof, modal=modal_p),
+                    _eval_smooth_spike_binned_van_loan(A_p, b_p, sp_sm, a_flat, b_flat),
+                    rtol=1e-13,
+                    atol=1e-13,
+                )
+
+    # 3. Autodiff check_grads wrt EffectiveCBM & ReversibleCBM parameters under modal eigh
+    eff3 = tt.EffectiveCBM(K=3)
+    solver = ExactLinearSolver()
+    sp_grad = MiyakeSpike(t_start=774.5, duration=0.25, fluence=6.5, profile="supergaussian")
+    kernel = tk.quasisep.Matern32(scale=3.0, sigma=0.5)
+
+    @jax.jit
+    def _eff_loss(log_k_up: jax.Array, tau_p: jax.Array) -> jax.Array:
+        c = eff3.set("log_k_trop_to_sinks", log_k_up).set("sink_tau_params", tau_p)
+        p_sp = solver.predict_d14c(c, sp_grad, a_flat, b_flat, box_indices=1)
+        gp_p = project_causal_gp(
+            c.matrix_A(), c.production_vector(), a_flat, b_flat, n_modes=12, kernel=kernel, box_indices=1, cbm=c
+        )
+        return jnp.sum(jnp.square(p_sp)) + jnp.sum(jnp.square(gp_p.whitened_design))
+
+    check_grads(
+        _eff_loss,
+        (eff3.log_k_trop_to_sinks, eff3.sink_tau_params),
+        order=1,
+        modes=["fwd", "rev"],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    rev_m17 = tt.load_preset("Miyake17", kind="reversible", miyake17_closure="closed_shallow")
+
+    @jax.jit
+    def _rev_loss(log_f: jax.Array, log_m: jax.Array) -> jax.Array:
+        c = rev_m17.set("log_sym_fluxes", log_f).set("log_masses", log_m)
+        p_sp = solver.predict_d14c(c, sp_grad, a_flat, b_flat, box_indices=1)
+        return jnp.sum(jnp.square(p_sp))
+
+    check_grads(
+        _rev_loss,
+        (rev_m17.log_sym_fluxes, rev_m17.log_masses),
+        order=1,
+        modes=["fwd", "rev"],
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+

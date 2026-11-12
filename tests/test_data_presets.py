@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import importlib.util
 import sys
-import types
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-
-# On standalone Wave 1 branches before `src/ticktack/__init__.py` is updated,
-# legacy `ticktack.py` imports removed `pkg_resources` on package init.
-if importlib.util.find_spec("pkg_resources") is None:
-    sys.modules["pkg_resources"] = types.ModuleType("pkg_resources")
 
 import jax
 
@@ -46,11 +39,13 @@ from ticktack.plotting import (
     plot_fisher_spectrum,
     plot_production_posterior,
 )
+from ticktack.cbm import OpenCBM, ReversibleCBM
 from ticktack.presets import (
     LEGACY_V1_C14_OVER_C12_RATIO,
     PRESET_NAMES,
     PresetSpec,
     get_preset_spec,
+    load_preset,
     load_preset_hdf5,
     save_preset_hdf5,
 )
@@ -547,3 +542,37 @@ def test_stateless_plotting_functions_agg() -> None:
 
     # Confirm zero global rcParams side effects
     assert dict(mpl.rcParams) == rc_before
+
+
+def test_load_preset_reversible_rejects_open_sink_miyake17() -> None:
+    """``kind='reversible'`` must reject open-sink presets unless explicitly closed."""
+    with pytest.raises(ValueError, match="open sink_rates"):
+        load_preset("Miyake17", kind="reversible")
+    with pytest.raises(ValueError, match="open sink_rates"):
+        load_preset("Miyake17", kind="balanced")
+
+    cbm_open = load_preset("Miyake17", kind="open")
+    assert isinstance(cbm_open, OpenCBM)
+    assert float(jnp.max(cbm_open.sink_rates())) > 0.0
+
+    cbm_closed = load_preset(
+        "Miyake17", kind="reversible", miyake17_closure="closed_shallow"
+    )
+    assert isinstance(cbm_closed, ReversibleCBM)
+    assert float(jnp.max(cbm_closed.sink_rates())) == 0.0
+
+
+def test_packaging_provenance_data_and_ci_ruff_configured() -> None:
+    """Verify bundled provenance files and CI ruff lint check are configured."""
+    import tomllib
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    pkg_data = pyproject["tool"]["setuptools"]["package-data"]["ticktack"]
+    assert "data/README.md" in pkg_data
+    assert "data/datasets/REFERENCE_*.txt" in pkg_data
+
+    ci_yaml = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "ruff check src tests" in ci_yaml
+

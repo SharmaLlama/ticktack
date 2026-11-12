@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import math
 import sys
-import types
 from pathlib import Path
 
 import jax
@@ -38,13 +37,6 @@ jax.config.update("jax_enable_x64", True)
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
-
-# Guard against legacy v1 ticktack/__init__.py importing pkg_resources (and matplotlib/emcee)
-# before Wave 2 replaces the package root __init__.py:
-if (SRC_DIR / "ticktack" / "ticktack.py").exists():
-    pkg = types.ModuleType("ticktack")
-    pkg.__path__ = [str(SRC_DIR / "ticktack")]
-    sys.modules.setdefault("ticktack", pkg)
 
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
@@ -1422,3 +1414,173 @@ def test_relaxation_fisher_modes_mcwhirter_pike_spectrum():
     np.testing.assert_allclose(
         jnp.sum(res_dlns.design_matrix, axis=0), 0.0, atol=1e-12
     )
+
+
+def test_harmonic_solar_static_periods_scalar_prior_cbm_sd_and_monotonic_deff():
+    """Verify static-by-default ``HarmonicSolar.periods``, scalar ``prior_cbm_sd``
+    with ``exclude_total_mass=True``, and monotonic ``d_eff(K)`` on ``EffectiveCBM``.
+    """
+    import equinox as eqx
+    import ticktack as tt
+
+    # 1) HarmonicSolar.periods is static by default (only 2*M leaves) and dynamic when fit_periods=True
+    sol_fixed = tt.HarmonicSolar(
+        periods=[11.0, 208.0], c_cos=[0.18, -0.09], c_sin=[0.07, 0.04], t_ref=775.0
+    )
+    sol_fit = tt.HarmonicSolar(
+        periods=[11.0, 208.0],
+        c_cos=[0.18, -0.09],
+        c_sin=[0.07, 0.04],
+        t_ref=775.0,
+        fit_periods=True,
+    )
+    n_fixed = sum(
+        int(x.size) for x in jax.tree_util.tree_leaves(eqx.filter(sol_fixed, eqx.is_inexact_array))
+    )
+    n_fit = sum(
+        int(x.size) for x in jax.tree_util.tree_leaves(eqx.filter(sol_fit, eqx.is_inexact_array))
+    )
+    assert n_fixed == 4
+    assert n_fit == 6
+
+    years = jnp.arange(765.0, 815.0, 1.0)
+    t_s = years + 4.0 / 12.0
+    t_e = years + 8.0 / 12.0
+    sigma = jnp.full(years.shape, 1.1, dtype=jnp.float64)
+    solver = tt.ExactLinearSolver()
+    spike = tt.MiyakeSpike(t_start=774.55, duration=0.25, fluence=6.5, profile="boxcar")
+
+    cbm_k3 = tt.EffectiveCBM(K=3)
+    res_sol_fixed = cbm_fisher_spectrum(
+        lambda m, s: solver.predict_d14c(m, spike + s, t_s, t_e, box_indices=1),
+        cbm_k3,
+        sigma,
+        psi_nuisance=sol_fixed,
+        prior_cbm_sd=0.35,
+        prior_psi_sd=0.5,
+    )
+    res_sol_fit = cbm_fisher_spectrum(
+        lambda m, s: solver.predict_d14c(m, spike + s, t_s, t_e, box_indices=1),
+        cbm_k3,
+        sigma,
+        psi_nuisance=sol_fit,
+        prior_cbm_sd=0.35,
+        prior_psi_sd=jnp.array([0.5, 0.5, 0.5, 0.5, 1.0, 5.0]),
+    )
+    assert res_sol_fixed.joint_fisher.shape == (4 + 4, 4 + 4)
+    assert res_sol_fit.joint_fisher.shape == (4 + 6, 4 + 6)
+
+    # 2) Scalar prior_cbm_sd=0.35 on BalancedCBM (Brehm21) respects exclude_total_mass=True
+    cbm_b21 = tt.load_preset("Brehm21", kind="balanced")
+    trop_nh = cbm_b21.box_index("Troposphere", "north")
+    res_b21_scalar = cbm_fisher_spectrum(
+        lambda m, fl: solver.predict_d14c(
+            m,
+            tt.MiyakeSpike(t_start=774.55, duration=0.25, fluence=fl[0], profile="boxcar"),
+            t_s,
+            t_e,
+            box_indices=trop_nh,
+        ),
+        cbm_b21,
+        sigma,
+        psi_nuisance=jnp.array([6.5]),
+        prior_cbm_sd=0.35,
+        prior_psi_sd=2.0,
+        exclude_total_mass=True,
+    )
+    n_free = cbm_b21.log_rates_free.size
+    res_b21_vec = cbm_fisher_spectrum(
+        lambda m, fl: solver.predict_d14c(
+            m,
+            tt.MiyakeSpike(t_start=774.55, duration=0.25, fluence=fl[0], profile="boxcar"),
+            t_s,
+            t_e,
+            box_indices=trop_nh,
+        ),
+        cbm_b21,
+        sigma,
+        psi_nuisance=jnp.array([6.5]),
+        prior_cbm_sd=jnp.append(jnp.full(n_free, 0.35, dtype=jnp.float64), jnp.inf),
+        prior_psi_sd=2.0,
+    )
+    assert res_b21_scalar.eigenvalues.shape == (n_free,)
+    np.testing.assert_allclose(
+        res_b21_scalar.eigenvalues, res_b21_vec.eigenvalues, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        res_b21_scalar.d_eff, res_b21_vec.d_eff, rtol=1e-12, atol=1e-12
+    )
+
+    # 3) Monotonic d_eff(K) and info_bits(K) across K = 2, 3, 4 on EffectiveCBM
+    deffs = []
+    bits = []
+    for k in (2, 3, 4):
+        eff_k = tt.EffectiveCBM(K=k)
+        rk = cbm_fisher_spectrum(
+            lambda m, fl: solver.predict_d14c(
+                m,
+                tt.MiyakeSpike(t_start=774.55, duration=0.25, fluence=fl[0], profile="boxcar"),
+                t_s,
+                t_e,
+                box_indices=1,
+            ),
+            eff_k,
+            sigma,
+            psi_nuisance=jnp.array([6.5]),
+            prior_cbm_sd=0.35,
+            prior_psi_sd=2.0,
+        )
+        deffs.append(float(rk.d_eff))
+        bits.append(float(rk.info_bits))
+    assert deffs[0] < deffs[1] < deffs[2], f"Expected monotonic d_eff(K), got {deffs}"
+    assert bits[0] < bits[1] < bits[2], f"Expected monotonic info_bits(K), got {bits}"
+
+
+def test_kalman_gp_marginal_default_dt_commensurate_with_monthly_tree_ring_series():
+    """Verify default ``dt=None`` (``1/24`` yr) divides standard monthly NH and SH
+    ``TreeRingSeries`` growth windows without ``ValueError``.
+    """
+    import ticktack as tt
+    from ticktack.linear import kalman_gp_marginal, project_causal_gp
+
+    a_stiff, b_stiff, c_stiff = _make_stiff_three_box_cbm()
+    yrs_nh = jnp.arange(770.0, 778.0, 1.0)
+    yrs_sh = jnp.arange(770.0, 778.0, 1.0)
+    s_nh = tt.TreeRingSeries(yrs_nh, jnp.zeros_like(yrs_nh), jnp.ones_like(yrs_nh), hemisphere="north")
+    s_sh = tt.TreeRingSeries(yrs_sh, jnp.zeros_like(yrs_sh), jnp.ones_like(yrs_sh), hemisphere="south")
+    t_s = jnp.concatenate([s_nh.t_starts, s_sh.t_starts])
+    t_e = jnp.concatenate([s_nh.t_ends, s_sh.t_ends])
+    n_obs = t_s.shape[0]
+    obs_mat = jnp.broadcast_to(c_stiff[None, :], (n_obs, 3))
+    rng = np.random.default_rng(1234)
+    resid = jnp.asarray(rng.standard_normal(n_obs) * 1.5, dtype=jnp.float64)
+    sigma = jnp.full(n_obs, 1.1, dtype=jnp.float64)
+    kern = (1.3**2) * tgk.Matern32(2.8)
+
+    # Default t_grid=None, dt=None must succeed on [4/12, 8/12] and [9/12, 14/12] windows
+    kal = kalman_gp_marginal(
+        a_stiff,
+        b_stiff,
+        kern,
+        resid,
+        sigma,
+        t_s,
+        t_e,
+        obs_matrix=obs_mat,
+    )
+    pod_ll = (
+        project_causal_gp(
+            a_stiff,
+            b_stiff,
+            t_s,
+            t_e,
+            pad=20.0,
+            n_modes=150,
+            kernel=kern,
+            obs_matrix=obs_mat,
+        )
+        .to_linear_marginal()
+        .loglike(resid, sigma)
+    )
+    np.testing.assert_allclose(kal.loglike, pod_ll, rtol=1e-6, atol=1e-6)
+

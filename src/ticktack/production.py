@@ -459,12 +459,19 @@ class HarmonicSolar(ProductionTerm):
     Models ``delta_q(t) = sum_m [c_cos[m] cos(omega_m (t - t_ref)) + c_sin[m] sin(omega_m (t - t_ref))]``,
     eliminating phase-wrapping singularities and enabling closed-form resolvent
     evaluation and ``LinearMarginal`` marginalization.
+
+    By default (``fit_periods=False``), ``periods`` are stored statically so
+    passing ``HarmonicSolar`` in ``psi_nuisance`` only differentiates the linear
+    quadrature amplitudes ``(c_cos, c_sin)`` unless ``fit_periods=True`` (or
+    traced ``periods``) is supplied.
     """
 
-    periods: jax.Array
     c_cos: jax.Array
     c_sin: jax.Array
+    periods_array: jax.Array | None
+    _periods_static: tuple[float, ...] = eqx.field(static=True)
     t_ref: float = eqx.field(static=True)
+    fit_periods: bool = eqx.field(static=True)
 
     def __init__(
         self,
@@ -473,6 +480,7 @@ class HarmonicSolar(ProductionTerm):
         c_sin: ArrayLike | None = None,
         *,
         t_ref: float = 0.0,
+        fit_periods: bool = False,
     ):
         p = jnp.atleast_1d(jnp.asarray(periods, dtype=jnp.float64))
         m = p.shape[0]
@@ -485,10 +493,25 @@ class HarmonicSolar(ProductionTerm):
             cs = jnp.broadcast_to(
                 jnp.atleast_1d(jnp.asarray(c_sin, dtype=jnp.float64)), (m,)
             )
-        self.periods = p
         self.c_cos = jnp.array(cc, dtype=jnp.float64)
         self.c_sin = jnp.array(cs, dtype=jnp.float64)
         self.t_ref = float(t_ref)
+
+        is_traced = isinstance(p, jax.core.Tracer)
+        if fit_periods or is_traced:
+            self.fit_periods = True
+            self.periods_array = jnp.array(p, dtype=jnp.float64)
+            self._periods_static = ()
+        else:
+            self.fit_periods = False
+            self.periods_array = None
+            self._periods_static = tuple(float(x) for x in p.reshape(-1).tolist())
+
+    @property
+    def periods(self) -> jax.Array:
+        if self.periods_array is not None:
+            return self.periods_array
+        return jnp.asarray(self._periods_static, dtype=jnp.float64)
 
     @classmethod
     def from_polar(
@@ -499,6 +522,7 @@ class HarmonicSolar(ProductionTerm):
         *,
         t_ref: float = 0.0,
         convention: Literal["cos", "sin"] = "cos",
+        fit_periods: bool = False,
     ) -> HarmonicSolar:
         """Construct ``HarmonicSolar`` from polar amplitudes and phases (radians).
 
@@ -523,7 +547,13 @@ class HarmonicSolar(ProductionTerm):
             c_sin = amp * jnp.cos(phi)
         else:
             raise ValueError(f"convention must be 'cos' or 'sin', got {convention!r}.")
-        return cls(periods=p, c_cos=c_cos, c_sin=c_sin, t_ref=t_ref)
+        return cls(
+            periods=periods,
+            c_cos=c_cos,
+            c_sin=c_sin,
+            t_ref=t_ref,
+            fit_periods=fit_periods,
+        )
 
     @property
     def is_linear_marginalizable(self) -> bool:
