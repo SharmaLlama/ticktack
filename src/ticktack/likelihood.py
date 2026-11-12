@@ -36,10 +36,18 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 import numpy as np
+import optimistix as optx
 import zodiax as zdx
 from jax.typing import ArrayLike
 
 from .data import Dataset
+from .fields import (
+    GaussianField,
+    LogGaussianField,
+    _safe_sqrt,
+    build_dct_response_operator,
+    idct2,
+)
 from .linear import (
     CausalGPProjection,
     LinearMarginal,
@@ -386,6 +394,7 @@ class LinearMarginalConfig(eqx.Module):
     marginalise_solar: bool = eqx.field(static=True)
     marginalise_trend: bool = eqx.field(static=True)
     marginalise_gp: bool = eqx.field(static=True)
+    marginalise_field: bool = eqx.field(static=True)
     n_gp_modes: int | None = eqx.field(static=True)
     include_gp_initial_cov: bool = eqx.field(static=True)
     whiten_method: str = eqx.field(static=True)
@@ -404,9 +413,11 @@ class LinearMarginalConfig(eqx.Module):
         marginalise_solar: bool | None = None,
         marginalise_trend: bool | None = None,
         marginalise_gp: bool | None = None,
+        marginalise_field: bool | None = None,
         marginalize_solar: bool | None = None,
         marginalize_trend: bool | None = None,
         marginalize_gp: bool | None = None,
+        marginalize_field: bool | None = None,
         n_gp_modes: int | None = None,
         include_gp_initial_cov: bool = True,
         whiten_method: Literal["cholesky", "qr", "rank_one"] = "cholesky",
@@ -431,6 +442,11 @@ class LinearMarginalConfig(eqx.Module):
             if marginalize_gp is not None
             else (True if marginalise_gp is None else marginalise_gp)
         )
+        eff_field = (
+            marginalize_field
+            if marginalize_field is not None
+            else (eff_gp if marginalise_field is None else marginalise_field)
+        )
         self.offset_mode = str(offset_mode)
         self.global_prior_mean = float(global_prior_mean)
         self.global_prior_sd = float(global_prior_sd)
@@ -440,6 +456,7 @@ class LinearMarginalConfig(eqx.Module):
         self.marginalise_solar = bool(eff_solar)
         self.marginalise_trend = bool(eff_trend)
         self.marginalise_gp = bool(eff_gp)
+        self.marginalise_field = bool(eff_field)
         self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.whiten_method = str(whiten_method)
@@ -456,6 +473,10 @@ class LinearMarginalConfig(eqx.Module):
     def marginalize_gp(self) -> bool:
         return self.marginalise_gp
 
+    @property
+    def marginalize_field(self) -> bool:
+        return self.marginalise_field
+
 
 # ---------------------------------------------------------------------------
 # 4. Internal helpers: conditional term partitioning, padded windows, designs
@@ -463,8 +484,8 @@ class LinearMarginalConfig(eqx.Module):
 
 
 def _has_loggp(production: ProductionTerm) -> bool:
-    """Return True if ``production`` is or contains a :class:`LogGPProduction`."""
-    if isinstance(production, LogGPProduction):
+    """Return True if ``production`` is or contains a :class:`LogGPProduction` or :class:`LogGaussianField`."""
+    if isinstance(production, (LogGPProduction, LogGaussianField)):
         return True
     if isinstance(production, ProductionSum):
         return any(_has_loggp(p) for p in production.parts)
@@ -479,6 +500,7 @@ def _partition_terms_for_cfg(
     list[HarmonicSolar],
     list[LinearTrend],
     list[GPProduction],
+    list[GaussianField],
 ]:
     """Partition production components into unmarginalized vs marginalized lists.
 
@@ -494,6 +516,7 @@ def _partition_terms_for_cfg(
     solar_terms: list[HarmonicSolar] = []
     trend_terms: list[LinearTrend] = []
     gp_terms: list[GPProduction] = []
+    field_terms: list[GaussianField] = []
 
     for term in parts:
         if isinstance(term, HarmonicSolar) and cfg.marginalise_solar:
@@ -502,10 +525,12 @@ def _partition_terms_for_cfg(
             trend_terms.append(term)
         elif isinstance(term, GPProduction) and cfg.marginalise_gp:
             gp_terms.append(term)
+        elif isinstance(term, GaussianField) and cfg.marginalise_field:
+            field_terms.append(term)
         else:
             unmarginalized.append(term)
 
-    return unmarginalized, solar_terms, trend_terms, gp_terms
+    return unmarginalized, solar_terms, trend_terms, gp_terms, field_terms
 
 
 def _build_base_production(
@@ -655,7 +680,7 @@ def _build_marginal_design_with_projections(
         pmean_parts.append(mu_off)
         psd_parts.append(sd_off)
 
-    _, solar_terms, trend_terms, gp_terms = _partition_terms_for_cfg(
+    _, solar_terms, trend_terms, gp_terms, field_terms = _partition_terms_for_cfg(
         model.production, cfg
     )
 
@@ -750,6 +775,24 @@ def _build_marginal_design_with_projections(
             pmean_parts.append(jnp.zeros((r_total,), dtype=jnp.float64))
             psd_parts.append(jnp.ones((r_total,), dtype=jnp.float64))
 
+    # 5. Marginalized GaussianField reflecting-boundary DCT-II columns
+    if field_terms and n_tot > 0:
+        for gf in field_terms:
+            op_gf = build_dct_response_operator(
+                cbm,
+                dataset,
+                t_start=gf.t_start,
+                t_end=gf.t_end,
+                n_grid=gf.n_grid,
+                q_std=model.q_std,
+                alpha_unit=model.alpha_unit,
+                template=gf.template,
+            )
+            H_gf = op_gf.w_dct * _safe_sqrt(gf.power_spectrum())[None, :]
+            design_cols.append(H_gf)
+            pmean_parts.append(jnp.zeros((gf.n_grid,), dtype=jnp.float64))
+            psd_parts.append(jnp.ones((gf.n_grid,), dtype=jnp.float64))
+
     if design_cols:
         X = jnp.concatenate(design_cols, axis=1)
         pm = jnp.concatenate(pmean_parts)
@@ -781,7 +824,7 @@ def _nonlinear_residual(
     if dataset.n_obs == 0:
         return jnp.zeros((0,), dtype=jnp.float64)
     cfg_eff = LinearMarginalConfig() if cfg is None else cfg
-    unmarginalized, _, _, _ = _partition_terms_for_cfg(model.production, cfg_eff)
+    unmarginalized, _, _, _, _ = _partition_terms_for_cfg(model.production, cfg_eff)
     base_prod = _build_base_production(unmarginalized, model.q_std)
 
     if not isinstance(model.solver, ModaxSolver):
@@ -825,6 +868,27 @@ def _nonlinear_residual(
     return dataset.d14c_flat - pred_flat
 
 
+def _uses_joint_mode(
+    model: RadiocarbonModel,
+    parameter_space: ParameterSpace | None,
+    cfg: LinearMarginalConfig,
+) -> bool:
+    """Return True when inference runs in joint mode rather than marginalizing ``production``."""
+    if isinstance(model.solver, ModaxSolver):
+        return True
+    lgf, _ = _extract_single_lgf(model.production)
+    if lgf is not None:
+        if not cfg.marginalise_field:
+            return True
+        if parameter_space is None:
+            return False
+        return any(
+            spec.path == "production.latent" or spec.path.endswith(".latent")
+            for spec in parameter_space.specs
+        )
+    return _has_loggp(model.production)
+
+
 def _marginal_design_is_static(
     base_model: RadiocarbonModel,
     parameter_space: ParameterSpace,
@@ -834,7 +898,7 @@ def _marginal_design_is_static(
     if isinstance(base_model.solver, ModaxSolver):
         return False
 
-    joint_mode = _has_loggp(base_model.production)
+    joint_mode = _uses_joint_mode(base_model, parameter_space, cfg)
     for spec in parameter_space.specs:
         p = spec.path
         if p in ("cbm", "q_std", "alpha_unit") or p.startswith("cbm."):
@@ -844,6 +908,9 @@ def _marginal_design_is_static(
         # In joint mode only baseline offsets are marginalized, which depend solely on CBM/q_std/alpha_unit.
         return True
 
+    if _extract_single_lgf(base_model.production)[0] is not None:
+        return False
+
     prod = base_model.production
     if isinstance(prod, ProductionSum):
         marg_names = {
@@ -852,6 +919,7 @@ def _marginal_design_is_static(
             if (isinstance(part, HarmonicSolar) and cfg.marginalise_solar)
             or (isinstance(part, LinearTrend) and cfg.marginalise_trend)
             or (isinstance(part, GPProduction) and cfg.marginalise_gp)
+            or (isinstance(part, GaussianField) and cfg.marginalise_field)
         }
         for spec in parameter_space.specs:
             p = spec.path
@@ -866,6 +934,7 @@ def _marginal_design_is_static(
         (isinstance(prod, HarmonicSolar) and cfg.marginalise_solar)
         or (isinstance(prod, LinearTrend) and cfg.marginalise_trend)
         or (isinstance(prod, GPProduction) and cfg.marginalise_gp)
+        or (isinstance(prod, GaussianField) and cfg.marginalise_field)
     )
     if is_marg_single:
         for spec in parameter_space.specs:
@@ -922,9 +991,7 @@ def _make_fast_unconstrained_loglike(
 ) -> Callable[[jax.Array], jax.Array]:
     """Build a fast ``u_vec -> log_likelihood`` closure, pre-factoring ``LinearMarginal`` when static."""
     cfg_eff = LinearMarginalConfig() if cfg is None else cfg
-    joint_mode = _has_loggp(base_model.production) or isinstance(
-        base_model.solver, ModaxSolver
-    )
+    joint_mode = _uses_joint_mode(base_model, parameter_space, cfg_eff)
 
     if (
         dataset.n_obs > 0
@@ -1014,6 +1081,103 @@ def _make_fast_unconstrained_loglike(
 # ---------------------------------------------------------------------------
 
 
+def _extract_single_lgf(
+    production: ProductionTerm,
+) -> tuple[LogGaussianField | None, list[ProductionTerm]]:
+    parts = (
+        list(production.parts)
+        if isinstance(production, ProductionSum)
+        else [production]
+    )
+    lgfs = [p for p in parts if isinstance(p, LogGaussianField)]
+    if len(lgfs) != 1:
+        return None, parts
+    others = [p for p in parts if not isinstance(p, LogGaussianField)]
+    return lgfs[0], others
+
+
+def _laplace_marginal_log_likelihood_lgf(
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    lgf: LogGaussianField,
+    other_parts: list[ProductionTerm],
+    cfg: LinearMarginalConfig,
+    sigma: jax.Array,
+) -> jax.Array:
+    """Laplace-marginalized log-likelihood over ``LogGaussianField`` latent ``z ~ N(0, I)``."""
+    if dataset.n_obs == 0:
+        return jnp.asarray(0.0, dtype=jnp.float64)
+    cfg_no_field = LinearMarginalConfig(
+        offset_mode=cfg.offset_mode,
+        global_prior_mean=cfg.global_prior_mean,
+        global_prior_sd=cfg.global_prior_sd,
+        lab_prior_sd=cfg.lab_prior_sd,
+        solar_prior_sd=cfg.solar_prior_sd,
+        trend_prior_sd=cfg.trend_prior_sd,
+        marginalise_solar=cfg.marginalise_solar,
+        marginalise_trend=cfg.marginalise_trend,
+        marginalise_gp=cfg.marginalise_gp,
+        marginalise_field=False,
+        n_gp_modes=cfg.n_gp_modes,
+        include_gp_initial_cov=cfg.include_gp_initial_cov,
+        whiten_method=cfg.whiten_method,
+    )
+    model_no_lgf = RadiocarbonModel(
+        model.cbm,
+        _build_base_production(other_parts, model.q_std),
+        solver=model.solver,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
+    )
+    resid_base = _nonlinear_residual(model_no_lgf, dataset, cfg_no_field)
+    X_o, pm_o, ps_o = _build_marginal_design(model_no_lgf, dataset, cfg_no_field)
+    lm_o = LinearMarginal(X_o, prior_mean=pm_o, prior_sd=ps_o, method=cfg.whiten_method)
+    shift_c, inv_sig, w_mat, p_right, const_n = _prefactor_static_whiten(lm_o, sigma)
+
+    x_arr = (resid_base - shift_c) * inv_sig
+    x_target = x_arr - w_mat @ (p_right @ x_arr)
+    op_lgf = build_dct_response_operator(
+        model.cbm,
+        dataset,
+        t_start=lgf.t_start,
+        t_end=lgf.t_end,
+        n_grid=lgf.n_grid,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
+    )
+    wg_scaled = inv_sig[:, None] * op_lgf.w_grid
+    w_grid_eff = wg_scaled - w_mat @ (p_right @ wg_scaled)
+
+    def _r_eff_of_z(z_in: jax.Array) -> jax.Array:
+        dq = lgf.with_latent(z_in).evaluate_grid(q_std=model.q_std)
+        return w_grid_eff @ dq - x_target
+
+    def _ham_z(z_in: jax.Array) -> jax.Array:
+        r_e = _r_eff_of_z(z_in)
+        return 0.5 * (r_e @ r_e) + 0.5 * (z_in @ z_in)
+
+    sol_z = optx.least_squares(
+        lambda z_in, _: jnp.concatenate([_r_eff_of_z(z_in), z_in], axis=0),
+        optx.LevenbergMarquardt(rtol=1e-9, atol=1e-9),
+        jax.lax.stop_gradient(lgf.latent),
+        max_steps=50,
+        throw=False,
+    )
+    z_anchor = jax.lax.stop_gradient(sol_z.value)
+    z_c = z_anchor
+    for _ in range(2):
+        g_z = jax.grad(_ham_z)(z_c)
+        k_zz = jax.hessian(_ham_z)(z_c)
+        k_zz = 0.5 * (k_zz + k_zz.T)
+        z_c = z_c - jnp.linalg.solve(k_zz, g_z)
+
+    r_map = _r_eff_of_z(z_c)
+    j_map = jax.jacfwd(_r_eff_of_z)(z_c)
+    chol = jnp.linalg.cholesky(jnp.eye(lgf.n_grid, dtype=jnp.float64) + j_map.T @ j_map)
+    half_ld_field = jnp.sum(jnp.log(jnp.diag(chol)))
+    return const_n - 0.5 * (r_map @ r_map) - 0.5 * (z_c @ z_c) - half_ld_field
+
+
 def marginal_log_likelihood(
     model: RadiocarbonModel,
     dataset: Dataset,
@@ -1021,7 +1185,7 @@ def marginal_log_likelihood(
     *,
     sigma_jitter: ArrayLike | None = None,
 ) -> jax.Array:
-    """Exact marginal Gaussian log-likelihood (analytically marginalized linear parameters)."""
+    """Exact marginal Gaussian log-likelihood (or Laplace-marginalized for ``LogGaussianField``)."""
     if cfg is None:
         cfg = LinearMarginalConfig()
 
@@ -1031,6 +1195,13 @@ def marginal_log_likelihood(
             jnp.square(sigma)
             + jnp.square(jnp.asarray(sigma_jitter, dtype=jnp.float64))
         )
+
+    if cfg.marginalise_field and not isinstance(model.solver, ModaxSolver):
+        lgf, other_parts = _extract_single_lgf(model.production)
+        if lgf is not None:
+            return _laplace_marginal_log_likelihood_lgf(
+                model, dataset, lgf, other_parts, cfg, sigma
+            )
 
     resid = _nonlinear_residual(model, dataset, cfg)
     X, prior_mean, prior_sd = _build_marginal_design(model, dataset, cfg)
@@ -1078,6 +1249,7 @@ def _offset_only_cfg(cfg: LinearMarginalConfig) -> LinearMarginalConfig:
         marginalise_solar=False,
         marginalise_trend=False,
         marginalise_gp=False,
+        marginalise_field=False,
         whiten_method=cfg.whiten_method,
     )
 
@@ -1290,7 +1462,7 @@ def linear_posterior(
         r_box = r_ss_ratio[target_box]
         scale_box = 1000.0 / (y_trop * m_rel[target_box])
 
-        unmarg, solar_terms, trend_terms, _ = _partition_terms_for_cfg(
+        unmarg, solar_terms, trend_terms, _, field_terms = _partition_terms_for_cfg(
             model.production, cfg
         )
         base_prod = _build_base_production(unmarg, model.q_std)
@@ -1419,6 +1591,38 @@ def linear_posterior(
             else:
                 phi_d14c_gp = phi_d14c_modes
             phi_d14c_cols.append(phi_d14c_gp)
+
+        # 5. Marginalized GaussianField columns
+        for gf in field_terms:
+            n_g = gf.n_grid
+            amp_gf = _safe_sqrt(gf.power_spectrum())
+            b_knots = idct2(jnp.eye(n_g, dtype=jnp.float64), axis=0) * amp_gf[None, :]
+            if gf.template is not None:
+                b_knots = jnp.asarray(gf.template, dtype=jnp.float64)[:, None] * b_knots
+            in_win = (t_fine_arr >= gf.t_start) & (t_fine_arr <= gf.t_end)
+            pos = jnp.clip((t_fine_arr - gf.t_start) / gf.dt, 0.0, float(n_g - 1))
+            idx0 = jnp.clip(jnp.floor(pos).astype(jnp.int32), 0, n_g - 2)
+            alpha_w = pos - idx0.astype(jnp.float64)
+            phi_q_gf = jnp.where(
+                in_win[:, None],
+                (1.0 - alpha_w)[:, None] * b_knots[idx0]
+                + alpha_w[:, None] * b_knots[idx0 + 1],
+                0.0,
+            )
+            phi_q_cols.append(phi_q_gf)
+
+            def _gf_d14c_of_z(z_in: jax.Array, _gf: GaussianField = gf) -> jax.Array:
+                dy_gf = model.solver.solve_delta_trajectory(
+                    cbm,
+                    _gf.with_latent(z_in).to_gridded(q_std=model.q_std),
+                    t_fine_arr,
+                    q_std=model.q_std,
+                    alpha_unit=model.alpha_unit,
+                )
+                return dy_gf[:, target_box] * scale_box
+
+            phi_d14c_gf = jax.jacfwd(_gf_d14c_of_z)(jnp.zeros((n_g,), dtype=jnp.float64))
+            phi_d14c_cols.append(phi_d14c_gf)
 
         if phi_q_cols:
             phi_q = jnp.concatenate(phi_q_cols, axis=1)

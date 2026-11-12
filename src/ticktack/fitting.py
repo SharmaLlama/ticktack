@@ -22,10 +22,11 @@ from .likelihood import (
     LinearPosteriorResult,
     ParameterSpace,
     _build_marginal_design,
-    _has_loggp,
+    _extract_single_lgf,
     _make_fast_unconstrained_loglike,
     _nonlinear_residual,
     _offset_only_cfg,
+    _uses_joint_mode,
     joint_log_likelihood,
     joint_log_posterior,
     linear_posterior,
@@ -81,8 +82,12 @@ class MAPResult(NamedTuple):
         return self.model
 
 
-def _use_joint_mode(model: RadiocarbonModel) -> bool:
-    return _has_loggp(model.production) or isinstance(model.solver, ModaxSolver)
+def _use_joint_mode(
+    model: RadiocarbonModel,
+    parameter_space: ParameterSpace | None,
+    cfg: LinearMarginalConfig,
+) -> bool:
+    return _uses_joint_mode(model, parameter_space, cfg)
 
 
 def _eval_log_posterior(
@@ -93,7 +98,7 @@ def _eval_log_posterior(
     cfg: LinearMarginalConfig,
     sigma_jitter: ArrayLike | None,
 ) -> jax.Array:
-    if _use_joint_mode(model):
+    if _use_joint_mode(model, parameter_space, cfg):
         return joint_log_posterior(
             model,
             dataset,
@@ -117,8 +122,9 @@ def _eval_log_likelihood(
     dataset: Dataset,
     cfg: LinearMarginalConfig,
     sigma_jitter: ArrayLike | None,
+    parameter_space: ParameterSpace | None = None,
 ) -> jax.Array:
-    if _use_joint_mode(model_eval):
+    if _use_joint_mode(model_eval, parameter_space, cfg):
         return joint_log_likelihood(
             model_eval,
             dataset,
@@ -202,7 +208,11 @@ def _run_levenberg_marquardt(
 
     prior_means = parameter_space.prior_means
     prior_sds = parameter_space.prior_sds
-    joint_mode = _use_joint_mode(model)
+    joint_mode = _use_joint_mode(model, parameter_space, cfg)
+    if not joint_mode and _extract_single_lgf(model.production)[0] is not None:
+        return _run_bfgs(
+            u0, model, dataset, parameter_space, cfg, sigma_jitter, max_steps, tol
+        )
     eff_cfg = _offset_only_cfg(cfg) if joint_mode else cfg
 
     @jax.jit
@@ -378,12 +388,12 @@ def fit_map(
     u0 = parameter_space.unconstrain(model)
     if parameter_space.n_params == 0:
         lp0 = _eval_log_posterior(u0, model, dataset, parameter_space, cfg, sigma_jitter)
-        lk0 = _eval_log_likelihood(model, dataset, cfg, sigma_jitter)
+        lk0 = _eval_log_likelihood(model, dataset, cfg, sigma_jitter, parameter_space)
         lp_lin = (
             linear_posterior(
                 model,
                 dataset,
-                _offset_only_cfg(cfg) if _use_joint_mode(model) else cfg,
+                _offset_only_cfg(cfg) if _use_joint_mode(model, parameter_space, cfg) else cfg,
                 rng_key=rng_key,
                 n_draws=n_fine_draws,
                 t_fine=t_fine,
@@ -473,7 +483,7 @@ def fit_map(
 
     u_map = best_u
     model_map = parameter_space.constrain(u_map, model)
-    log_lk = _eval_log_likelihood(model_map, dataset, cfg, sigma_jitter)
+    log_lk = _eval_log_likelihood(model_map, dataset, cfg, sigma_jitter, parameter_space)
     theta_map = {spec.path: model_map.get(spec.path) for spec in parameter_space.specs}
 
     if compute_laplace:
@@ -486,7 +496,15 @@ def fit_map(
 
     lin_post = None
     if compute_linear_posterior:
-        lin_cfg = _offset_only_cfg(cfg) if _use_joint_mode(model_map) else cfg
+        is_lgf_marg = (
+            not _use_joint_mode(model_map, parameter_space, cfg)
+            and _extract_single_lgf(model_map.production)[0] is not None
+        )
+        lin_cfg = (
+            _offset_only_cfg(cfg)
+            if _use_joint_mode(model_map, parameter_space, cfg) or is_lgf_marg
+            else cfg
+        )
         lin_post = linear_posterior(
             model_map,
             dataset,
