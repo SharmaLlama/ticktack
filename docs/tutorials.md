@@ -25,7 +25,7 @@ Demonstrates the standard parametric event-inference workflow on the two-hemisph
 
 Connects the diffusive Laplace-transform ill-conditioning of multi-reservoir carbon box models to rigorous Bayesian model selection:
 
-- Uses `cbm_fisher_spectrum` (with Schur-complement marginalization over spike and laboratory-offset nuisances and exact projection of the total-mass gauge zero mode) to compare the 52 flow-balanced log rates of `Brehm21` against minimal canonical `EffectiveCBM(K=2, 3, 4)` models (`plot_fisher_spectrum`).
+- Uses `cbm_fisher_spectrum` (with Schur-complement marginalization over spike and laboratory-offset nuisances and exact projection of the total-mass gauge zero mode) to compare the 56 directed flow-balanced log rates of `Brehm21` (52 under N/S symmetry tying) against minimal canonical `EffectiveCBM(K=2, 3, 4)` models (`plot_fisher_spectrum`).
 - Extracts the collective reservoir exchange combinations actually constrained by decadal tree-ring data ($d_{\text{eff}} \approx 2$–$3$) and visualizes continuous eigenmode responses with `plot_cbm_eigenmodes`.
 - Runs `BlackJAX` adaptive tempered Sequential Monte Carlo (`sample_smc`) across reservoir counts $K = 1, 2, 3, 4$ to demonstrate Occam saturation of the thermodynamic log-evidence $\ln \widehat{Z}_K \pm \widehat{\sigma}_{\ln Z}$ at $K = 2$–$3$.
 
@@ -49,6 +49,17 @@ Adapts [`virgil`](https://github.com/benjaminpope/virgil)'s Information Field Th
 - Demonstrates reflecting-boundary (orthonormal DCT-II) non-centred `GaussianField` synthesis across rough (`MaternSpectrum(order=1)`), smooth (`MaternSpectrum(order=2)`), and composite solar-modulated (`MaternSpectrum + QuasiPeriodicSpectrum`) priors driven by identical standardized excitations $z \sim \mathcal{N}(0, I_N)$.
 - Evaluates 2D MacKay marginal log-evidence landscapes (`evidence_grid` + `plot_evidence_grid`) on decade-long single-year solar-cycle records and ranks candidate kernel families automatically via `select_gp_kernel`.
 - Applies MacKay's closed-form `error_scale` diagnostic (both global and `by_series=True`) to detect understated AMS measurement uncertainties and compares linear Wiener-filter `GaussianField` vs strictly positive Itô-corrected `LogGaussianField(..., ito_corrected=True)` reconstructions (`plot_field_draws`).
+
+---
+
+### 5. Holocene Miyake Event Re-Analysis & Epoch-Local Fluence Scaling
+**Notebook:** [`notebooks/v2/05_holocene_miyake_reanalysis.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/05_holocene_miyake_reanalysis.ipynb)
+
+Homogeneously re-analyses all six bundled Holocene Miyake cosmic-ray excursions (`7176 BCE` to `993 CE`) across both hemispheres on 22-box `Brehm21`:
+
+- Audits proleptic astronomical year conversion (`historical_bce` $-Y \mapsto -(Y - 1)$), Austral summer Southern Hemisphere ring windows (`october-march`), and `Brehm21`'s `4.39‰` inter-hemispheric steady-state gradient.
+- Marginalizes hierarchical Holocene offsets, 11-year solar quadratures, and Solin–Särkkä GP modes analytically inside `fit_map`, contrasting 1950 CE standard yields (`relative_to="standard"`) against epoch-local ambient yields (`relative_to="ambient"`, $(1 + \Delta_0/1000)^{-1}$) when mid-Holocene atmospheric $\Delta^{14}\text{C}$ exceeded $+75\text{‰}$.
+- Runs `fit_ift_field` + `error_scale(..., by_series=True)` to isolate over-dispersed laboratory series across multi-site compilations without MCMC.
 
 ---
 
@@ -89,7 +100,7 @@ Three architectural changes drive the one-to-three order-of-magnitude speedup ov
 `ticktack 2.0` offers two spectral Gaussian-process representations tailored to complementary physical regimes (contrasted side by side in `docs_examples/03` and `docs_examples/04`):
 
 - **Causal Solin–Särkkä Hilbert-space POD (`GPProduction` / `LogGPProduction`)**: Expands stationary `tinygp` kernels on Dirichlet spectral eigenfunctions propagated causally from exact Smith-doubling stationary pre-history covariance (`project_causal_gp`). Best suited to rapid closed-form Wiener filtering (`linear_posterior` in milliseconds) or semiparametric background nuisance marginalization alongside a parametric `MiyakeSpike`.
-- **Reflecting-boundary orthonormal DCT-II IFT (`GaussianField` / `LogGaussianField` + `select_gp_kernel`)**: Represents $f(t)$ on a padded finite interval $[t_{\min} - T_{\mathrm{pad}}, t_{\max} + T_{\mathrm{pad}}]$ with reflecting Neumann boundaries (`ortho` DCT-II), coupling any power-spectral density (`MaternSpectrum`, `SquaredExponentialSpectrum`, `QuasiPeriodicSpectrum`) to a precomputed exact first-order-hold `DCTResponseOperator`. Because the carbon-box response matrix is built once outside the optimizer, `select_gp_kernel` ranks candidate kernel families via Laplace marginal hyper-evidence $\ln\mathcal{Z}_{\mathrm{hyper}}$ in under a second while auditing stated AMS uncertainties via MacKay's closed-form `error_scale` diagnostic.
+- **Reflecting-boundary orthonormal DCT-II IFT (`GaussianField` / `LogGaussianField` + `select_gp_kernel`)**: Represents $f(t)$ on a padded finite interval $[t_{\min} - T_{\mathrm{pad}}, t_{\max} + T_{\mathrm{pad}}]$ with reflecting Neumann boundaries (`ortho` DCT-II), coupling any power-spectral density (`MaternSpectrum`, `SquaredExpSpectrum`, `QuasiPeriodicSpectrum`) to a precomputed exact first-order-hold `DCTResponseOperator`. Because the carbon-box response matrix is built once outside the optimizer, `select_gp_kernel` ranks candidate kernel families via Laplace marginal hyper-evidence $\ln\mathcal{Z}_{\mathrm{hyper}}$ in under a second while auditing stated AMS uncertainties via MacKay's closed-form `error_scale` diagnostic.
 
 ---
 
@@ -97,8 +108,8 @@ Three architectural changes drive the one-to-three order-of-magnitude speedup ov
 
 Decadal tree-ring $\Delta^{14}\text{C}$ observations act as a seasonal-window-averaged Laplace transform of carbon-reservoir residence times. As demonstrated in `v2/02_effective_cbm_fisher_smc.ipynb` and `docs_examples/06_direct_cbm_inference.ipynb`:
 
-- **Exponential singular-value decay (`cbm_fisher_spectrum`)**: Even in 22-box `Brehm21` (52 independent flow-balanced log rates after projecting out the zero-Fisher global carbon-mass gauge mode), Schur-complement marginalization over cosmic-ray production and laboratory offsets leaves only $d_{\text{eff}} \approx 2\text{–}3$ collective parameter combinations with prior-whitened Fisher eigenvalues $\mu_k > 1$.
-- **Exact Kirchhoff mass balance & symmetric `eigh` autodiff**: `EffectiveCBM(K)` parameterizes the identifiable stratosphere–troposphere exchange and $K - 2$ ordered effective sinks directly without redundant null-space directions, while `ReversibleCBM` (`load_preset("Miyake17", kind="reversible")`) parameterizes undirected symmetric exchange fluxes so steady-state Kirchhoff mass conservation holds identically at every `fit_map`, `sample_nuts`, and `sample_smc` evaluation.
+- **Exponential singular-value decay (`cbm_fisher_spectrum`)**: Even in 22-box `Brehm21` (56 directed flow-balanced log rates, or 52 under N/S symmetry tying, after projecting out the zero-Fisher global carbon-mass gauge mode), Schur-complement marginalization over cosmic-ray production and laboratory offsets leaves only $d_{\text{eff}} \approx 2\text{–}3$ collective parameter combinations with prior-whitened Fisher eigenvalues $\mu_k > 1$.
+- **Exact Kirchhoff mass balance & symmetric `eigh` autodiff**: `EffectiveCBM(K)` parameterizes the identifiable stratosphere–troposphere exchange and $K - 2$ ordered effective sinks directly without redundant null-space directions, while `ReversibleCBM` (`load_preset("Miyake17", kind="reversible", miyake17_closure="closed_shallow")`) parameterizes undirected symmetric exchange fluxes so steady-state Kirchhoff mass conservation holds identically at every `fit_map`, `sample_nuts`, and `sample_smc` evaluation.
 
 ---
 
