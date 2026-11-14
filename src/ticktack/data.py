@@ -202,11 +202,12 @@ class SeasonalWeights(zdx.Base):
     Represents the ring-formation operator for nominal astronomical year ``Y`` as
     a convex combination of ``M_sub >= 1`` sub-window boxcar averages:
 
-    .. math::
-        \\mathcal{B}_{\\mathrm{season}}\\bigl[f\\bigr](Y)
-        = \\sum_{m=1}^{M_{\\mathrm{sub}}} w_m
-          \\left( \\frac{1}{b_m - a_m} \\int_{Y + a_m}^{Y + b_m} f(t)\\,dt \\right),
-        \\qquad \\sum_{m=1}^{M_{\\mathrm{sub}}} w_m = 1.
+    $$
+    \\mathcal{B}_{\\mathrm{season}}[f]\\,(Y)
+    = \\sum_{m=1}^{M_{\\mathrm{sub}}} w_m
+      \\left( \\frac{1}{b_m - a_m} \\int_{Y + a_m}^{Y + b_m} f(t)\\,\\mathrm{d}t \\right),
+    \\qquad \\sum_{m=1}^{M_{\\mathrm{sub}}} w_m = 1.
+    $$
 
     For standard contiguous growing seasons (e.g. ``"april-september"`` or
     ``"october-march"``), ``M_sub = 1`` with ``weights = [1.0]``.
