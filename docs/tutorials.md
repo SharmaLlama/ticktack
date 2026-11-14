@@ -22,7 +22,7 @@ Demonstrates the standard parametric event-inference workflow on the two-hemisph
 
 Connects the diffusive Laplace-transform ill-conditioning of multi-reservoir carbon box models to rigorous Bayesian model selection:
 
-- Uses `cbm_fisher_spectrum` (with Schur-complement marginalization over spike and laboratory-offset nuisances and exact projection of the total-mass gauge zero mode) to compare the 52 flow-balanced log rates of `Brehm21` against minimal canonical `EffectiveCBM(K=2, 3, 4)` models (`plot_fisher_spectrum`).
+- Uses `cbm_fisher_spectrum` (with Schur-complement marginalization over spike and laboratory-offset nuisances and exact projection of the total-mass gauge zero mode) to compare the 56 directed flow-balanced log rates of `Brehm21` (52 under N/S symmetry tying) against minimal canonical `EffectiveCBM(K=2, 3, 4)` models (`plot_fisher_spectrum`).
 - Extracts the collective reservoir exchange combinations actually constrained by decadal tree-ring data ($d_{\text{eff}} \approx 2$–$3$) and visualizes continuous eigenmode responses with `plot_cbm_eigenmodes`.
 - Runs `BlackJAX` adaptive tempered Sequential Monte Carlo (`sample_smc`) across reservoir counts $K = 1, 2, 3, 4$ to demonstrate Occam saturation of the thermodynamic log-evidence $\ln \widehat{Z}_K \pm \widehat{\sigma}_{\ln Z}$ at $K = 2$–$3$.
 

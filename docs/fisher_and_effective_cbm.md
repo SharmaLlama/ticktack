@@ -1,6 +1,6 @@
 # Fisher Information & EffectiveCBMs
 
-Published multi-reservoir carbon box models contain up to 22 boxes and more than 50 exchange rates (`Brehm21` has 22 boxes and 52 flow-balanced rates; `Guttler15` has 11 boxes). Yet tree-ring $\Delta^{14}\text{C}$ observations measure only **one** (or in two-hemisphere compilations, two closely coupled) tropospheric reservoir(s) over a finite window of decades. Attempting to infer all 52 transfer rates jointly with cosmic-ray production $Q(t)$ produces severe posterior ridges and non-identifiability.
+Published multi-reservoir carbon box models contain up to 22 boxes and more than 50 exchange rates (`Brehm21` has 22 boxes and 56 directed flow-balanced rates, or 52 under N/S symmetry tying; `Guttler15` has 11 boxes and 20 rates). Yet tree-ring $\Delta^{14}\text{C}$ observations measure only **one** (or in two-hemisphere compilations, two closely coupled) tropospheric reservoir(s) over a finite window of decades. Attempting to infer all 56 transfer rates jointly with cosmic-ray production $Q(t)$ produces severe posterior ridges and non-identifiability.
 
 `ticktack.fisher`, `EffectiveCBM`, and `sample_smc` turn this structural ill-conditioning into a quantitative, gauge-free model-selection framework.
 
@@ -26,7 +26,7 @@ $$
 g_{\text{trop}}(\tau) = \int_0^\infty e^{-\gamma \tau}\,\rho(\gamma)\,\mathrm{d}\gamma, \qquad \tau > 0.
 $$
 
-Under the logarithmic variable substitution $\tau = e^u$, $\gamma = e^{-v}$, the Laplace operator becomes a translation-invariant convolution on $\mathbb{R}$ whose Mellin-transform singular-value spectrum was derived analytically by [McWhirter & Pike (1978)](https://doi.org/10.1088/0305-4470/11/9/007) (and recently analysed for multi-exponential physical inference by Langker et al. 2026):
+Under the logarithmic variable substitution $\tau = e^u$, $\gamma = e^{-v}$, the Laplace operator becomes a translation-invariant convolution on $\mathbb{R}$ whose Mellin-transform singular-value spectrum was derived analytically by [McWhirter & Pike (1978)](https://doi.org/10.1088/0305-4470/11/9/007) (and recently analysed for multi-exponential physical inference by [Langker et al. 2026](https://arxiv.org/abs/2610.41092v1)):
 
 $$
 \sigma(\omega_{\ln}) = \sqrt{\frac{\pi}{\cosh(\pi \omega_{\ln})}} \;\sim\; \sqrt{2\pi}\,\exp\!\left(-\frac{\pi}{2}|\omega_{\ln}|\right) \quad (|\omega_{\ln}| \to \infty).
@@ -87,7 +87,7 @@ fwd = lambda cbm_v, psi: tt.RadiocarbonModel(
 cbm_brehm = tt.load_preset("Brehm21", kind="balanced")
 sd_brehm = jnp.append(jnp.full(cbm_brehm.log_rates_free.size, 0.35), jnp.inf)
 spec = tt.cbm_fisher_spectrum(fwd, cbm_brehm, dataset.sigma_flat, psi_nuisance=psi0, prior_cbm_sd=sd_brehm)
-print(f"Brehm21 (52 free rates): d_eff = {float(spec.d_eff):.2f}, I = {float(spec.info_bits):.2f} bits")
+print(f"Brehm21 ({cbm_brehm.log_rates_free.size} free rates): d_eff = {float(spec.d_eff):.2f}, I = {float(spec.info_bits):.2f} bits")
 ```
 
 ---
@@ -115,7 +115,7 @@ To select the reservoir count $K \in \{1, 2, 3, 4\}$ (or compare competing spike
 
 - Constructs a thermodynamic bridge $\pi_\beta(\mathbf{u}) \propto p(\mathbf{u})\,L(\mathbf{u})^{\beta}$ from the normalized unconstrained prior ($\beta_0 = 0$, where $\int p(\mathbf{u})\,\mathrm{d}\mathbf{u} = 1$ exactly) to the full posterior ($\beta_T = 1$), choosing each inverse-temperature increment $\Delta\beta_t$ adaptively so the effective sample size (ESS) equals `target_ess * num_particles` (default `0.75`).
 - Rejuvenates particles at every tempering stage using a non-interacting random-walk Metropolis Markov kernel preconditioned by tempered Laplace curvature $( \Lambda_0 + \beta H_{\text{lik}} )^{-1}$ (`proposal_mode="laplace_tempered"`).
-- Uses **multinomial resampling** (`blackjax.smc.resampling.multinomial`) alongside genealogy-tracked ancestor indices so the telescoping product of incremental normalizing constants provides an asymptotically unbiased log-evidence $\ln \widehat{Z}$ together with the non-negative **Lee & Whiteley (2018)** single-run standard-error estimator $\widehat{\sigma}_{\ln Z}$ (`SMCResult.log_evidence_err`):
+- Uses **multinomial resampling** (`blackjax.smc.resampling.multinomial`) alongside genealogy-tracked ancestor indices so the telescoping product of incremental normalizing constants provides an asymptotically unbiased log-evidence $\ln \widehat{Z}$ together with the non-negative **[Lee & Whiteley (2018)](https://doi.org/10.1093/biomet/asy028)** single-run standard-error estimator $\widehat{\sigma}_{\ln Z}$ (`SMCResult.log_evidence_err`):
 
 $$
 \ln \widehat{Z} = \sum_{t=1}^T \ln\!\left(\frac{1}{N}\sum_{i=1}^N w_t^{(i)}\right).
