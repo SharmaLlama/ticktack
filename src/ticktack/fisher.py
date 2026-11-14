@@ -381,9 +381,19 @@ def _resolve_cbm_prior_root(
         return jnp.eye(p_act, dtype=jnp.float64), mask
 
     if prior_cbm_sd is not None:
-        sd = jnp.broadcast_to(
-            jnp.asarray(prior_cbm_sd, dtype=jnp.float64), (p_full,)
-        )
+        sd_raw = jnp.asarray(prior_cbm_sd, dtype=jnp.float64)
+        p_act_init = int(onp.sum(mask))
+        if sd_raw.ndim == 1 and sd_raw.shape[0] == p_act_init and p_act_init != p_full:
+            c_sd_act = _concrete(sd_raw)
+            if c_sd_act is not None and (
+                onp.any(c_sd_act <= 0.0) or onp.any(~onp.isfinite(c_sd_act))
+            ):
+                raise ValueError(
+                    "Active prior_cbm_sd vector must be finite and strictly positive."
+                )
+            return jnp.diag(sd_raw), mask
+
+        sd = jnp.broadcast_to(sd_raw, (p_full,))
         c_sd = _concrete(sd)
         if c_sd is not None:
             if onp.any(c_sd <= 0.0) or onp.any(onp.isnan(c_sd)):
@@ -606,15 +616,21 @@ def cbm_fisher_spectrum(
     p_full = flat_theta.shape[0]
 
     # Auto-detect log_total_mass / theta_tot gauge leaf on PyTree CBM objects
-    # if no explicit active_cbm_mask is given and no prior was supplied for it.
+    # if no explicit active_cbm_mask is given and no full-length explicit prior
+    # matrix/vector was supplied for it (scalar prior_cbm_sd projects out
+    # log_total_mass before broadcasting).
+    _sd_is_scalar = prior_cbm_sd is not None and (
+        jnp.asarray(prior_cbm_sd, dtype=jnp.float64).ndim == 0
+        or jnp.asarray(prior_cbm_sd, dtype=jnp.float64).size == 1
+    )
     if (
         active_cbm_mask is None
         and exclude_total_mass
         and isinstance(theta_cbm, eqx.Module)
-        and all(
-            x is None
-            for x in (prior_cbm_cov, prior_cbm_prec, prior_cbm_root, prior_cbm_sd)
-        )
+        and prior_cbm_cov is None
+        and prior_cbm_prec is None
+        and prior_cbm_root is None
+        and (prior_cbm_sd is None or _sd_is_scalar)
     ):
         for gauge_attr in ("log_total_mass", "theta_tot"):
             if hasattr(theta_cbm, gauge_attr) and eqx.is_inexact_array(

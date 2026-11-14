@@ -203,7 +203,7 @@ class SeasonalWeights(zdx.Base):
     a convex combination of ``M_sub >= 1`` sub-window boxcar averages:
 
     .. math::
-        \\mathcal{B}_{\\mathrm{season}}[f](Y)
+        \\mathcal{B}_{\\mathrm{season}}\\bigl[f\\bigr](Y)
         = \\sum_{m=1}^{M_{\\mathrm{sub}}} w_m
           \\left( \\frac{1}{b_m - a_m} \\int_{Y + a_m}^{Y + b_m} f(t)\\,dt \\right),
         \\qquad \\sum_{m=1}^{M_{\\mathrm{sub}}} w_m = 1.

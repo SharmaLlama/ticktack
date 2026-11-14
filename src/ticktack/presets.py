@@ -1012,55 +1012,28 @@ def load_preset(
                 "miyake17_closure='closed_shallow' for closed BalancedCBM."
             )
         tie_mat = spec.edge_tie_matrix(tie_symmetric_edges=tie_symmetric_edges)
-        BalancedCBM = cbm_mod.BalancedCBM
-        if hasattr(BalancedCBM, "from_masses_and_fluxes"):
-            fn_sig = inspect.signature(BalancedCBM.from_masses_and_fluxes)
-            b_kwargs: dict[str, Any] = {}
-            for k, v in (
-                ("topology", topology),
-                ("masses", masses),
-                ("edge_fluxes", edge_fluxes),
-                ("fluxes", spec.flux_matrix()),
-                ("prod_fractions", prod_vec),
-                ("production_coefficients", prod_vec),
-                ("prod_vector", prod_vec),
-                ("tie_matrix", tie_mat if tie_symmetric_edges else None),
-                ("decay_rate", eff_decay),
-            ):
-                if k in fn_sig.parameters and v is not None:
-                    b_kwargs[k] = v
-            return BalancedCBM.from_masses_and_fluxes(**b_kwargs)
-        src_idx = jnp.asarray([s for s, _, _ in spec.edges], dtype=jnp.int32)
-        log_rates = jnp.log(edge_fluxes / masses[src_idx])
-        if tie_symmetric_edges:
-            theta_free = jnp.linalg.lstsq(tie_mat, log_rates, rcond=None)[0]
-            return BalancedCBM(
-                topology=topology,
-                theta_free=theta_free,
-                log_total_mass=jnp.log(jnp.sum(masses)),
-                prod_fractions=prod_vec,
-                tie_matrix=tie_mat,
-                decay_rate=eff_decay,
-            )
-        return BalancedCBM(
+        return cbm_mod.BalancedCBM.from_masses_and_fluxes(
             topology=topology,
-            theta_free=log_rates,
-            log_total_mass=jnp.log(jnp.sum(masses)),
+            masses=masses,
+            edge_fluxes=edge_fluxes,
             prod_fractions=prod_vec,
+            tie_matrix=tie_mat if tie_symmetric_edges else None,
             decay_rate=eff_decay,
         )
 
     if kind == "reversible":
-        ReversibleCBM = cbm_mod.ReversibleCBM
-        if hasattr(ReversibleCBM, "from_masses_and_fluxes"):
-            return ReversibleCBM.from_masses_and_fluxes(
-                topology=topology,
-                masses=masses,
-                edge_fluxes=edge_fluxes,
-                prod_fractions=prod_vec,
-                decay_rate=eff_decay,
+        if has_open_sink:
+            raise ValueError(
+                f"Preset {name!r} has open sink_rates; pass kind='open' or "
+                "miyake17_closure='closed_shallow' for closed ReversibleCBM."
             )
-        raise NotImplementedError("ReversibleCBM.from_masses_and_fluxes is required.")
+        return cbm_mod.ReversibleCBM.from_masses_and_fluxes(
+            topology=topology,
+            masses=masses,
+            edge_fluxes=edge_fluxes,
+            prod_fractions=prod_vec,
+            decay_rate=eff_decay,
+        )
 
     raise ValueError(
         f"Unknown kind={kind!r}; expected 'fixed', 'balanced', 'open', or 'reversible'."
@@ -1077,25 +1050,15 @@ def _instantiate_fixed_cbm(
     sink_rates: jax.Array,
     decay_rate: float,
 ) -> Any:
-    sig = inspect.signature(cls)
-    kwargs: dict[str, Any] = {}
-    candidates = {
-        "topology": topology,
-        "masses": masses,
-        "reservoir_masses": masses,
-        "edge_fluxes": edge_fluxes,
-        "fluxes": spec.flux_matrix(),
-        "flux_matrix": spec.flux_matrix(),
-        "prod_fractions": prod_vec,
-        "prod_vector": prod_vec,
-        "production_coefficients": prod_vec,
-        "sink_rates": sink_rates,
-        "decay_rate": decay_rate,
-    }
-    for pname in sig.parameters:
-        if pname in candidates:
-            kwargs[pname] = candidates[pname]
-    return cls(**kwargs)
+    del spec
+    return cls(
+        topology=topology,
+        masses=masses,
+        edge_fluxes=edge_fluxes,
+        prod_fractions=prod_vec,
+        sink_rates=sink_rates,
+        decay_rate=decay_rate,
+    )
 
 
 def _instantiate_open_cbm(
@@ -1108,47 +1071,12 @@ def _instantiate_open_cbm(
     sink_rates: jax.Array,
     decay_rate: float,
 ) -> Any:
-    if hasattr(cls, "from_masses_and_fluxes"):
-        fn_sig = inspect.signature(cls.from_masses_and_fluxes)
-        kwargs: dict[str, Any] = {}
-        candidates = {
-            "topology": topology,
-            "masses": masses,
-            "edge_fluxes": edge_fluxes,
-            "fluxes": spec.flux_matrix(),
-            "prod_fractions": prod_vec,
-            "prod_vector": prod_vec,
-            "production_coefficients": prod_vec,
-            "sink_rates": sink_rates,
-            "decay_rate": decay_rate,
-        }
-        for pname in fn_sig.parameters:
-            if pname in candidates:
-                kwargs[pname] = candidates[pname]
-        return cls.from_masses_and_fluxes(**kwargs)
-
-    sig = inspect.signature(cls)
-    src_idx = jnp.asarray([s for s, _, _ in spec.edges], dtype=jnp.int32)
-    log_rates = jnp.log(edge_fluxes / masses[src_idx])
-    active_sink_indices = tuple(i for i, s in enumerate(spec.sink_rates) if s > 0.0)
-    log_sinks_active = jnp.log(
-        jnp.asarray([spec.sink_rates[i] for i in active_sink_indices], dtype=jnp.float64)
+    del spec
+    return cls.from_masses_and_fluxes(
+        topology=topology,
+        masses=masses,
+        edge_fluxes=edge_fluxes,
+        prod_fractions=prod_vec,
+        sink_rates=sink_rates,
+        decay_rate=decay_rate,
     )
-    log_sinks_all = jnp.where(sink_rates > 0.0, jnp.log(jnp.maximum(sink_rates, 1e-300)), -jnp.inf)
-    candidates = {
-        "topology": topology,
-        "theta_free": log_rates,
-        "log_rates": log_rates,
-        "log_total_mass": jnp.log(jnp.sum(masses)),
-        "masses": masses,
-        "edge_fluxes": edge_fluxes,
-        "log_sink_rates": log_sinks_active if "sink_box_indices" in sig.parameters else log_sinks_all,
-        "sink_box_indices": active_sink_indices,
-        "sink_rates": sink_rates,
-        "prod_fractions": prod_vec,
-        "prod_vector": prod_vec,
-        "production_coefficients": prod_vec,
-        "decay_rate": decay_rate,
-    }
-    kwargs = {p: candidates[p] for p in sig.parameters if p in candidates}
-    return cls(**kwargs)
