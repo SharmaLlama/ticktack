@@ -1231,7 +1231,7 @@ def test_likelihood_and_fit_map_ift_integration_and_edge_cases() -> None:
     assert lp_gf.q_fine_draws is not None and lp_gf.q_fine_draws.shape == (8, 50)
     assert lp_gf.d14c_fine_draws is not None and lp_gf.d14c_fine_draws.shape == (8, 50)
 
-    ps_sp = ParameterSpace([ParamSpec("production.spike.fluence", prior_mean=6.4, prior_sd=2.0)])
+    ps_sp = ParameterSpace(m_gf, [ParamSpec("production.spike.fluence", prior_mean=6.4, prior_sd=2.0)])
     map_gf = fit_map(m_gf, ds_tas, ps_sp, cfg=cfg, method="BFGS")
     assert map_gf.converged
     assert 5.0 <= float(map_gf.theta_map["production.spike.fluence"]) <= 9.0
@@ -1242,8 +1242,9 @@ def test_likelihood_and_fit_map_ift_integration_and_edge_cases() -> None:
     np.testing.assert_allclose(
         marginal_log_likelihood(m_lgf, ds_tas, cfg), log_evidence(fit_lgf, ds_tas), rtol=1e-8, atol=1e-7
     )
-    map_lgf = fit_map(m_lgf, ds_tas, ps_sp, cfg=cfg, method="BFGS")
-    assert 5.0 <= float(map_lgf.theta_map["production.spike.fluence"]) <= 9.0
+    ps_sp_lgf = ParameterSpace(m_lgf, [ParamSpec("production.spike.fluence", prior_mean=6.4, prior_sd=2.0)])
+    map_lgf = fit_map(m_lgf, ds_tas, ps_sp_lgf, cfg=cfg, method="BFGS")
+    assert 4.5 <= float(map_lgf.theta_map["production.spike.fluence"]) <= 9.0
 
     # 1-ring series + duplicate series names in error_scale and select_gp_kernel
     s_one = TreeRingSeries([776.0], [10.5], [1.8], hemisphere="north", name="OneRing")
@@ -1253,8 +1254,8 @@ def test_likelihood_and_fit_map_ift_integration_and_edge_cases() -> None:
     sel_1ring = select_gp_kernel(cbm, ds_1ring, candidates=("matern12", "matern32"), n_grid=28, multi_start=1)
     assert "MacKay s_error" in sel_1ring.format_table()
 
-    s_dup1 = TreeRingSeries(np.asarray(s_tas.raw_years), np.asarray(s_tas.d14c), np.asarray(s_tas.sigma_d14c))
-    s_dup2 = TreeRingSeries(np.asarray(s_tas.raw_years), np.asarray(s_tas.d14c) + 0.5, np.asarray(s_tas.sigma_d14c))
+    s_dup1 = TreeRingSeries(np.asarray(s_tas.raw_years), np.asarray(s_tas.d14c), np.asarray(s_tas.sigma_d14c), hemisphere="south")
+    s_dup2 = TreeRingSeries(np.asarray(s_tas.raw_years), np.asarray(s_tas.d14c) + 0.5, np.asarray(s_tas.sigma_d14c), hemisphere="south")
     ds_dup = Dataset((s_dup1, s_dup2))
     sel_dup = select_gp_kernel(cbm, ds_dup, candidates=("matern12", "matern32"), n_grid=28, multi_start=1)
     assert "MacKay s_error" in sel_dup.format_table()

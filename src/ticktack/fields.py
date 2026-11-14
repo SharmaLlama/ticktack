@@ -42,8 +42,13 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
+import numpyro  # noqa: F401
 import numpyro.distributions as dist
+import numpyro.distributions.distribution as _np_dist_mod
 import optimistix as optx
+
+if not hasattr(dist, "distribution"):
+    dist.distribution = _np_dist_mod
 from scipy.linalg import solve_triangular as _scipy_solve_triangular
 from scipy.optimize import minimize as _scipy_minimize
 import zodiax as zdx
@@ -1107,22 +1112,42 @@ def _pack_dataset_quadrature(
     cbm: CarbonBoxModel,
     dataset: Dataset,
 ) -> tuple[jax.Array, jax.Array, tuple[tuple[jax.Array, int, int, jax.Array, int], ...]]:
-    """Pack deduplicated sub-window start/end times and series gather indices."""
-    starts_all: list[np.ndarray] = []
-    ends_all: list[np.ndarray] = []
+    """Pack deduplicated sub-window start/end times and series gather indices (JIT-trace safe)."""
+    starts_np_list: list[np.ndarray] = []
+    ends_np_list: list[np.ndarray] = []
+    starts_jnp_list: list[jax.Array] = []
+    ends_jnp_list: list[jax.Array] = []
     raw_specs: list[tuple[int, int, int, jax.Array, int]] = []
+    is_traced = False
     cursor = 0
     for s in dataset.series:
         sub_s, sub_e, w_sub = s.quadrature_windows()  # (N_s, M_s), (N_s, M_s), (M_s,)
         n_s, m_s = int(sub_s.shape[0]), int(sub_s.shape[1])
-        box_idx = cbm.box_index(s.box_name, hemisphere=s.hemisphere)
-        starts_all.append(np.asarray(sub_s, dtype=np.float64).reshape(-1))
-        ends_all.append(np.asarray(sub_e, dtype=np.float64).reshape(-1))
+        box_idx = int(cbm.box_index(s.box_name, hemisphere=s.hemisphere))
+        s_np = _concrete_np(sub_s)
+        e_np = _concrete_np(sub_e)
+        if s_np is None or e_np is None:
+            is_traced = True
+        else:
+            starts_np_list.append(s_np.reshape(-1))
+            ends_np_list.append(e_np.reshape(-1))
+        starts_jnp_list.append(jnp.asarray(sub_s, dtype=jnp.float64).reshape(-1))
+        ends_jnp_list.append(jnp.asarray(sub_e, dtype=jnp.float64).reshape(-1))
         raw_specs.append((cursor, n_s, m_s, w_sub, box_idx))
         cursor += n_s * m_s
 
-    s_cat = np.concatenate(starts_all, axis=0)
-    e_cat = np.concatenate(ends_all, axis=0)
+    if is_traced:
+        uniq_s = jnp.concatenate(starts_jnp_list, axis=0)
+        uniq_e = jnp.concatenate(ends_jnp_list, axis=0)
+        specs_traced: list[tuple[jax.Array, int, int, jax.Array, int]] = []
+        for start_idx, n_s, m_s, w_sub, box_idx in raw_specs:
+            end_idx = start_idx + n_s * m_s
+            inv_slice = jnp.arange(start_idx, end_idx, dtype=jnp.int32)
+            specs_traced.append((inv_slice, n_s, m_s, w_sub, box_idx))
+        return uniq_s, uniq_e, tuple(specs_traced)
+
+    s_cat = np.concatenate(starts_np_list, axis=0)
+    e_cat = np.concatenate(ends_np_list, axis=0)
     pairs = np.column_stack([np.round(s_cat, 11), np.round(e_cat, 11)])
     _, first_idx, inv_all = np.unique(
         pairs, axis=0, return_index=True, return_inverse=True
@@ -1263,9 +1288,13 @@ def build_dct_response_operator(
     n_g = int(n_grid)
     if n_g < 2:
         raise ValueError(f"n_grid must be >= 2, got {n_grid}.")
-    span_lo, span_hi = ds.time_span
-    t0 = float(span_lo - float(pad_years)) if t_start is None else float(t_start)
-    t1 = float(span_hi + 0.5) if t_end is None else float(t_end)
+    if t_start is None or t_end is None:
+        span_lo, span_hi = ds.time_span
+        t0 = float(span_lo - float(pad_years)) if t_start is None else float(t_start)
+        t1 = float(span_hi + 0.5) if t_end is None else float(t_end)
+    else:
+        t0 = float(t_start)
+        t1 = float(t_end)
     if not (t1 > t0):
         raise ValueError(f"Expected t_end > t_start, got [{t0}, {t1}].")
 
@@ -1499,7 +1528,7 @@ def predict_field_d14c(
         r_ratio = (y_ss[box_idx] / y_trop) / m_rel[box_idx]
         ss_val = 1000.0 * (r_ratio - 1.0)
 
-        grid_term: ProductionTerm = field.to_gridded(q_std=model.q_std)
+        grid_term: ProductionTerm = field
         for _, ext_t in extras:
             grid_term = grid_term + ext_t
         dy_traj = solver.solve_delta_trajectory(

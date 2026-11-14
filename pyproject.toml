@@ -76,7 +76,9 @@ where = ["src"]
 [tool.setuptools.package-data]
 ticktack = [
     "data/*.hd5",
+    "data/README.md",
     "data/datasets/**/*.csv",
+    "data/datasets/REFERENCE_*.txt",
 ]
 
 [tool.pytest.ini_options]

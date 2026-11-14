@@ -40,7 +40,12 @@ from .constants import (
 )
 from .data import Dataset, TreeRingSeries
 from .production import ProductionTerm
-from .solvers import AbstractSolver, ExactLinearSolver, ModaxSolver
+from .solvers import (
+    AbstractSolver,
+    ExactLinearSolver,
+    ModaxSolver,
+    _cbm_has_nonautonomous_masses,
+)
 
 __all__ = [
     "RadiocarbonModel",
@@ -202,7 +207,11 @@ class RadiocarbonModel(zdx.Base):
         if isinstance(dataset_or_series, TreeRingSeries):
             series = dataset_or_series
             box_idx = self._box_index_for_series(series)
-            delta_lab = offsets[0] if offsets is not None else 0.0
+            delta_lab = (
+                jnp.asarray(offsets, dtype=jnp.float64).reshape(-1)[0]
+                if offsets is not None
+                else 0.0
+            )
             return self.solver.predict_d14c(
                 self.cbm,
                 self.production,
@@ -292,10 +301,19 @@ class RadiocarbonModel(zdx.Base):
                 cursor += s.n_obs
             return tuple(slices)
 
+        off_modax = (
+            jnp.asarray(offsets, dtype=jnp.float64).reshape(-1)
+            if offsets is not None
+            else None
+        )
         per_series: list[jax.Array] = []
         for s_idx, series in enumerate(dataset.series):
             box_idx = self._box_index_for_series(series)
-            delta_lab = offsets[s_idx] if offsets is not None else 0.0
+            delta_lab = (
+                off_modax[min(s_idx, off_modax.shape[0] - 1)]
+                if off_modax is not None
+                else 0.0
+            )
             pred_s = self.solver.predict_d14c(
                 self.cbm,
                 self.production,
@@ -347,12 +365,22 @@ class RadiocarbonModel(zdx.Base):
             q_std=self.q_std,
             alpha_unit=self.alpha_unit,
         )  # (N_t, n_boxes)
+        y_box = y_traj[:, box_idx]  # (N_t,)
+        if getattr(self.solver, "has_time_varying_masses", False) or _cbm_has_nonautonomous_masses(
+            self.cbm
+        ):
+            r_ref = self.reference_specific_activity()
+            t_1d = jnp.atleast_1d(t_arr).reshape(-1)
+            masses_fn = getattr(self.solver, "_masses_at", None)
+            if masses_fn is not None:
+                m_traj = jax.vmap(lambda ti: masses_fn(self.cbm, ti))(t_1d)
+            else:
+                m_traj = jax.vmap(self.cbm.reservoir_masses_at)(t_1d)
+            return 1000.0 * (y_box / (r_ref * m_traj[:, box_idx]) - 1.0)
         y_ss = self.steady_state()  # (n_boxes,)
         trop_idx = jnp.asarray(self.cbm.topology.trop_box_indices, dtype=jnp.int32)
         y_trop_ss = jnp.sum(y_ss[trop_idx])
         m_rel = self.cbm.relative_reservoir_masses()
-        # Delta14C for selected box
-        y_box = y_traj[:, box_idx]  # (N_t,)
         m_box = m_rel[box_idx]
         return 1000.0 * (y_box / (y_trop_ss * m_box) - 1.0)
 

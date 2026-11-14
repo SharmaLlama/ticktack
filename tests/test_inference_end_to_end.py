@@ -546,14 +546,153 @@ class TestMAPFitting:
 
         res_bfgs = tt.fit_map(init_m, synthetic_dataset, spike_param_space, cfg, method="BFGS", max_steps=80)
         res_lm = tt.fit_map(init_m, synthetic_dataset, spike_param_space, cfg, method="LevenbergMarquardt", max_steps=80)
-        res_adam = tt.fit_map(init_m, synthetic_dataset, spike_param_space, cfg, method="adam", max_steps=120)
-
-        assert jnp.allclose(res_bfgs.u_map, res_lm.u_map, atol=1e-3)
-        assert float(res_adam.log_posterior) > float(
-            tt.marginal_log_posterior(init_m, synthetic_dataset, spike_param_space, spike_param_space.unconstrain(init_m), cfg)
+        res_adam = tt.fit_map(
+            init_m,
+            synthetic_dataset,
+            spike_param_space,
+            cfg,
+            method="adam",
+            max_steps=600,
+            lr=0.05,
         )
+
+        assert res_bfgs.converged
+        assert res_lm.converged
+        assert jnp.allclose(res_bfgs.u_map, res_lm.u_map, atol=1e-3)
+        # Adam must approach the BFGS MAP closely in both unconstrained and physical space
+        assert jnp.allclose(res_adam.u_map, res_bfgs.u_map, atol=2.5e-2)
+        assert abs(
+            float(res_adam.theta_map["production.spike.fluence"])
+            - float(res_bfgs.theta_map["production.spike.fluence"])
+        ) < 0.05
         eigvals = jnp.linalg.eigvalsh(res_bfgs.laplace_cov)
         assert jnp.all(eigvals > 0.0)
+
+        # Tiny lr away from the mode has |prev_loss - loss| < tol, yet ||grad|| >> sqrt(tol) => converged=False
+        res_adam_tiny_lr = tt.fit_map(
+            init_m,
+            synthetic_dataset,
+            spike_param_space,
+            cfg,
+            method="adam",
+            max_steps=10,
+            lr=1e-8,
+            tol=1e-4,
+        )
+        assert not res_adam_tiny_lr.converged
+
+    def test_lm_polish_convergence_and_hld_gradient_trigger(
+        self, brehm21_cbm, synthetic_dataset
+    ):
+        """Verify LM triggers BFGS polish when log-det varies/has nonzero gradient
+        and never masks BFGS non-convergence.
+        """
+        kernel = tk.quasisep.Matern32(scale=3.0, sigma=0.4)
+        m_gp = tt.RadiocarbonModel(
+            brehm21_cbm,
+            tt.ProductionSum(
+                steady=tt.SteadyProduction(),
+                gp=tt.GPProduction(kernel, n_modes=16, domain=(765.0, 785.0)),
+                spike=tt.MiyakeSpike(t_start=774.4, duration=0.4, fluence=5.5, profile="boxcar"),
+            ),
+        )
+        ps_gp = tt.ParameterSpace(
+            m_gp,
+            [
+                tt.ParamSpec("production.gp.kernel.sigma", "exp", math.log(0.4), 1.0),
+                tt.ParamSpec("production.spike.fluence", "exp", math.log(6.0), 1.0),
+            ],
+        )
+        cfg_gp = tt.LinearMarginalConfig(offset_mode="hierarchical", marginalize_gp=True)
+
+        # With max_steps=1 and tight tol away from the mode, BFGS polish cannot converge => converged is False
+        res_short = tt.fit_map(
+            m_gp, synthetic_dataset, ps_gp, cfg_gp, method="LevenbergMarquardt", max_steps=1, tol=1e-12
+        )
+        assert not res_short.converged
+
+        # With adequate max_steps, LM + BFGS polish converges to the exact BFGS MAP (including Occam hld!)
+        res_lm_gp = tt.fit_map(
+            m_gp, synthetic_dataset, ps_gp, cfg_gp, method="LevenbergMarquardt", max_steps=80
+        )
+        res_bfgs_gp = tt.fit_map(
+            m_gp, synthetic_dataset, ps_gp, cfg_gp, method="BFGS", max_steps=80
+        )
+        assert res_lm_gp.converged
+        assert jnp.allclose(res_lm_gp.u_map, res_bfgs_gp.u_map, atol=2e-3)
+
+    def test_parameter_space_constrained_jacobian_sign_and_map_space(
+        self, simple_model, synthetic_dataset
+    ):
+        """Verify log p_theta(g(u)) = log p_u(u) - log|det dg/du| integrates to 1
+        across exp, softplus, and sigmoid transforms, and shifts fit_map mode properly.
+        """
+        specs_check = [
+            ("exp", tt.ParamSpec("production.spike.fluence", "exp", prior_mean=1.2, prior_sd=0.6), 1e-4, 80.0),
+            ("softplus", tt.ParamSpec("production.spike.fluence", "softplus", prior_mean=1.0, prior_sd=0.8), 1e-5, 25.0),
+            (
+                "sigmoid",
+                tt.ParamSpec(
+                    "production.spike.fluence",
+                    "sigmoid",
+                    prior_mean=0.3,
+                    prior_sd=0.9,
+                    low=2.0,
+                    high=9.0,
+                ),
+                2.0 + 1e-5,
+                9.0 - 1e-5,
+            ),
+        ]
+        for name, spec, lo, hi in specs_check:
+            ps = tt.ParameterSpace(simple_model, [spec])
+            th_grid = jnp.linspace(lo, hi, 40_000)
+            u_grid = jax.vmap(lambda th: spec.unconstrain(jnp.asarray(th)))(th_grid)
+            lp_theta = jax.vmap(
+                lambda u_s: ps.log_prior_unconstrained(
+                    jnp.reshape(u_s, (1,)), target_space="constrained"
+                )
+            )(u_grid)
+            integral = float(jnp.trapezoid(jnp.exp(lp_theta), th_grid))
+            assert integral == pytest.approx(1.0, abs=5e-4), (
+                f"Constrained prior density for {name} integrated to {integral} != 1.0"
+            )
+            if name == "exp":
+                # Exact analytical log-normal density check: log N(ln theta; mu, sd^2) - ln theta
+                th_test = jnp.asarray(5.5)
+                u_test = jnp.reshape(jnp.log(th_test), (1,))
+                exact_ln = float(
+                    jss.norm.logpdf(jnp.log(th_test), loc=1.2, scale=0.6) - jnp.log(th_test)
+                )
+                assert float(
+                    ps.log_prior_unconstrained(u_test, target_space="constrained")
+                ) == pytest.approx(exact_ln, abs=1e-14)
+                # Backwards-compatible include_jacobian=True matches target_space="constrained"
+                assert float(
+                    ps.log_prior_unconstrained(u_test, include_jacobian=True)
+                ) == pytest.approx(exact_ln, abs=1e-14)
+
+        ps_exp = tt.ParameterSpace(
+            simple_model,
+            [tt.ParamSpec("production.spike.fluence", "exp", prior_mean=math.log(6.5), prior_sd=0.8)],
+        )
+        cfg = tt.LinearMarginalConfig(offset_mode="hierarchical")
+        res_u = tt.fit_map(
+            simple_model, synthetic_dataset, ps_exp, cfg, method="BFGS", map_space="unconstrained"
+        )
+        res_c = tt.fit_map(
+            simple_model, synthetic_dataset, ps_exp, cfg, method="BFGS", map_space="constrained"
+        )
+        # Because d/du (-log|d exp(u)/du|) = -1 < 0, constrained theta-MAP fluence is strictly smaller than u-MAP!
+        assert float(res_c.theta_map["production.spike.fluence"]) < float(
+            res_u.theta_map["production.spike.fluence"]
+        )
+        grad_c = jax.grad(
+            lambda u: tt.marginal_log_posterior(
+                simple_model, synthetic_dataset, ps_exp, u, cfg, target_space="constrained"
+            )
+        )(res_c.u_map)
+        assert float(jnp.linalg.norm(grad_c)) < 1e-5
 
 
 # ===========================================================================
@@ -565,6 +704,10 @@ class TestNUTSAndSVI:
     def test_sample_nuts_two_chains_rhat_and_linear_reconstruction(
         self, simple_model, synthetic_dataset, spike_param_space
     ):
+        import inspect
+
+        assert inspect.signature(tt.sample_nuts).parameters["max_tree_depth"].default == 10
+
         t_fine = jnp.linspace(772.0, 778.0, 20)
         idata = tt.sample_nuts(
             simple_model,
@@ -578,15 +721,66 @@ class TestNUTSAndSVI:
             rng_key=jax.random.PRNGKey(42),
         )
         assert hasattr(idata, "posterior")
+        assert hasattr(idata, "sample_stats")
+        for stat_key in (
+            "lp",
+            "energy",
+            "diverging",
+            "n_steps",
+            "tree_depth",
+            "reached_max_treedepth",
+            "acceptance_rate",
+            "step_size",
+        ):
+            assert stat_key in idata.sample_stats.data_vars
+            assert idata.sample_stats[stat_key].shape == (2, 100)
+        assert int(np.sum(np.asarray(idata.sample_stats["diverging"]))) == 0
+
         assert "offset_global" in idata.posterior.data_vars
         assert "offset_lab" in idata.posterior.data_vars
         assert hasattr(idata, "posterior_predictive")
         assert idata.posterior_predictive["q_fine"].shape == (2, 100, 20)
         assert idata.posterior_predictive["d14c_fine"].shape == (2, 100, 20)
 
+        # Draw-by-draw joint forward consistency between offset_global and d14c_fine!
+        cbm = simple_model.cbm
+        y_ss = cbm.steady_state_c14(q_std=simple_model.q_std, alpha_unit=simple_model.alpha_unit)
+        r_ref = cbm.reference_specific_activity(q_std=simple_model.q_std, alpha_unit=simple_model.alpha_unit)
+        nh_box = cbm.box_index("Troposphere", "north")
+        r_nh = float((y_ss[nh_box] / cbm.reservoir_masses()[nh_box]) / r_ref)
+        for ch_idx in (0, 1):
+            for dr_idx in (0, 37, 99):
+                ts_d = float(idata.posterior["production__spike__t_start"][ch_idx, dr_idx])
+                fl_d = float(idata.posterior["production__spike__fluence"][ch_idx, dr_idx])
+                og_d = float(idata.posterior["offset_global"][ch_idx, dr_idx])
+                m_d = simple_model.set("production.spike.t_start", ts_d).set(
+                    "production.spike.fluence", fl_d
+                )
+                expected_fine = m_d.predict_fine(t_fine, hemisphere="north") + r_nh * og_d
+                np.testing.assert_allclose(
+                    np.asarray(idata.posterior_predictive["d14c_fine"][ch_idx, dr_idx]),
+                    np.asarray(expected_fine),
+                    rtol=1e-11,
+                    atol=1e-11,
+                )
+
         rhat_ds = az.rhat(idata)
         for v in ("production__spike__t_start", "production__spike__fluence"):
             assert float(rhat_ds[v].max()) < 1.05
+
+        # Forced max_tree_depth=1 must emit a RuntimeWarning about tree-depth saturation
+        with pytest.warns(RuntimeWarning, match="max_tree_depth"):
+            tt.sample_nuts(
+                simple_model,
+                synthetic_dataset,
+                spike_param_space,
+                num_warmup=10,
+                num_samples=10,
+                num_chains=1,
+                max_tree_depth=1,
+                reconstruct_linear=False,
+                rng_key=jax.random.PRNGKey(7),
+            )
 
     def test_loggp_production_map_and_svi_strictly_positive(
         self, brehm21_cbm, synthetic_dataset
@@ -703,6 +897,49 @@ class TestSMC:
         betas = np.asarray(smc_res.tempering_betas)
         assert betas[0] == pytest.approx(0.0) and betas[-1] == pytest.approx(1.0)
         assert np.all(np.diff(betas) > 0.0)
+        assert float(smc_res.root_ess) > 5.0
+        assert 0.0 < float(smc_res.mean_accept_prob) <= 1.0
+
+    def test_smc_lineage_collapse_lee_whiteley_warning_and_variance_floor(
+        self, brehm21_cbm
+    ):
+        """Synthetic lineage collapse (num_mcmc_steps=0 on a sharply peaked likelihood)
+        must emit a RuntimeWarning and report calibrated log_evidence_err >= 1.5 nats.
+        """
+        years = np.arange(772.0, 778.0, 1.0)
+        prod = tt.ProductionSum(
+            steady=tt.SteadyProduction(1.76),
+            spike=tt.MiyakeSpike(t_start=774.5, duration=0.3, fluence=7.5, profile="boxcar"),
+        )
+        model = tt.RadiocarbonModel(brehm21_cbm, prod)
+        s_true = _make_series(years, np.zeros_like(years), sigma=0.05, hemisphere="north")
+        d_obs = np.asarray(model.predict_d14c(s_true))
+        ds_peaked = tt.Dataset([_make_series(years, d_obs, sigma=0.05, hemisphere="north")])
+
+        init_model = model.set("production.spike.fluence", 3.0)
+        ps = tt.ParameterSpace(
+            init_model,
+            [
+                tt.ParamSpec("production.spike.t_start", "identity", prior_mean=774.5, prior_sd=1.2),
+                tt.ParamSpec("production.spike.fluence", "exp", prior_mean=math.log(5.0), prior_sd=1.2),
+            ],
+        )
+        cfg = tt.LinearMarginalConfig(offset_mode="none")
+
+        with pytest.warns(RuntimeWarning, match="root_ess="):
+            res_collapsed = tt.sample_smc(
+                init_model,
+                ds_peaked,
+                ps,
+                cfg,
+                num_particles=64,
+                target_ess=0.5,
+                num_mcmc_steps=0,
+                rng_key=jax.random.PRNGKey(99),
+            )
+        assert float(res_collapsed.root_ess) < 5.0
+        assert float(res_collapsed.log_evidence_err) >= 1.5
+        assert float(res_collapsed.mean_accept_prob) == 0.0
 
     def test_smc_effective_cbm_k2_and_k3(self, synthetic_dataset):
         """Mandatory Test 6.3b: EffectiveCBM(K=2, 3) SMC with dynamic CBM rate & timescale arrays in ParameterSpace."""
@@ -736,6 +973,39 @@ class TestSMC:
             assert jnp.isfinite(res.log_evidence)
             assert float(res.log_evidence_err) > 0.0
             assert hasattr(res.idata, "posterior")
+
+
+def test_fit_map_warm_xla_cache_hit_zero_recompilation(brehm21_cbm, synthetic_dataset):
+    """Warm repeat fit_map calls must hit module-level @eqx.filter_jit caches (< 0.25 s)."""
+    import time
+
+    prod = tt.ProductionSum(
+        steady=tt.SteadyProduction(),
+        solar=tt.HarmonicSolar(periods=(11.0,)),
+        spike=tt.MiyakeSpike(t_start=774.2, duration=0.4, fluence=5.5, profile="boxcar"),
+    )
+    model = tt.RadiocarbonModel(brehm21_cbm, prod)
+    ps = tt.ParameterSpace(
+        model,
+        [
+            tt.ParamSpec("production.spike.t_start", "sigmoid", 0.0, 1.5, low=773.5, high=775.5),
+            tt.ParamSpec("production.spike.duration", "sigmoid", 0.0, 1.5, low=0.05, high=1.5),
+            tt.ParamSpec("production.spike.fluence", "exp", math.log(6.0), 0.5),
+        ],
+    )
+    cfg = tt.LinearMarginalConfig(offset_mode="hierarchical", marginalise_solar=True)
+
+    res_cold = tt.fit_map(model, synthetic_dataset, ps, cfg, method="BFGS")
+    jax.block_until_ready(res_cold.u_map)
+
+    t0 = time.perf_counter()
+    res_warm = tt.fit_map(model, synthetic_dataset, ps, cfg, method="BFGS")
+    jax.block_until_ready(res_warm.u_map)
+    warm_sec = time.perf_counter() - t0
+
+    np.testing.assert_allclose(res_warm.u_map, res_cold.u_map, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(res_warm.laplace_cov, res_cold.laplace_cov, rtol=1e-13, atol=1e-13)
+    assert warm_sec < 0.25, f"Warm fit_map took {warm_sec:.3f}s (expected XLA cache hit < 0.25s)"
 
 
 # ===========================================================================
