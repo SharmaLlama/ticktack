@@ -27,4 +27,4 @@ Specialized constants, preset serialization helpers, and low-level linear-algebr
 ### Bayesian Inference, Fisher Geometry, & Visualization
 
 - **[Likelihood, Fitting, Sampling & Fisher](inference.md)** (`ticktack.likelihood`, `ticktack.fitting`, `ticktack.sampling`, `ticktack.fisher`): `ParamSpec`, `ParameterSpace`, `LinearMarginalConfig`, `marginal_log_likelihood`, `linear_posterior`, `fit_map`, `sample_nuts`, `fit_svi`, `sample_smc`, `cbm_fisher_spectrum`, and `relaxation_fisher_modes`.
-- **[Plotting & Legacy Compatibility](plotting_legacy.md)** (`ticktack.plotting` & legacy `v1` reproduction flags): `plot_d14c_fit`, `plot_production_posterior`, `plot_fisher_spectrum`, `plot_cbm_eigenmodes`, `plot_field_draws`, `plot_evidence_grid`, and legacy `ticktack 1.x` audit options.
+- **[Plotting & Legacy Compatibility](plotting_legacy.md)** (`ticktack.plotting` & legacy `v1` reproduction flags): `plot_d14c_fit`, `plot_data_model_correlation`, `plot_residual_map`, `plot_production_posterior`, `plot_fisher_spectrum`, `plot_cbm_eigenmodes`, `plot_field_draws`, `plot_evidence_grid`, and legacy `ticktack 1.x` audit options.

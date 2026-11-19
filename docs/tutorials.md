@@ -2,8 +2,8 @@
 
 `ticktack 2.0` ships with two complementary suites of self-contained, pre-executed minimal-working-example (MWE) Jupyter notebooks under [`notebooks/v2/`](https://github.com/SharmaLlama/ticktack/tree/main/notebooks/v2):
 
-1. **Core `v2` Pillar Walkthroughs (`notebooks/v2/01..05_*.ipynb`)** — end-to-end demonstrations of semiparametric event inference, Fisher information & tempered SMC, causal POD vs log-GP reconstruction, Information Field Theory kernel discovery, and multi-event Miyake reanalysis.
-2. **`v1` → `v2` Reproduction & Benchmark Suite (`notebooks/v2/docs_examples/01..06_*.ipynb`)** — direct head-to-head reproductions of every `ticktack 1.x` documentation tutorial (`docs/notebooks/01..05_*.ipynb`) with cold-JIT and warm wall-clock benchmarks, plus direct Bayesian inference of carbon-box transfer coefficients (`06_direct_cbm_inference.ipynb`).
+1. **Core `v2` Pillar Walkthroughs (`notebooks/v2/01..05_*.ipynb`)** – end-to-end demonstrations of semiparametric event inference, Fisher information & tempered SMC, causal POD vs log-GP reconstruction, Information Field Theory kernel discovery, and multi-event Miyake reanalysis.
+2. **`v1` → `v2` Reproduction & Benchmark Suite (`notebooks/v2/docs_examples/01..06_*.ipynb`)** – direct head-to-head reproductions of every `ticktack 1.x` documentation tutorial (`docs/notebooks/01..05_*.ipynb`) with cold-JIT and warm wall-clock benchmarks, plus direct Bayesian inference of carbon-box transfer coefficients (`06_direct_cbm_inference.ipynb`).
 
 ---
 
@@ -15,7 +15,7 @@
 Demonstrates the standard parametric event-inference workflow on the two-hemisphere 774–775 CE compilation (`28` tree-ring series, `313` measurements) using the 22-box `Brehm21` carbon-box model:
 
 - Composes `SteadyProduction + HarmonicSolar + GPProduction + MiyakeSpike` inside `RadiocarbonModel`.
-- Analytically marginalizes the global Holocene offset $\Delta_{\text{global}}$, all 28 per-laboratory offsets $\delta_{\text{lab},s}$, the 11-year solar quadrature modes, and 32 Solin–Särkkä GP modes via `LinearMarginalConfig` — eliminating the `ticktack 1.x` four-ring `mean(y[:4])` boundary bias.
+- Analytically marginalizes the global Holocene offset $\Delta_{\text{global}}$, all 28 per-laboratory offsets $\delta_{\text{lab},s}$, the 11-year solar quadrature modes, and 32 Solin–Särkkä GP modes via `LinearMarginalConfig` – eliminating the `ticktack 1.x` four-ring `mean(y[:4])` boundary bias.
 - Finds the MAP solution with `fit_map` (`BFGS`), samples the 3D nonlinear spike posterior with `sample_nuts` (`NumPyro`), reconstructs continuous NH and SH $\Delta^{14}\text{C}(t)$ trajectories (`plot_d14c_fit`), and reports cosmic-ray yield in $\text{atoms cm}^{-2}$ as well as both pre-industrial ($q_0 = Q_{\text{std}}$) and epoch-local ($q_0(\Delta_0)$) production-year equivalents.
 
 ---
@@ -65,10 +65,10 @@ Homogeneously re-analyses all six bundled Holocene Miyake cosmic-ray excursions 
 
 ## `v1` → `v2` Reproduction & Benchmark Suite (`docs_examples`)
 
-The six executed five-cell notebooks in [`notebooks/v2/docs_examples/`](https://github.com/SharmaLlama/ticktack/tree/main/notebooks/v2/docs_examples) reproduce all five `ticktack 1.x` tutorials (`docs/notebooks/01..05_*.ipynb`) on `ticktack 2.0`—adding calibrated diagnostic figures (`plot_d14c_fit` with $(d - m)/\sigma$ pulls, `plot_residual_map`, and `plot_data_model_correlation`)—followed by a sixth tutorial on direct carbon-box coefficient inference:
+The six executed five-cell notebooks in [`notebooks/v2/docs_examples/`](https://github.com/SharmaLlama/ticktack/tree/main/notebooks/v2/docs_examples) reproduce all five `ticktack 1.x` tutorials (`docs/notebooks/01..05_*.ipynb`) on `ticktack 2.0` – adding calibrated diagnostic figures (`plot_d14c_fit` with $(d - m)/\sigma$ pulls, `plot_residual_map`, and `plot_data_model_correlation`) – followed by a sixth tutorial on direct carbon-box coefficient inference:
 
 1. **Single-Series 774 CE Fit** ([`01_single_series_774ce.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/docs_examples/01_single_series_774ce.ipynb), replaces `01_Fitting.ipynb`): Fits the 28-ring `Miyake12_Cedar` record (`notebooks/miyake12.csv`, loaded directly via whitespace-delimited `TreeRingSeries.from_csv`) on `Guttler15` with exact frequency-domain solar burn-in, analytical offset + solar quadrature marginalization (`LinearMarginalConfig`), `fit_map`, and `NumPyro` `sample_nuts`.
-2. **Multi-Series Two-Hemisphere 774 CE Fit** ([`02_multiseries_774ce_nh_sh.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/docs_examples/02_multiseries_774ce_nh_sh.ipynb), replaces `02_MultiFitter.ipynb`): Jointly fits all 14 `notebooks/775CE/*.csv` NH and SH series on 22-box `Brehm21` (`4.38‰` inter-hemispheric gradient) with exact Cholesky marginalization of all 14 per-laboratory offsets and a 2D `series × calendar year` pull heatmap (`plot_residual_map` with symmetric diverging colourbar).
+2. **Multi-Series Two-Hemisphere 774 CE Fit** ([`02_multiseries_774ce_nh_sh.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/docs_examples/02_multiseries_774ce_nh_sh.ipynb), replaces `02_MultiFitter.ipynb`): Jointly fits all 14 `notebooks/775CE/*.csv` NH and SH series on 22-box `Brehm21` (`4.39‰` inter-hemispheric gradient) with exact Cholesky marginalization of all 14 per-laboratory offsets and a 2D `series × calendar year` pull heatmap (`plot_residual_map` with symmetric diverging colourbar).
 3. **Non-Parametric Cosmic-Ray Inverse Reconstruction** ([`03_nonparametric_inverse_reconstruction.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/docs_examples/03_nonparametric_inverse_reconstruction.ipynb), replaces `03_InverseSolver.ipynb`): Eliminates `v1` `MC_reconstruct`'s unphysical negative production rates (`-1.73 atoms cm^-2 s^-1`) via closed-form Solin–Särkkä `GPProduction` (`linear_posterior`) and strictly positive IFT `LogGaussianField` + `select_gp_kernel`.
 4. **Synthetic Solar-Cycle Injection–Recovery** ([`04_gp_injection_recovery.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/docs_examples/04_gp_injection_recovery.ipynb), replaces `04_Injection_Recovery_ControlPoints.ipynb`): Recovers a high-amplitude 11-year solar sinusoid injected into 30 June–August rings automatically via `select_gp_kernel` (`Matern32`, `Matern52`, `SquaredExponential`, `QuasiPeriodic11yr`) + `laplace_samples`, replacing `117.0 s` finite-difference spline `L-BFGS-B` and `20 min 36 s` `emcee`.
 5. **Flat-Baseline Exact Sub-Interval Quadrature & SMC Evidence** ([`05_flat_baseline_smc_evidence.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/docs_examples/05_flat_baseline_smc_evidence.ipynb), replaces `05_Fitting_Flat.ipynb`): Replaces `v1`'s `adaptive=False, oversample=1008` constant-step ODE hack with clamped Van Loan sub-interval quadrature (`ExactLinearSolver`) and computes thermodynamic Bayes factors $\Delta\ln\widehat{Z}$ between flat-baseline and `HarmonicSolar` models via `BlackJAX` `sample_smc`.
@@ -81,17 +81,17 @@ The six executed five-cell notebooks in [`notebooks/v2/docs_examples/`](https://
 Three architectural changes drive the one-to-three order-of-magnitude speedup over `ticktack 1.x`:
 
 - **Exact modal LTI spectral propagation**: Replaces step-by-step `diffrax` ODE integration and per-interval Padé `expm` loops with exact complex modal eigendecomposition (using symmetric detailed-balance `jax.scipy.linalg.eigh` whenever available) and analytical frequency-domain solar steady state, eliminating 2000-year numerical burn-ins and `oversample=1008` step-clipping workarounds.
-- **Equinox `@eqx.filter_jit` XLA cache stability**: Partitioning callable `CarbonBoxModel`, `ProductionRate`, and `ExactLinearSolver` PyTrees cleanly into dynamic JAX array leaves and static topology metadata ensures zero spurious XLA re-tracing across `fit_map`, `sample_nuts`, and `sample_smc` iterations.
+- **Equinox `@eqx.filter_jit` XLA cache stability**: Partitioning callable `CarbonBoxModel`, `ProductionTerm`, and `ExactLinearSolver` PyTrees cleanly into dynamic JAX array leaves and static topology metadata ensures zero spurious XLA re-tracing across `fit_map`, `sample_nuts`, and `sample_smc` iterations.
 - **Closed-form linear nuisance marginalization**: Marginalizing global and hierarchical laboratory offsets, 11-year solar quadrature amplitudes, and Solin–Särkkä GP modes analytically inside `marginal_log_likelihood` collapses 15–45-dimensional random-walk `emcee` chains to 2–6 well-conditioned nonlinear parameters with exact `jax.grad` geometry and vectorized 2-matmul posterior trajectory reconstruction.
 
 | Tutorial | `ticktack 1.x` Workflow & Recorded Wall Time | `ticktack 2.0` Cold (JIT + Run) | `ticktack 2.0` Warm Execution |
 | :--- | :--- | :--- | :--- |
-| **`01` Single-Series 774 CE** | `SingleFitter` + `emcee` (`119.0 s`) | *Updated on stack execution* | *Updated on stack execution* |
-| **`02` Multi-Series NH + SH** | `MultiFitter` 14× ODE burn-in + `emcee` (`234.0 s`) | *Updated on stack execution* | *Updated on stack execution* |
-| **`03` Non-Parametric Inverse** | `InverseSolver.MC_reconstruct` (`11.6 s`, $Q_{\min} = -1.73$) | *Updated on stack execution* | *Updated on stack execution* |
-| **`04` Solar Injection–Recovery** | `fit_ControlPoints` `L-BFGS-B` (`117.0 s`) + `emcee` (`1236 s`) | *Updated on stack execution* | *Updated on stack execution* |
-| **`05` Flat-Baseline + Evidence** | `oversample=1008` `emcee` (`26.9 s`, no $\ln Z$) | *Updated on stack execution* | *Updated on stack execution* |
-| **`06` Direct CBM Inference** | Static frozen ODE matrix (not supported in `v1`) | *Updated on stack execution* | *Updated on stack execution* |
+| **`01` Single-Series 774 CE** | `SingleFitter` + `emcee` (`119.0 s`) | `9.9 s` (`fit_map`) / `33.0 s` (`sample_nuts`) | `47 ms` (`fit_map`) / `11.3 s` (`sample_nuts`, `10.6×`) |
+| **`02` Multi-Series NH + SH** | `MultiFitter` 14× ODE burn-in + `emcee` (`234.0 s`) | `28.3 s` (`fit_map`) / `64.1 s` (`sample_nuts`) | `0.91 s` (`fit_map`) / `24.0 s` (`sample_nuts`, `9.7×`) |
+| **`03` Non-Parametric Inverse** | `InverseSolver.MC_reconstruct` (`11.6 s`, $Q_{\min} = -1.73$) | `1.17 s` (`GPProduction`) / `13.9 s` (`LogGaussianField`) | `3.8 ms` (`GPProduction`, `3,000×`) / `13.6 s` ($Q_{\min} = +0.20$) |
+| **`04` Solar Injection–Recovery** | `fit_ControlPoints` `L-BFGS-B` (`117.0 s`) + `emcee` (`1236 s`) | `48.1 s` (4-kernel `select_gp_kernel` + draws) | `6.5 ms` (`GPProduction`) / `1.95 s` (`select_gp_kernel`, `60×`–`635×`) |
+| **`05` Flat-Baseline + Evidence** | `oversample=1008` `emcee` (`26.9 s`, no $\ln Z$) | `7.6 s` (`sample_smc`, 400 particles) | `0.20 s` (`sample_smc`, `137×`, $\Delta\ln\widehat{Z} = +3.81 \pm 0.11$) |
+| **`06` Direct CBM Inference** | Static frozen ODE matrix (not supported in `v1`) | `17.3 s` (Fisher) / `13.5 s` (joint NUTS) / `5.6 s` (`K=3` SMC) | `41 ms` (Fisher) / `3.4 s` (joint NUTS) / `0.05 s` (`K=3` SMC) |
 
 ---
 
@@ -109,7 +109,7 @@ Three architectural changes drive the one-to-three order-of-magnitude speedup ov
 Decadal tree-ring $\Delta^{14}\text{C}$ observations act as a seasonal-window-averaged Laplace transform of carbon-reservoir residence times. As demonstrated in `v2/02_effective_cbm_fisher_smc.ipynb` and `docs_examples/06_direct_cbm_inference.ipynb`:
 
 - **Exponential singular-value decay (`cbm_fisher_spectrum`)**: Even in 22-box `Brehm21` (56 directed flow-balanced log rates, or 52 under N/S symmetry tying, after projecting out the zero-Fisher global carbon-mass gauge mode), Schur-complement marginalization over cosmic-ray production and laboratory offsets leaves only $d_{\text{eff}} \approx 2\text{–}3$ collective parameter combinations with prior-whitened Fisher eigenvalues $\mu_k > 1$.
-- **Exact Kirchhoff mass balance & symmetric `eigh` autodiff**: `EffectiveCBM(K)` parameterizes the identifiable stratosphere–troposphere exchange and $K - 2$ ordered effective sinks directly without redundant null-space directions, while `ReversibleCBM` (`load_preset("Miyake17", kind="reversible", miyake17_closure="closed_shallow")`) parameterizes undirected symmetric exchange fluxes so steady-state Kirchhoff mass conservation holds identically at every `fit_map`, `sample_nuts`, and `sample_smc` evaluation.
+- **Exact Kirchhoff mass balance & symmetric `eigh` autodiff**: `EffectiveCBM(K)` parametrizes the identifiable stratosphere–troposphere exchange and $K - 2$ ordered effective sinks directly without redundant null-space directions, while `ReversibleCBM` (`load_preset("Miyake17", kind="reversible", miyake17_closure="closed_shallow")`) parametrizes undirected symmetric exchange fluxes so steady-state Kirchhoff mass conservation holds identically at every `fit_map`, `sample_nuts`, and `sample_smc` evaluation.
 
 ---
 

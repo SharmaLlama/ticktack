@@ -8,12 +8,12 @@ Publication-ready diagnostic figures (`ticktack.plotting`) and explicit opt-in f
 
 Every diagnostic helper in `ticktack.plotting` is strictly stateless (never mutating `matplotlib.rcParams` or calling `plt.gca()` / `plt.gcf()`), accepts optional caller-supplied `Axes`, and returns `(fig, axes)`:
 
-- `plot_d14c_fit` — observed tree-ring $\Delta^{14}\text{C}$ windows and continuous posterior curves with optional standardized pull panel `(d - m) / \sigma`.
-- `plot_data_model_correlation` — 1-to-1 observed vs model-predicted $\Delta^{14}\text{C}$ calibration scatter with $1\sigma$ error bars, `1:1` identity line, matched square limits, and reduced $\chi^2 / N_{\text{obs}}$ + WRMS pull summary.
-- `plot_residual_map` — 2D `series × calendar year` standardized pull (or raw permil residual) heatmap on a symmetric diverging colour scale (`vmin = -vmax`) with distinct neutral-grey `NaN` cells for unobserved years and a labelled colourbar.
-- `plot_production_posterior` — continuous cosmic-ray production $Q(t)$ credible bands, spaghetti draws, and optional injected truth overlay.
-- `plot_fisher_spectrum` & `plot_cbm_eigenmodes` — prior-whitened carbon-cycle Fisher information scree and leading collective reservoir eigenmodes.
-- `plot_field_draws` & `plot_evidence_grid` — Information Field Theory (DCT-II) realization galleries and 2D MacKay log-evidence landscapes (re-exported from `ticktack.fields`).
+- `plot_d14c_fit` – observed tree-ring $\Delta^{14}\text{C}$ windows and continuous posterior curves with optional standardized pull panel $(d - m) / \sigma$.
+- `plot_data_model_correlation` – 1-to-1 observed vs model-predicted $\Delta^{14}\text{C}$ calibration scatter with $1\sigma$ error bars, `1:1` identity line, matched square limits, and reduced $\chi^2 / N_{\text{obs}}$ + WRMS pull summary.
+- `plot_residual_map` – 2D `series × calendar year` standardized pull (or raw permil residual) heatmap on a symmetric diverging colour scale (`vmin = -vmax`) with distinct neutral-grey `NaN` cells for unobserved years and a labelled colourbar.
+- `plot_production_posterior` – continuous cosmic-ray production $Q(t)$ credible bands, spaghetti draws, and optional injected truth overlay.
+- `plot_fisher_spectrum` & `plot_cbm_eigenmodes` – prior-whitened carbon-cycle Fisher information scree and leading collective reservoir eigenmodes.
+- `plot_field_draws` & `plot_evidence_grid` – Information Field Theory (DCT-II) realization galleries and 2D MacKay log-evidence landscapes (re-exported from `ticktack.fields`).
 
 ::: ticktack.plotting
     options:

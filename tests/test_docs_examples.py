@@ -28,18 +28,30 @@ DOCS_EXAMPLE_NOTEBOOKS = (
 
 
 class TestWhitespaceCSVFallback:
-    def test_miyake12_space_delimited_matches_bundled_csv(self):
+    def test_miyake12_space_delimited_matches_comma_roundtrip(self, tmp_path: Path):
+        ws_src = ROOT / "notebooks" / "miyake12.csv"
         cedar_ws = tt.TreeRingSeries.from_csv(
-            ROOT / "notebooks" / "miyake12.csv",
+            ws_src,
             hemisphere="north",
             growth_season="april-september",
             name="Miyake12_Cedar",
         )
-        cedar_comma = tt.load_bundled_series(
-            "notebooks/775CE/Miyake12_Cedar.csv", repo_root=ROOT
+        comma_copy = tmp_path / "miyake12_comma.csv"
+        comma_copy.write_text(
+            "\n".join(",".join(ln.split()) for ln in ws_src.read_text(encoding="utf-8").splitlines() if ln.strip()) + "\n",
+            encoding="utf-8",
+        )
+        cedar_comma = tt.TreeRingSeries.from_csv(
+            comma_copy,
+            hemisphere="north",
+            growth_season="april-september",
+            name="Miyake12_Cedar",
         )
         assert cedar_ws.n_obs == 28
         np.testing.assert_allclose(cedar_ws.years_ce, np.arange(760.0, 788.0))
+        assert cedar_ws.d14c[0] == pytest.approx(-21.63)
+        assert cedar_ws.d14c[15] == pytest.approx(-9.335)
+        assert cedar_ws.d14c[-1] == pytest.approx(-14.44)
         np.testing.assert_allclose(cedar_ws.d14c, cedar_comma.d14c, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(
             cedar_ws.sigma_d14c, cedar_comma.sigma_d14c, rtol=1e-12, atol=1e-12

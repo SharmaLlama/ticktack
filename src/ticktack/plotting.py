@@ -1074,8 +1074,7 @@ def plot_residual_map(
         target_ax = ax
         fig = target_ax.figure
 
-    cmap_obj = plt.get_cmap(cmap).copy()
-    cmap_obj.set_bad(color="#E6E6E6")
+    cmap_obj = plt.get_cmap(cmap).with_extremes(bad="#E6E6E6")
 
     im = target_ax.imshow(
         grid,
