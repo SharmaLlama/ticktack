@@ -1584,3 +1584,55 @@ def test_kalman_gp_marginal_default_dt_commensurate_with_monthly_tree_ring_serie
     )
     np.testing.assert_allclose(kal.loglike, pod_ll, rtol=1e-6, atol=1e-6)
 
+
+def test_kalman_gp_marginal_brehm21_22box_rts_and_grad():
+    """Verify RTS smoother stability and autodiff on 22-box Brehm21 (uncontrollable modes)."""
+    import ticktack as tt
+
+    cbm = tt.load_preset("Brehm21")
+    a_mat = cbm.matrix_A()
+    b_vec = cbm.production_vector()
+    yrs = jnp.arange(770.0, 782.0, dtype=jnp.float64)
+    series = tt.TreeRingSeries(
+        yrs, jnp.zeros_like(yrs), jnp.ones_like(yrs), hemisphere="north"
+    )
+    n_obs = yrs.shape[0]
+    trop_nh = cbm.box_index("Troposphere", "north")
+    scale_nh = 1000.0 / (
+        cbm.reservoir_masses()[trop_nh] * cbm.reference_specific_activity()
+    )
+    c_nh = jnp.zeros(cbm.n_boxes, dtype=jnp.float64).at[trop_nh].set(scale_nh)
+    obs_mat = jnp.broadcast_to(c_nh[None, :], (n_obs, cbm.n_boxes))
+    rng = np.random.default_rng(774)
+    resid = jnp.asarray(rng.standard_normal(n_obs) * 1.6, dtype=jnp.float64)
+    sigma = jnp.full(n_obs, 1.2, dtype=jnp.float64)
+
+    def _run_kalman(log_amp: jax.Array, log_scale: jax.Array):
+        kern = jnp.exp(2.0 * log_amp) * tgk.Matern32(jnp.exp(log_scale))
+        return kalman_gp_marginal(
+            a_mat,
+            b_vec,
+            kern,
+            resid,
+            sigma,
+            series.t_starts,
+            series.t_ends,
+            alpha_unit=tt.ALPHA_ATOMS_CM2_S_TO_KG_YR,
+            obs_matrix=obs_mat,
+        )
+
+    kal = _run_kalman(jnp.log(0.15), jnp.log(2.5))
+    assert jnp.all(jnp.isfinite(kal.production_mean))
+    assert jnp.all(jnp.isfinite(kal.production_var))
+    assert jnp.all(kal.production_var > 0.0)
+    assert jnp.all(jnp.isfinite(kal.cbm_state_mean))
+    assert jnp.all(jnp.isfinite(kal.cbm_state_var))
+
+    grad_fn = jax.grad(
+        lambda th: _run_kalman(th[0], th[1]).loglike
+        + 1e-3 * jnp.sum(_run_kalman(th[0], th[1]).production_mean)
+    )
+    g = grad_fn(jnp.array([jnp.log(0.15), jnp.log(2.5)], dtype=jnp.float64))
+    assert jnp.all(jnp.isfinite(g))
+
+
