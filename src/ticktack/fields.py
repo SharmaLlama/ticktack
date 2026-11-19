@@ -70,7 +70,7 @@ from .production import (
     ProductionTerm,
     SteadyProduction,
 )
-from .solvers import ExactLinearSolver, _foh_cumulative_integral
+from .solvers import ExactLinearSolver, _foh_cumulative_integral, _modal_decomposition
 
 __all__ = [
     "dct2",
@@ -1432,6 +1432,7 @@ def _eval_packed_term_d14c(
     m_rel: jax.Array,
     q_std: ArrayLike,
     alpha_unit: ArrayLike,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
 ) -> jax.Array:
     """Evaluate a single ``ProductionTerm`` across all deduplicated dataset sub-windows."""
     dy_sub = solver.solve_delta_binned(
@@ -1441,6 +1442,7 @@ def _eval_packed_term_d14c(
         flat_ends,
         q_std=q_std,
         alpha_unit=alpha_unit,
+        modal=modal,
     )
     series_out: list[jax.Array] = []
     for inv_slice, n_s, m_s, w_sub, box_idx in specs:
@@ -1458,6 +1460,7 @@ def _eval_extra_terms_d14c(
     q_std: ArrayLike,
     alpha_unit: ArrayLike,
     steady_unit_response: jax.Array,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
 ) -> jax.Array:
     """Evaluate additive ``Delta14C`` excursion from non-field ``ProductionTerm`` siblings."""
     n_obs = dataset.n_obs
@@ -1471,6 +1474,11 @@ def _eval_extra_terms_d14c(
 
     non_steady = [term for _, term in extras if not isinstance(term, SteadyProduction)]
     packed = _pack_dataset_quadrature(cbm, dataset) if non_steady else None
+    eff_modal = (
+        _modal_decomposition(cbm.matrix_A(), cbm=cbm)
+        if (non_steady and modal is None)
+        else modal
+    )
 
     total_exc = jnp.zeros((n_obs,), dtype=jnp.float64)
     for _, term in extras:
@@ -1481,7 +1489,17 @@ def _eval_extra_terms_d14c(
             assert packed is not None
             flat_s, flat_e, specs = packed
             total_exc = total_exc + _eval_packed_term_d14c(
-                cbm, solver, term, flat_s, flat_e, specs, y_trop, m_rel, q_std, alpha_unit
+                cbm,
+                solver,
+                term,
+                flat_s,
+                flat_e,
+                specs,
+                y_trop,
+                m_rel,
+                q_std,
+                alpha_unit,
+                modal=eff_modal,
             )
     return total_exc
 
@@ -1912,6 +1930,7 @@ def fit_ift_field(
         chol_marg = jnp.linalg.cholesky(cov_marg)
 
         flat_s, flat_e, packed_specs = _pack_dataset_quadrature(model.cbm, ds)
+        modal_cbm = _modal_decomposition(model.cbm.matrix_A(), cbm=model.cbm)
         trop_idx = jnp.asarray(model.cbm.topology.trop_box_indices, dtype=jnp.int32)
         y_ss = model.cbm.steady_state_c14(q_std=model.q_std, alpha_unit=model.alpha_unit)
         m_rel = model.cbm.relative_reservoir_masses()
@@ -1935,6 +1954,7 @@ def fit_ift_field(
                 m_rel,
                 model.q_std,
                 model.alpha_unit,
+                modal=modal_cbm,
             )
             r_raw = r_fixed_raw + inv_sig * sp_exc
             r_marg = jsl.solve_triangular(chol_marg, r_raw, lower=True)
@@ -1985,6 +2005,7 @@ def fit_ift_field(
             m_rel,
             model.q_std,
             model.alpha_unit,
+            modal=modal_cbm,
         )
         x_raw_opt = -(r_fixed_raw + inv_sig * sp_exc_opt)
         x_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(x_raw_opt, j_raw, u_nuis)
@@ -2010,12 +2031,14 @@ def fit_ift_field(
             )
             y0_vec = jnp.concatenate([z0, u_sp0], axis=0)
             flat_s, flat_e, packed_specs = _pack_dataset_quadrature(model.cbm, ds)
+            modal_cbm = _modal_decomposition(model.cbm.matrix_A(), cbm=model.cbm)
             trop_idx = jnp.asarray(model.cbm.topology.trop_box_indices, dtype=jnp.int32)
             y_ss = model.cbm.steady_state_c14(q_std=model.q_std, alpha_unit=model.alpha_unit)
             m_rel = model.cbm.relative_reservoir_masses()
             y_trop = jnp.sum(y_ss[trop_idx])
         else:
             sp_path = ""
+            modal_cbm = None
             y0_vec = z0
 
         n_z = field.n_grid
@@ -2057,6 +2080,7 @@ def fit_ift_field(
                     m_rel,
                     model.q_std,
                     model.alpha_unit,
+                    modal=modal_cbm,
                 )
                 sp_pen = (u_sp - sp_prior_means) / sp_prior_sds
             else:
@@ -2149,6 +2173,7 @@ def fit_ift_field(
                     m_rel,
                     model.q_std,
                     model.alpha_unit,
+                    modal=modal_cbm,
                 )
                 rr = inv_sig * (
                     op.ss_d14c + fixed_exc + sp_e + f_map_exc + nuis_mean_shift - d_obs
@@ -2511,6 +2536,12 @@ def log_evidence(
             acc = acc + adapters[i][2](u_vec[i])
         return acc
 
+    modal_ext = (
+        _modal_decomposition(model.cbm.matrix_A(), cbm=model.cbm)
+        if not any(p == "cbm" or p.startswith("cbm.") for p in extra_paths)
+        else None
+    )
+
     if isinstance(field, GaussianField):
         def _profile_neg_log_post(u_vec: jax.Array) -> jax.Array:
             e_cur = _constrain_u(u_vec)
@@ -2519,7 +2550,14 @@ def log_evidence(
                 m_cur = m_cur.set(p, e_cur[i])
             f_cur, _, ext_cur = _extract_field_and_extras(m_cur.production)
             ext_exc = _eval_extra_terms_d14c(
-                m_cur.cbm, solver, ds, ext_cur, m_cur.q_std, m_cur.alpha_unit, op.steady_unit_response
+                m_cur.cbm,
+                solver,
+                ds,
+                ext_cur,
+                m_cur.q_std,
+                m_cur.alpha_unit,
+                op.steady_unit_response,
+                modal=modal_ext,
             )
             x_raw_u = inv_sig * (d_obs - op.ss_d14c - ext_exc - nuis_shift)
             j_raw_u = inv_sig[:, None] * (
@@ -2569,7 +2607,14 @@ def log_evidence(
             m_cur = m_cur.set(p, e_cur[i])
         f_cur, _, ext_cur = _extract_field_and_extras(m_cur.production)
         ext_exc = _eval_extra_terms_d14c(
-            m_cur.cbm, solver, ds, ext_cur, m_cur.q_std, m_cur.alpha_unit, op.steady_unit_response
+            m_cur.cbm,
+            solver,
+            ds,
+            ext_cur,
+            m_cur.q_std,
+            m_cur.alpha_unit,
+            op.steady_unit_response,
+            modal=modal_ext,
         )
         f_exc = op.w_grid @ f_cur.evaluate_grid(q_std=m_cur.q_std)
         return inv_sig * (op.ss_d14c + ext_exc + f_exc + nuis_shift - d_obs)
