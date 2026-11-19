@@ -2,7 +2,7 @@
 
 `ticktack 2.0` replaces the stateful `ticktack 1.x` object hierarchy (`Box`, `Flow`, `CarbonBoxModel.compile()`, `SingleFitter`, `MultiFitter`, `emcee`, and `dynesty`) with composable, immutable [`zodiax`](https://github.com/LouisDesdoigts/zodiax) PyTrees, exact matrix-exponential LTI propagation, analytical Gaussian marginalization, and gradient-based inference (`optimistix`, `NumPyro` NUTS/SVI, and `BlackJAX` tempered SMC).
 
-Beyond dramatic speedups — eliminating the 2000-year numerical burn-in on every likelihood evaluation and marginalizing dozens of linear nuisance parameters in closed form — `ticktack 2.0` corrects several subtle physical and dendrochronological bugs discovered during a comprehensive audit of `ticktack 1.x`.
+Beyond dramatic speedups – eliminating the 2000-year numerical burn-in on every likelihood evaluation and marginalizing dozens of linear nuisance parameters in closed form – `ticktack 2.0` corrects several subtle physical and dendrochronological bugs discovered during a comprehensive audit of `ticktack 1.x`.
 
 ---
 
@@ -94,7 +94,7 @@ In `ticktack 2.0`, `tt.load_preset("Miyake17")` automatically divides out the er
 
 ### 4. Eliminating the 4-Ring `mean(y[:4])` Baseline Clamp
 
-`ticktack 1.x`'s `SingleFitter` shifted model predictions by matching the sample mean of the first four data points in each series. Noise on those four points — or a rising 11-year solar phase at the start of the window — injected correlated $\sim 1$–$2\text{‰}$ bias into every ring residual and distorted inferred spike fluences. `LinearMarginalConfig(offset_mode="hierarchical")` marginalizes $\Delta_{\text{global}}$ and $\delta_{\text{lab},s}$ over the *entire* time series weighted by exact inverse covariance.
+`ticktack 1.x`'s `SingleFitter` shifted model predictions by matching the sample mean of the first four data points in each series. Noise on those four points – or a rising 11-year solar phase at the start of the window – injected correlated $\sim 1$–$2\text{‰}$ bias into every ring residual and distorted inferred spike fluences. `LinearMarginalConfig(offset_mode="hierarchical")` marginalizes $\Delta_{\text{global}}$ and $\delta_{\text{lab},s}$ over the *entire* time series weighted by exact inverse covariance.
 
 ### 5. Decay Constant & Julian-Year Unit Conversion
 

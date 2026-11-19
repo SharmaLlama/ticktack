@@ -80,13 +80,13 @@ $$
 \Delta^{14}\text{C}_{\text{pred},s}(Y) = \mathcal{B}_{\text{season},s}\!\left[\Delta^{14}\text{C}_{c(s)}\right](Y) + \Delta_{\text{global}}\,r_{c(s)} + \delta_{\text{lab},s}.
 $$
 
-In `LinearMarginalConfig(offset_mode="hierarchical")`, `ticktack 2.0` places independent Gaussian priors $\Delta_{\text{global}} \sim \mathcal{N}(\mu_{\text{global}}, \sigma_{\text{global}}^2)$ (default $\sigma_{\text{global}} = 200\text{‰}$) and $\delta_{\text{lab},s} \sim \mathcal{N}(0, \sigma_{\text{lab}}^2)$ (default $\sigma_{\text{lab}} = 1.5\text{‰}$) and marginalizes all $S + 1$ offset parameters analytically — completely replacing the biased `ticktack 1.x` practice of clamping the model baseline to the sample mean of the first four rings (`mean(y[:4])`).
+In `LinearMarginalConfig(offset_mode="hierarchical")`, `ticktack 2.0` places independent Gaussian priors $\Delta_{\text{global}} \sim \mathcal{N}(\mu_{\text{global}}, \sigma_{\text{global}}^2)$ (default $\sigma_{\text{global}} = 200\text{‰}$) and $\delta_{\text{lab},s} \sim \mathcal{N}(0, \sigma_{\text{lab}}^2)$ (default $\sigma_{\text{lab}} = 1.5\text{‰}$) and marginalizes all $S + 1$ offset parameters analytically – completely replacing the biased `ticktack 1.x` practice of clamping the model baseline to the sample mean of the first four rings (`mean(y[:4])`).
 
 ### `relative_to="standard"` vs `"ambient"` Yield Conventions
 
 Literature studies report Miyake-event cosmic-ray fluences either in absolute physical units ($\text{atoms cm}^{-2}$) or as dimensionless multiples of one year of steady background production ($q_0\text{-years}$). Across Holocene geomagnetic excursions, $q_0\text{-years}$ becomes ambiguous unless one specifies *which* steady production rate serves as the unit (`relative_to` on `AbstractSolver.predict_d14c` and `baseline_d14c_permil` on `RadiocarbonModel.fluence_q0_years`):
 
-- **Pre-industrial standard (`relative_to="standard"`, default on `solver.predict_d14c`)**: `MiyakeSpike.fluence` is parameterized in absolute units of $\text{atoms cm}^{-2}\text{ s}^{-1}\text{ yr}$, so the physical surface fluence is independent of ambient $\Delta_0$:
+- **Pre-industrial standard (`relative_to="standard"`, default on `solver.predict_d14c`)**: `MiyakeSpike.fluence` is parametrized in absolute units of $\text{atoms cm}^{-2}\text{ s}^{-1}\text{ yr}$, so the physical surface fluence is independent of ambient $\Delta_0$:
   $$
   \mathcal{F}_{\text{phys}} = \text{fluence} \times 31\,557\,600\;\text{atoms cm}^{-2} \quad\text{(`RadiocarbonModel.fluence_atoms_cm2`)}.
   $$
@@ -131,7 +131,7 @@ In the **Northern Hemisphere** (`hemisphere="north"`), cambial growth falls enti
 In the **Southern Hemisphere** (`hemisphere="south"`), Austral summer growth spans New Year's Day (typically October through March or September through February). Two incompatible ring-labelling conventions coexist in the radiocarbon literature:
 
 1. **`year_convention="schulman_start"`** ([Schulman 1956](https://ltrr.arizona.edu/)): Assigns an Austral ring to the calendar year in which growth **begins** (October of $Y$ through March of $Y + 1$, offsets $[+0.75, +1.25]$). Used in `Büntgen18_TAS01.csv` and `993AD-S`, where the 774 CE event jumps between ring labels `773` and `774`.
-2. **`year_convention="end_year"`**: Assigns an Austral ring to the calendar year in which growth **completes** (October of $Y - 1$ through March of $Y$, offsets $[-0.25, +0.25]$, or $[-4/12, +2/12]$ for `"september-february"`). Used in `Guttler15_Kauri.csv` (`775AD-early-S`), where the 774 CE event jumps between ring labels `774` and `775` — representing the **exact same physical Austral summer ($774.67$–$775.17\text{ CE}$)** as Schulman year `774`!
+2. **`year_convention="end_year"`**: Assigns an Austral ring to the calendar year in which growth **completes** (October of $Y - 1$ through March of $Y$, offsets $[-0.25, +0.25]$, or $[-4/12, +2/12]$ for `"september-february"`). Used in `Guttler15_Kauri.csv` (`775AD-early-S`), where the 774 CE event jumps between ring labels `774` and `775` – representing the **exact same physical Austral summer ($774.67$–$775.17\text{ CE}$)** as Schulman year `774`!
 3. **`year_convention="explicit_bounds"`**: Supplies exact per-ring `[t_starts, t_ends]` columns in astronomical CE directly (used for custom sub-annual micro-sliced wood records).
 
 To prevent silent $1\text{-year}$ inter-hemispheric timing artefacts (`ticktack 1.x` treated all Southern Hemisphere CSVs uniformly without distinguishing `schulman_start` from `end_year`), `parse_growth_season_bounds` and `TreeRingSeries` raise a `ValueError` whenever a cross-New-Year season is constructed without an explicit `year_convention`. Arbitrary $M$-bin sub-annual photosynthesis density profiles (e.g. 12 monthly weights) are supported via `SeasonalWeights.from_subannual_weights(...)`.

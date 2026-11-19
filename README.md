@@ -18,7 +18,7 @@ Radiocarbon ($\Delta^{14}\mathrm{C}$) measurements from annually resolved tree r
 
 `ticktack 2.0` is a ground-up JAX (`float64`) redesign built on [`zodiax`](https://github.com/LouisDesdoigts/zodiax) / [`equinox`](https://github.com/patrick-kidger/equinox):
 
-- **Immutable `zodiax` Carbon Box Models (`ticktack.cbm`, `ticktack.presets`)**: Literature presets (`Guttler15`, `Brehm21`, `Buntgen18`, and unit/closure-corrected `Miyake17`) plus gauge-minimal parameterizations (`FixedCBM`, Perron–Frobenius cycle-space `BalancedCBM`, `OpenCBM`, `ReversibleCBM`, and ordered gauge-free `EffectiveCBM(K)`).
+- **Immutable `zodiax` Carbon Box Models (`ticktack.cbm`, `ticktack.presets`)**: Literature presets (`Guttler15`, `Brehm21`, `Buntgen18`, and unit/closure-corrected `Miyake17`) plus gauge-minimal parametrizations (`FixedCBM`, Perron–Frobenius cycle-space `BalancedCBM`, `OpenCBM`, `ReversibleCBM`, and ordered gauge-free `EffectiveCBM(K)`).
 - **Exact LTI & ODE Solvers (`ticktack.solvers`)**: `ExactLinearSolver` using Van Loan block-matrix exponentials, complex solar resolvents, and exact seasonal sub-window integration (`0` time-stepping truncation error), alongside adaptive `DiffraxSolver` (supporting non-autonomous Suess $^{12}\mathrm{C}$ dilution) and optional CUDA-backed `ModaxSolver`.
 - **Analytic Linear Marginalization & Spectral GPs (`ticktack.linear`, `ticktack.likelihood`)**: Exact QR-whitened Gaussian marginalization (`LinearMarginal`) over hierarchical global/lab $\Delta^{14}\mathrm{C}$ offsets, `HarmonicSolar` quadrature amplitudes, secular `LinearTrend` slopes, and causal Solin–Särkkä Hilbert-space `GPProduction` modes (with Smith-doubled stationary pre-history covariance and `canonical_pod_modes`), plus strictly positive `LogGPProduction`.
 - **Bayesian Inference & Fisher Geometry (`ticktack.fitting`, `ticktack.sampling`, `ticktack.fisher`)**: Multi-start `fit_map` (`optimistix` BFGS / Levenberg–Marquardt, `optax` Adam) with Laplace covariance, `NumPyro` `sample_nuts` (returning `arviz.InferenceData` with `sample_stats` and joint linear reconstructions) and `fit_svi`, `BlackJAX` tempered `sample_smc` with calibrated Lee & Whiteley (2018) $\ln Z$ uncertainties, and Schur-marginalized `cbm_fisher_spectrum`.
@@ -44,10 +44,11 @@ pip install -e ".[dev]"
 ```python
 import ticktack as tt
 
-dataset = tt.load_bundled_event("774CE")
+dataset = tt.load_bundled_event("775CE")
 cbm = tt.load_preset("Brehm21", kind="fixed")
 production = (
-    tt.MiyakeSpike(t_start=774.5, duration=0.25, fluence=6.5, profile="supergaussian")
+    tt.SteadyProduction()
+    + tt.MiyakeSpike(t_start=774.5, duration=0.25, fluence=6.5, profile="supergaussian")
     + tt.HarmonicSolar.from_polar(periods=11.0, amplitudes=0.25, phases=0.0, t_ref=775.0)
 )
 model = tt.RadiocarbonModel(cbm=cbm, production=production)
@@ -68,15 +69,15 @@ idata = tt.sample_nuts(map_res.fitted_model, dataset, space, init_map=False)
 
 Worked end-to-end tutorials for `ticktack 2.0` are provided in [`notebooks/v2/`](notebooks/v2/):
 
-1. [`01_miyake_774ce_inference.ipynb`](notebooks/v2/01_miyake_774ce_inference.ipynb) — Multi-laboratory 774 CE Miyake spike inference with exact linear marginalization, MAP + Laplace warm-start, and `NumPyro` NUTS.
-2. [`02_effective_cbm_fisher_smc.ipynb`](notebooks/v2/02_effective_cbm_fisher_smc.ipynb) — Carbon-box Fisher eigenspectra (`Brehm21` vs `EffectiveCBM(K)`) and Bayesian model selection via `BlackJAX` tempered SMC.
-3. [`03_nonparametric_gp_pod.ipynb`](notebooks/v2/03_nonparametric_gp_pod.ipynb) — Nonparametric cosmic-ray production recovery using Solin–Särkkä GP marginalization, canonical POD modes, and strictly positive `LogGPProduction` SVI.
+1. [`01_miyake_774ce_inference.ipynb`](notebooks/v2/01_miyake_774ce_inference.ipynb) – Multi-laboratory 774 CE Miyake spike inference with exact linear marginalization, MAP + Laplace warm-start, and `NumPyro` NUTS.
+2. [`02_effective_cbm_fisher_smc.ipynb`](notebooks/v2/02_effective_cbm_fisher_smc.ipynb) – Carbon-box Fisher eigenspectra (`Brehm21` vs `EffectiveCBM(K)`) and Bayesian model selection via `BlackJAX` tempered SMC.
+3. [`03_nonparametric_gp_pod.ipynb`](notebooks/v2/03_nonparametric_gp_pod.ipynb) – Nonparametric cosmic-ray production recovery using Solin–Särkkä GP marginalization, canonical POD modes, and strictly positive `LogGPProduction` SVI.
 
-> **Migrating from `ticktack 1.x`:** Legacy v1 classes (`CarbonBoxModel` mutable builder, `SingleFitter`, `MultiFitter`, `load_presets`, and `emcee` wrappers; archived notebooks in `notebooks/01..04_*.ipynb` and `docs/`) have been replaced in `2.0` by `load_preset`, `RadiocarbonModel`, `ParameterSpace`, `fit_map`, `sample_nuts`, `fit_svi`, and `sample_smc`. Pin `pip install "ticktack<2.0"` if running unmodified v1 scripts.
+> **Migrating from `ticktack 1.x`:** Legacy v1 classes (`CarbonBoxModel` mutable builder, `SingleFitter`, `MultiFitter`, `load_presets`, and `emcee` wrappers) have been replaced in `2.0` by `load_preset`, `RadiocarbonModel`, `ParameterSpace`, `fit_map`, `sample_nuts`, `fit_svi`, and `sample_smc`. Pin `pip install "ticktack<2.0"` if running unmodified v1 scripts.
 
-## Citation & License
+## Citation & Licence
 
-If you use `ticktack` in academic work, please cite [Sharma et al. (2023), JOSS 8(85), 5084](https://doi.org/10.21105/joss.05084). Released under the [MIT License](LICENSE).
+If you use `ticktack` in academic work, please cite [Sharma et al. (2023), JOSS 8(84), 5084](https://doi.org/10.21105/joss.05084). Released under the [MIT Licence](LICENSE).
 
 ## Name
 

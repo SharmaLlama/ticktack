@@ -1,6 +1,6 @@
 # Solvers & Carbon Box Models
 
-`ticktack 2.0` separates the **physical reservoir topology and rate parameterization** (`ticktack.cbm`) from the **time-propagation operator** (`ticktack.solvers`). Because pre-industrial and Holocene carbon box models are linear time-invariant (LTI) systems with timescales spanning four orders of magnitude — from $\sim 0.2\text{ yr}$ stratosphere–troposphere exchange to $\sim 5000\text{ yr}$ abyssal ocean turnover and $8267\text{ yr}$ radioactive mean life — exploiting exact matrix exponentials and frequency-domain resolvents yields orders-of-magnitude gains in both accuracy and speed over generic Runge–Kutta stepping.
+`ticktack 2.0` separates the **physical reservoir topology and rate parametrization** (`ticktack.cbm`) from the **time-propagation operator** (`ticktack.solvers`). Because pre-industrial and Holocene carbon box models are linear time-invariant (LTI) systems with timescales spanning four orders of magnitude – from $\sim 0.2\text{ yr}$ stratosphere–troposphere exchange to $\sim 5000\text{ yr}$ abyssal ocean turnover and $8267\text{ yr}$ radioactive mean life – exploiting exact matrix exponentials and frequency-domain resolvents yields orders-of-magnitude gains in both accuracy and speed over generic Runge–Kutta stepping.
 
 ---
 
@@ -10,7 +10,7 @@
 
 Every `CarbonBoxModel` holds a static `Topology` PyTree defining the directed reservoir graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$, tropospheric box indices $\mathcal{T}$, hemispheric routing tags (`"north"` / `"south"`), and normalized cosmic-ray production allocation $\mathbf{b}$ ($\sum_i b_i = 1$). On construction, `Topology` runs [Tarjan's strongly connected components](https://en.wikipedia.org/wiki/Tarjan%27s_strongly_connected_components_algorithm) (SCC) algorithm to verify graph reachability from every production-receiving reservoir ($b_i > 0$) and ensure the generator $A$ is nonsingular.
 
-### Constrained Rate Parameterizations
+### Constrained Rate Parametrizations
 
 Rather than exposing raw matrix entries that can violate mass conservation or positivity during gradient steps, `ticktack 2.0` provides five immutable `CarbonBoxModel` classes:
 
@@ -22,7 +22,7 @@ Rather than exposing raw matrix entries that can violate mass conservation or po
 | `OpenCBM` | Directed log rates + non-negative sink vector $\mathbf{s} \ge 0$ | Irreversible sediment burial / carbonate weathering sinks on top of closed transport | Million-year / glacial–interglacial open-system experiments |
 | `EffectiveCBM(K)` | $2K - 2$ unconstrained log rates | Minimal star-graph topology with zero similarity-gauge redundancy; see [Fisher Information & EffectiveCBMs](fisher_and_effective_cbm.md) | Joint carbon-cycle + production inference & Bayesian model comparison |
 
-In `BalancedCBM`, unconstrained coordinates `log_rates_free` parameterize the directed first-order transfer rates $k_{i \to j} > 0$ (optionally tied across symmetric hemispheric edges via `tie_matrix`) on any strongly connected graph $\mathcal{G}$; solving for the unique positive [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) right null-vector of the conservative rate matrix yields the stationary reservoir $^{12}\text{C}$ fractions $M_i / M_{\text{tot}}$ automatically so Kirchhoff inflow equals outflow at every node without constrained optimization.
+In `BalancedCBM`, unconstrained coordinates `log_rates_free` parametrize the directed first-order transfer rates $k_{i \to j} > 0$ (optionally tied across symmetric hemispheric edges via `tie_matrix`) on any strongly connected graph $\mathcal{G}$; solving for the unique positive [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) right null-vector of the conservative rate matrix yields the stationary reservoir $^{12}\text{C}$ fractions $M_i / M_{\text{tot}}$ automatically so Kirchhoff inflow equals outflow at every node without constrained optimization.
 
 ---
 
@@ -32,7 +32,7 @@ In `BalancedCBM`, unconstrained coordinates `log_rates_free` parameterize the di
 
 1. **Gridded / continuous forcing** via Van Loan first-order-hold (FOH) propagation and causal `rfft` convolution.
 2. **Impulsive Miyake spikes** (`MiyakeSpike`) via analytical sub-interval clamping and Gauss–Legendre quadrature.
-3. **Harmonic solar cycles** (`HarmonicSolar`) via the exact complex frequency-domain resolvent — **zero burn-in**.
+3. **Harmonic solar cycles** (`HarmonicSolar`) via the exact complex frequency-domain resolvent – **zero burn-in**.
 
 ### Van Loan $(n+2)\times(n+2)$ First-Order-Hold Matrix Exponential
 
@@ -96,7 +96,7 @@ $$
 = e^{i\omega_m(t_{\text{mid}} - t_{\text{ref}})}\,\operatorname{sinc}\!\left(\frac{\omega_m \Delta w}{2\pi}\right),
 $$
 
-where $\operatorname{sinc}(x) = \sin(\pi x)/(\pi x)$ (`jnp.sinc`). Evaluating `HarmonicSolar` over $S$ series and $N_{\text{obs}}$ rings requires one $n \times n$ complex linear solve per frequency — reducing cost from thousands of ODE years to microseconds with zero transient error.
+where $\operatorname{sinc}(x) = \sin(\pi x)/(\pi x)$ (`jnp.sinc`). Evaluating `HarmonicSolar` over $S$ series and $N_{\text{obs}}$ rings requires one $n \times n$ complex linear solve per frequency – reducing cost from thousands of ODE years to microseconds with zero transient error.
 
 ---
 

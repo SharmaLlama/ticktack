@@ -16,7 +16,7 @@ $$
 H(s) = \mathbf{c}^\top (s I_n - A)^{-1}\mathbf{b} = \frac{p_{n-1}(s)}{q_n(s)},
 $$
 
-a strictly proper rational function of degree at most $n$. Even with **noiseless continuous measurements over $t \in [0, \infty)$**, an arbitrary $n$-box CBM has a continuous similarity gauge group $\{P \in \operatorname{GL}_n(\mathbb{R}) : P\mathbf{b} = \mathbf{b},\;\mathbf{c}^\top P^{-1} = \mathbf{c}^\top\}$ of dimension $(n - 1)^2$ that leaves $H(s)$ — and hence every tropospheric $\Delta^{14}\text{C}(t)$ curve for *every* cosmic-ray input $Q(t)$ — **identically invariant** ([Bellman & Åström 1970](https://doi.org/10.1016/0025-5564(70)90069-X)). Taking into account the steady-state normalization against $R_{\text{ref}}$ (which fixes global total mass $M_{\text{tot}}$ as an exact zero-Fisher gauge mode when $Q_{\text{std}}$ is scaled), at most **$2n - 2$** independent combinations of box parameters (for distinct real relaxation modes: $(n - 1)$ decay rates plus $(n - 1)$ relative amplitudes) are observable in principle.
+a strictly proper rational function of degree at most $n$. Even with **noiseless continuous measurements over $t \in [0, \infty)$**, an arbitrary $n$-box CBM has a continuous similarity gauge group $\{P \in \operatorname{GL}_n(\mathbb{R}) : P\mathbf{b} = \mathbf{b},\;\mathbf{c}^\top P^{-1} = \mathbf{c}^\top\}$ of dimension $(n - 1)^2$ that leaves $H(s)$ – and hence every tropospheric $\Delta^{14}\text{C}(t)$ curve for *every* cosmic-ray input $Q(t)$ – **identically invariant** ([Bellman & Åström 1970](https://doi.org/10.1016/0025-5564(70)90069-X)). Taking into account the steady-state normalization against $R_{\text{ref}}$ (which fixes global total mass $M_{\text{tot}}$ as an exact zero-Fisher gauge mode when $Q_{\text{std}}$ is scaled), at most **$2n - 2$** independent combinations of box parameters (for distinct real relaxation modes: $(n - 1)$ decay rates plus $(n - 1)$ relative amplitudes) are observable in principle.
 
 ### Exponential Singular-Value Decay of the Laplace Transform
 
@@ -121,4 +121,4 @@ $$
 \ln \widehat{Z} = \sum_{t=1}^T \ln\!\left(\frac{1}{N}\sum_{i=1}^N w_t^{(i)}\right).
 $$
 
-On the 774 CE compilation (see [Tutorial 2](tutorials.md)), $\ln \widehat{Z}_K$ rises sharply from $K = 1$ to $K = 2$ and $K = 3$, then plateaus or declines for $K \ge 4$ due to the automatic Occam penalty on unconstrained slow-exchange parameters — matching the $d_{\text{eff}} \approx 2$–$3$ prediction of `cbm_fisher_spectrum`.
+On the 774 CE compilation (see [Tutorial 2](tutorials.md)), $\ln \widehat{Z}_K$ rises sharply from $K = 1$ to $K = 2$ and $K = 3$, then plateaus or declines for $K \ge 4$ due to the automatic Occam penalty on unconstrained slow-exchange parameters – matching the $d_{\text{eff}} \approx 2$–$3$ prediction of `cbm_fisher_spectrum`.

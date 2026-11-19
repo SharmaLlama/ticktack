@@ -1,6 +1,6 @@
 # Gaussian Processes & Information Field Theory
 
-Cosmic-ray $^{14}\text{C}$ production fluctuates continuously across 11-year Schwabe cycles, centennial Gleissberg / Suess grand solar minima, and geomagnetic dipole excursions, superposed on impulsive solar energetic particle bursts. `ticktack 2.0` provides two complementary, closely unified frameworks for non-parametric and empirical-Bayes cosmic-ray inference — mirroring the Gaussian-process and Information Field Theory architecture of [`virgil`](https://github.com/benjaminpope/virgil):
+Cosmic-ray $^{14}\text{C}$ production fluctuates continuously across 11-year Schwabe cycles, centennial Gleissberg / Suess grand solar minima, and geomagnetic dipole excursions, superposed on impulsive solar energetic particle bursts. `ticktack 2.0` provides two complementary, closely unified frameworks for non-parametric and empirical-Bayes cosmic-ray inference – mirroring the Gaussian-process and Information Field Theory architecture of [`virgil`](https://github.com/benjaminpope/virgil):
 
 1. **`ticktack.linear` + `GPProduction` / `LogGPProduction`**: Continuous-time Solin–Särkkä Hilbert-space proper orthogonal decomposition (POD) with stationary pre-history reservoir covariance (`stationary_cbm_gp_cov` via Smith doubling) and state-space Kalman marginalization (`kalman_gp_marginal`).
 2. **`ticktack.fields`**: 1D reflecting-boundary (orthonormal DCT-II) Information Field Theory ([Enßlin, Frommert & Kitaura 2009](https://doi.org/10.1103/PhysRevD.80.105005); [Edenhofer et al. 2024](https://doi.org/10.21105/joss.06593)) with `GaussianField` and `LogGaussianField`, composable spectral kernels, MacKay marginal evidence (`log_evidence`), laboratory uncertainty auditing (`error_scale`), and automatic GP kernel selection (`select_gp_kernel`).
@@ -45,7 +45,7 @@ where $\phi_j(t) = L^{-1/2}\sin\!\big(\omega_j(t - t_{\text{centre}} + L)\big)$ 
 
 ### Stationary Pre-History Reservoir Covariance via 24-Step Smith Doubling
 
-A subtle physical boundary condition arises at the start $t_0$ of any finite reconstruction window: cosmic-ray production has been fluctuating for millennia *before* $t_0$, so the ocean–biosphere–atmosphere state perturbation $\delta\mathbf{y}(t_0)$ is not zero — it is drawn from a correlated stationary Gaussian distribution $\mathcal{N}(\mathbf{0}, \Sigma_{y,0})$! Neglecting $\Sigma_{y,0}$ ("cold-starting" the GP at $t_0$) pinches credible bands artificially at the left edge of the dataset.
+A subtle physical boundary condition arises at the start $t_0$ of any finite reconstruction window: cosmic-ray production has been fluctuating for millennia *before* $t_0$, so the ocean–biosphere–atmosphere state perturbation $\delta\mathbf{y}(t_0)$ is not zero – it is drawn from a correlated stationary Gaussian distribution $\mathcal{N}(\mathbf{0}, \Sigma_{y,0})$! Neglecting $\Sigma_{y,0}$ ("cold-starting" the GP at $t_0$) pinches credible bands artificially at the left edge of the dataset.
 
 For any state-space GP (`tinygp.kernels.quasisep`) with Markov generator $(F_{\text{gp}}, L_{\text{gp}}, Q_c, H_{\text{gp}})$, coupling the GP state $\mathbf{x}(t)$ into the CBM yields the joint linear stochastic differential equation
 
