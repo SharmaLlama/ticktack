@@ -65,7 +65,7 @@ print(f"NH-SH pre-spike gradient: {float(d14c_nh[0] - d14c_sh[0]):.2f} permil")
 
 ## 3. Semiparametric Miyake Inference (MAP, NUTS, & Tempered SMC)
 
-In `ticktack 2.0`, linear nuisance parameters — global Holocene baseline offset $\Delta_{\text{global}}$, per-series laboratory offsets $\delta_{\text{lab},s}$, 11-year solar quadrature coefficients, and causal Solin–Särkkä GP modes — are marginalized analytically via `LinearMarginalConfig`. Samplers only explore the low-dimensional nonlinear coordinates declared in `ParameterSpace`:
+In `ticktack 2.0`, linear nuisance parameters – global Holocene baseline offset $\Delta_{\text{global}}$, per-series laboratory offsets $\delta_{\text{lab},s}$, 11-year solar quadrature coefficients, and causal Solin–Särkkä GP modes – are marginalized analytically via `LinearMarginalConfig`. Samplers only explore the low-dimensional nonlinear coordinates declared in `ParameterSpace`:
 
 ```python
 import math
@@ -121,7 +121,7 @@ print(f"ln Z = {smc_res.log_evidence:.2f} +/- {smc_res.log_evidence_err:.2f}")
 
 ## 4. Non-Parametric IFT Reconstruction & Automatic GP Kernel Selection
 
-To reconstruct cosmic-ray production $Q(t)$ non-parametrically without assuming a parametric spike shape — or to select among all seven candidate GP spectral families (`"matern12"`, `"matern32"`, `"matern52"`, `"squared_exp"`, `"continuous_matern"`, `"matern32_plus_solar"`, `"correlated_field"`) by empirical Bayes — use `ticktack.fields`:
+To reconstruct cosmic-ray production $Q(t)$ non-parametrically without assuming a parametric spike shape – or to select among all seven candidate GP spectral families (`"matern12"`, `"matern32"`, `"matern52"`, `"squared_exp"`, `"continuous_matern"`, `"matern32_plus_solar"`, `"correlated_field"`) by empirical Bayes – use `ticktack.fields`:
 
 ```python
 # Automatic empirical-Bayes GP kernel selection via Laplace hyper-evidence
