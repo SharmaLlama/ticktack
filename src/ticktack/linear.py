@@ -37,6 +37,8 @@ import zodiax as zdx
 from tinygp.kernels import quasisep as tgq
 from tinygp.solvers.quasisep.block import Block
 
+from .solvers import _modal_decomposition, _scalar_psi1
+
 __all__ = [
     "ArrowProblem",
     "CanonicalPODResult",
@@ -89,8 +91,11 @@ def _safe_psd_root(sym_mat: jax.Array, jitter: float = 1e-13) -> jax.Array:
     tr_scale = jnp.trace(sym) / n
     reg_diag = jitter * jnp.maximum(tr_scale, 0.0) + 1e-30
     reg_mat = sym + reg_diag * jnp.eye(n, dtype=jnp.float64)
-    chol = jnp.linalg.cholesky(reg_mat)
-    chol_ok = jnp.all(jnp.isfinite(chol))
+    chol_probe = jax.lax.stop_gradient(jnp.linalg.cholesky(reg_mat))
+    chol_ok = jnp.all(jnp.isfinite(chol_probe))
+
+    def _chol_branch(m: jax.Array) -> jax.Array:
+        return jnp.linalg.cholesky(m)
 
     def _eigh_fallback(m: jax.Array) -> jax.Array:
         evals, evecs = jnp.linalg.eigh(0.5 * (m + m.T))
@@ -101,8 +106,13 @@ def _safe_psd_root(sym_mat: jax.Array, jitter: float = 1e-13) -> jax.Array:
 
     c_ok = _concrete(chol_ok)
     if c_ok is not None:
-        return chol if bool(c_ok) else _eigh_fallback(sym)
-    return jax.lax.cond(chol_ok, lambda _: chol, _eigh_fallback, sym)
+        return _chol_branch(reg_mat) if bool(c_ok) else _eigh_fallback(sym)
+    return jax.lax.cond(
+        chol_ok,
+        lambda pair: _chol_branch(pair[0]),
+        lambda pair: _eigh_fallback(pair[1]),
+        (reg_mat, sym),
+    )
 
 
 # =============================================================================
@@ -1313,7 +1323,8 @@ def _psi1_matrix(x_mat: jax.Array) -> jax.Array:
     return jsl.expm(block)[:n, n:]
 
 
-def _seasonal_homogeneous_operator(
+@jax.jit
+def _seasonal_homogeneous_operator_van_loan(
     a_mat: jax.Array,
     c_obs: jax.Array,
     starts: jax.Array,
@@ -1321,7 +1332,7 @@ def _seasonal_homogeneous_operator(
     weights: jax.Array,
     t_origin: jax.Array,
 ) -> jax.Array:
-    """Compute ``W_hom(t_origin) = C_obs B_season[exp(A(t - t_origin))]`` ``(N_d, n)``."""
+    """Reference Van Loan implementation of ``C_obs B_season[exp(A(t - t_origin))]``."""
     durations = ends - starts  # (N_d, M_sub)
     offsets = starts - t_origin  # (N_d, M_sub)
 
@@ -1336,6 +1347,37 @@ def _seasonal_homogeneous_operator(
     )
     avg_prop = jnp.sum(weights[:, :, None, None] * props, axis=1)  # (N_d, n, n)
     return jnp.einsum("dn,dnk->dk", c_obs, avg_prop)
+
+
+def _seasonal_homogeneous_operator(
+    a_mat: jax.Array,
+    c_obs: jax.Array,
+    starts: jax.Array,
+    ends: jax.Array,
+    weights: jax.Array,
+    t_origin: jax.Array,
+    *,
+    cbm: Any | None = None,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> jax.Array:
+    """Compute ``W_hom(t_origin) = C_obs B_season[exp(A(t - t_origin))]`` ``(N_d, n)``."""
+    if modal is None:
+        modal = _modal_decomposition(a_mat, cbm=cbm)
+    if modal is None:
+        return _seasonal_homogeneous_operator_van_loan(
+            a_mat, c_obs, starts, ends, weights, t_origin
+        )
+
+    lam, v_eig, v_inv = modal
+    durations = ends - starts  # (N_d, M_sub)
+    offsets = starts - t_origin  # (N_d, M_sub)
+    c_tilde = c_obs.astype(v_eig.dtype) @ v_eig  # (N_d, n)
+    psi1_vals = _scalar_psi1(durations[:, :, None] * lam[None, None, :])
+    exp_vals = jnp.exp(offsets[:, :, None] * lam[None, None, :])
+    modal_factors = jnp.sum(
+        weights[:, :, None] * psi1_vals * exp_vals, axis=1
+    )  # (N_d, n)
+    return jnp.real((c_tilde * modal_factors) @ v_inv)
 
 
 class CausalGPProjection(NamedTuple):
@@ -1501,6 +1543,7 @@ def project_causal_gp(
     initial_anchor: Literal["t0", "a"] = "t0",
     dtau0: float = 1.0 / 16.0,
     n_squarings: int = 24,
+    cbm: Any | None = None,
 ) -> CausalGPProjection:
     """Build the exact zero-scan causal Solin--Särkkä GP projection through CBM ``(A, b)``.
 
@@ -1587,9 +1630,10 @@ def project_causal_gp(
         axis=1,
     )
 
-    # 3. Exact Van Loan homogeneous propagator W_hom(a) = C_obs B_season[exp(A(t - a))]
+    # 3. Exact homogeneous propagator W_hom(a) = C_obs B_season[exp(A(t - a))]
+    modal = _modal_decomposition(a_mat, cbm=cbm)
     w_hom_a = _seasonal_homogeneous_operator(
-        a_mat, c_obs, starts, ends, weights, a_val
+        a_mat, c_obs, starts, ends, weights, a_val, cbm=cbm, modal=modal
     )  # (N_d, n)
 
     causal_design = (
@@ -1599,7 +1643,7 @@ def project_causal_gp(
     if initial_anchor == "t0":
         t_anchor = t0_obs
         w_hom_anchor = _seasonal_homogeneous_operator(
-            a_mat, c_obs, starts, ends, weights, t_anchor
+            a_mat, c_obs, starts, ends, weights, t_anchor, cbm=cbm, modal=modal
         )
     elif initial_anchor == "a":
         t_anchor = a_val
@@ -1658,10 +1702,20 @@ def project_causal_gp(
         # ΔΣ_y(t_0) = Σ_{y,0} - Y_SS(t_0) diag(S_k(ω)) Y_SS(t_0)ᵀ.
         # When t_0 == a, Y_SS(a) == 0 identically, reducing to Σ_{y,0}.
         dt_anchor = t_anchor - a_val
-        expm_dt = jsl.expm(a_mat * dt_anchor)
+        if modal is not None:
+            lam_m, v_eig_m, v_inv_m = modal
+            expm_dt_v = jnp.real(
+                v_eig_m
+                @ (
+                    jnp.exp(lam_m * dt_anchor)[:, None]
+                    * (v_inv_m @ v_mat.astype(v_inv_m.dtype))
+                )
+            )
+        else:
+            expm_dt_v = jsl.expm(a_mat * dt_anchor) @ v_mat
         c_t0 = jnp.cos(omegas * dt_anchor)[None, :]
         s_t0 = jnp.sin(omegas * dt_anchor)[None, :]
-        y_ss_t0 = (v_mat * c_t0 + u_mat * s_t0 - expm_dt @ v_mat) / jnp.sqrt(half_len)
+        y_ss_t0 = (v_mat * c_t0 + u_mat * s_t0 - expm_dt_v) / jnp.sqrt(half_len)
         cov_ss_t0 = (y_ss_t0 * spec_w[None, :]) @ y_ss_t0.T
         delta_cov = 0.5 * ((sigma_y0 - cov_ss_t0) + (sigma_y0 - cov_ss_t0).T)
         anchor_root = _safe_psd_root(delta_cov)
@@ -2063,7 +2117,7 @@ def kalman_gp_marginal(
         )
 
     if t_grid is None:
-        step_dt = 1.0 / 16.0 if dt is None else float(dt)
+        step_dt = 1.0 / 24.0 if dt is None else float(dt)
         t_min = float(onp.min(c_starts))
         t_max = float(onp.max(c_ends))
         n_steps = max(round((t_max - t_min) / step_dt), 1)

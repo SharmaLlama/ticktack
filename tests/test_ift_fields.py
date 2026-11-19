@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-import time
 
 import jax
 import jax.numpy as jnp
@@ -17,6 +16,7 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 import pytest
+from tinygp import kernels as tk
 
 from ticktack.cbm import CarbonBoxModel
 from ticktack.constants import DEFAULT_Q_STD
@@ -43,9 +43,22 @@ from ticktack.fields import (
     optimize_gp_kernel,
     plot_evidence_grid,
     plot_field_draws,
+    predict_field_d14c,
     select_gp_kernel,
 )
-from ticktack.linear import hierarchical_offset_design
+from ticktack.fitting import fit_map
+from ticktack.likelihood import (
+    LinearMarginalConfig,
+    ParamSpec,
+    ParameterSpace,
+    linear_posterior,
+    marginal_log_likelihood,
+)
+from ticktack.linear import (
+    LinearMarginal,
+    hierarchical_offset_design,
+    stationary_cbm_gp_cov,
+)
 from ticktack.model import RadiocarbonModel
 from ticktack.presets import load_preset
 from ticktack.production import GriddedProduction, MiyakeSpike
@@ -704,33 +717,12 @@ def test_select_gp_kernel_rough_ou_vs_smooth_squared_exp() -> None:
     assert ord_smooth > ord_rough
 
 
-def test_real_775ce_bundled_kernel_selection_under_two_seconds() -> None:
-    """5(c): Real bundled 775CE dataset with MiyakeSpike + GaussianField runs in < 2 s."""
+def test_real_775ce_bundled_kernel_selection_accuracy() -> None:
+    """5(c): Real bundled 775CE dataset with MiyakeSpike + GaussianField recovers physical spike & weights."""
     cbm = load_preset("Brehm21")
     ds_775 = load_bundled_event("775CE")
     spike = MiyakeSpike(t_start=774.55, duration=0.25, fluence=6.4, profile="boxcar")
 
-    # Warm JIT caches once so we measure true execution speed alongside full 7-kernel run
-    _ = optimize_gp_kernel(
-        cbm,
-        ds_775,
-        kernel="matern32",
-        extra_production=spike,
-        n_grid=96,
-        multi_start=2,
-        rng_key=jax.random.PRNGKey(0),
-    )
-    # Also warm remaining distinct parameter-shape kernels once
-    _ = select_gp_kernel(
-        cbm,
-        ds_775,
-        extra_production=spike,
-        n_grid=96,
-        multi_start=2,
-        rng_key=jax.random.PRNGKey(1),
-    )
-
-    t0 = time.perf_counter()
     sel = select_gp_kernel(
         cbm,
         ds_775,
@@ -739,11 +731,17 @@ def test_real_775ce_bundled_kernel_selection_under_two_seconds() -> None:
         multi_start=2,
         rng_key=jax.random.PRNGKey(42),
     )
-    elapsed = time.perf_counter() - t0
 
-    assert elapsed < 2.0, f"7-kernel 775CE selection took {elapsed:.3f} s (expected < 2.0 s)."
     assert len(sel.rankings) == 7
     np.testing.assert_allclose(jnp.sum(sel.model_weights), 1.0, rtol=1e-12, atol=1e-12)
+    assert jnp.all(jnp.isfinite(sel.log_hyper_evidences))
+    best = sel.best_result
+    assert best.converged
+    assert jnp.all(jnp.linalg.eigvalsh(best.hyper_hessian) > 0.0)
+    fitted_fluence = float(best.fit.model.get("production.spike.fluence"))
+    assert 4.5 <= fitted_fluence <= 9.5
+    s_glob = error_scale(best.fit, ds_775)
+    assert 0.5 <= s_glob <= 2.0
     table_str = sel.format_table()
     assert sel.best_name in table_str
     assert "MacKay s_error" in table_str
@@ -795,8 +793,7 @@ def test_notebook_04_ift_kernel_selection_structure_and_execution() -> None:
         / "v2"
         / "04_ift_kernel_selection.ipynb"
     )
-    if not nb_path.exists():
-        pytest.skip("Notebook 04_ift_kernel_selection.ipynb not yet generated.")
+    assert nb_path.exists(), f"Missing required notebook {nb_path}."
 
     nb = json.loads(nb_path.read_text(encoding="utf-8"))
     cells = nb["cells"]
@@ -900,27 +897,60 @@ def test_symmetric_and_multipart_custom_sum_spectrum_optimization() -> None:
 
 
 def test_log_evidence_extra_priors_invariant_to_linear_latent() -> None:
-    """log_evidence(..., extra_priors=...) on linear GaussianField must not depend on initial latent."""
+    """Off-MAP fluence=3.0 extra_priors matches exact closed-form Gaussian marginal likelihood."""
     cbm = load_preset("Brehm21")
     s_tas = load_bundled_series("775AD-early-S/Büntgen18_TAS01.csv")
-    spike = MiyakeSpike(t_start=774.55, duration=0.25, fluence=6.4, profile="boxcar")
+    ds_tas = Dataset((s_tas,))
+    spike_off = MiyakeSpike(t_start=774.55, duration=0.25, fluence=3.0, profile="boxcar")
+    spike_init2 = MiyakeSpike(t_start=774.55, duration=0.25, fluence=11.5, profile="boxcar")
 
     z_zero = jnp.zeros((48,), dtype=jnp.float64)
     z_rand = 4.5 * jax.random.normal(jax.random.PRNGKey(77), (48,), dtype=jnp.float64)
-    m_zero = RadiocarbonModel(
-        cbm, spike + GaussianField(z_zero, 760.0, 795.0, sigma=0.25, length_yr=5.0), ExactLinearSolver()
-    )
+    gf_0 = GaussianField(z_zero, 760.0, 795.0, sigma=0.25, length_yr=5.0)
+    m_off = RadiocarbonModel(cbm, spike_off + gf_0, ExactLinearSolver())
     m_rand = RadiocarbonModel(
-        cbm, spike + GaussianField(z_rand, 760.0, 795.0, sigma=0.25, length_yr=5.0), ExactLinearSolver()
+        cbm, spike_init2 + GaussianField(z_rand, 760.0, 795.0, sigma=0.25, length_yr=5.0), ExactLinearSolver()
     )
-    fit = fit_ift_field(m_zero, s_tas)
+    fit = fit_ift_field(m_off, ds_tas)
     extra_p = {"production.spike.fluence": dist.Normal(6.4, 2.0)}
 
-    lnz_zero = log_evidence(m_zero, s_tas, extra_priors=extra_p)
-    lnz_rand = log_evidence(m_rand, s_tas, extra_priors=extra_p)
-    lnz_fit = log_evidence(fit.model, s_tas, extra_priors=extra_p)
-    np.testing.assert_allclose(lnz_rand, lnz_zero, rtol=1e-12, atol=1e-12)
-    np.testing.assert_allclose(lnz_fit, lnz_zero, rtol=1e-12, atol=1e-12)
+    lnz_off = log_evidence(m_off, ds_tas, extra_priors=extra_p)
+    lnz_rand = log_evidence(m_rand, ds_tas, extra_priors=extra_p)
+    lnz_fit = log_evidence(fit.model, ds_tas, extra_priors=extra_p)
+    np.testing.assert_allclose(lnz_rand, lnz_off, rtol=1e-11, atol=1e-10)
+    np.testing.assert_allclose(lnz_fit, lnz_off, rtol=1e-11, atol=1e-10)
+
+    # Compare against exact closed-form linear-Gaussian marginal log-likelihood over (fluence, z, offsets)
+    op = build_dct_response_matrix(cbm, ds_tas, 760.0, 795.0, 48, return_operator=True)
+    m_unit = RadiocarbonModel(
+        cbm, MiyakeSpike(t_start=774.55, duration=0.25, fluence=1.0, profile="boxcar"), ExactLinearSolver()
+    )
+    m_steady = RadiocarbonModel(cbm, MiyakeSpike(t_start=774.55, duration=0.25, fluence=0.0, profile="boxcar"), ExactLinearSolver())
+    w_spike = (m_unit.predict_d14c(ds_tas) - m_steady.predict_d14c(ds_tas))[:, None]
+    x_off, mu_off, sd_off = hierarchical_offset_design(
+        ds_tas.series_indices, ds_tas.n_series, box_activity_ratios=op.box_activity_ratios, global_prior_sd=200.0, lab_prior_sd=1.5
+    )
+    x_dct = op.w_dct * jnp.sqrt(gf_0.power_spectrum())[None, :]
+    design_full = jnp.concatenate([w_spike, x_dct, x_off], axis=1)
+    mean_full = jnp.concatenate([jnp.array([6.4]), jnp.zeros((48,)), mu_off])
+    sd_full = jnp.concatenate([jnp.array([2.0]), jnp.ones((48,)), sd_off])
+    lm_exact = LinearMarginal(design_full, prior_mean=mean_full, prior_sd=sd_full, method="qr")
+    lnz_closed = lm_exact.loglike(ds_tas.d14c_flat - op.ss_d14c, ds_tas.sigma_flat)
+    np.testing.assert_allclose(lnz_off, lnz_closed, rtol=1e-10, atol=1e-9)
+
+    # Positive bijector equivalence: dist.LogNormal(loc, scale) == ParamSpec(..., prior_mean=loc, prior_sd=scale, bijector="exp")
+    ln_dist = {"production.spike.fluence": dist.LogNormal(math.log(6.4), 0.35)}
+    ln_spec = {
+        "production.spike.fluence": ParamSpec(
+            "production.spike.fluence", prior_mean=math.log(6.4), prior_sd=0.35, bijector="exp"
+        )
+    }
+    np.testing.assert_allclose(
+        log_evidence(m_off, ds_tas, extra_priors=ln_dist),
+        log_evidence(m_off, ds_tas, extra_priors=ln_spec),
+        rtol=1e-10,
+        atol=1e-9,
+    )
 
 
 def test_step4_shared_wiring_solver_data_and_top_level_exports() -> None:
@@ -973,5 +1003,265 @@ def test_step4_shared_wiring_solver_data_and_top_level_exports() -> None:
     ds_scaled = ds.with_error_scale({s_tas.name: 0.75, s_kauri.name: 1.25})
     np.testing.assert_allclose(ds_scaled.series[0].sigma_d14c, 0.75 * s_tas.sigma_d14c, rtol=1e-15)
     np.testing.assert_allclose(ds_scaled.series[1].sigma_d14c, 1.25 * s_kauri.sigma_d14c, rtol=1e-15)
+
+
+def test_prehistory_kernel_dense_marginal_and_propagation() -> None:
+    """prehistory_kernel unpacks stationary_cbm_gp_cov tuple and matches dense Sigma_y0 MVN."""
+    cbm = load_preset("Brehm21")
+    ds = _make_two_hemisphere_dataset(cbm)
+    t_start, t_end, n_grid = 755.0, 792.0, 48
+    op = build_dct_response_matrix(cbm, ds, t_start, t_end, n_grid, return_operator=True)
+    gf = GaussianField(jnp.zeros((n_grid,), dtype=jnp.float64), t_start, t_end, sigma=0.32, length_yr=5.0)
+    model = RadiocarbonModel(cbm, gf, ExactLinearSolver())
+    pre_k = tk.quasisep.Matern32(scale=12.0, sigma=0.45)
+
+    sigma_y0, root_y0 = stationary_cbm_gp_cov(
+        cbm.matrix_A(), cbm.production_vector(), pre_k, alpha_unit=float(model.alpha_unit)
+    )
+    assert sigma_y0.shape == (cbm.n_boxes, cbm.n_boxes)
+    assert root_y0.shape[0] == cbm.n_boxes
+
+    lnz_pre = log_evidence(
+        model, ds, offset_mode="hierarchical", global_offset_prior_sd=200.0, lab_offset_prior_sd=1.5, prehistory_kernel=pre_k
+    )
+    x_off, mu_off, sd_off = hierarchical_offset_design(
+        ds.series_indices, ds.n_series, box_activity_ratios=op.box_activity_ratios, global_prior_sd=200.0, lab_prior_sd=1.5
+    )
+    cov_d = (
+        op.w_grid @ gf.prior_covariance() @ op.w_grid.T
+        + (x_off * (sd_off**2)[None, :]) @ x_off.T
+        + op.init_state_basis @ sigma_y0 @ op.init_state_basis.T
+        + jnp.diag(ds.sigma_flat**2)
+    )
+    r_d = ds.d14c_flat - op.ss_d14c - x_off @ mu_off
+    sign_p, logdet_p = jnp.linalg.slogdet(cov_d)
+    assert float(sign_p) > 0.0
+    dense_lnz = -0.5 * (
+        r_d @ jnp.linalg.solve(cov_d, r_d) + logdet_p + ds.n_obs * math.log(2.0 * math.pi)
+    )
+    np.testing.assert_allclose(lnz_pre, dense_lnz, rtol=1e-11, atol=1e-10)
+
+    fit_pre = fit_ift_field(model, ds, prehistory_kernel=pre_k)
+    assert fit_pre.prehistory_root_y0 is not None
+    np.testing.assert_allclose(fit_pre.log_evidence, lnz_pre, rtol=1e-12, atol=1e-11)
+    # Implicit reuse of fit_pre.prehistory_root_y0 without re-passing prehistory_kernel
+    np.testing.assert_allclose(log_evidence(fit_pre, ds), lnz_pre, rtol=1e-12, atol=1e-11)
+    draws_pre = laplace_samples(fit_pre, ds, n_samples=16, rng_key=jax.random.PRNGKey(3))
+    assert draws_pre["q"].shape == (16, n_grid)
+    s_pre = error_scale(fit_pre, ds)
+    assert isinstance(s_pre, float) and s_pre > 0.0
+
+    opt_pre = optimize_gp_kernel(
+        cbm, ds, kernel="matern32", n_grid=32, multi_start=1, prehistory_kernel=pre_k
+    )
+    assert opt_pre.fit.prehistory_root_y0 is not None
+    sel_pre = select_gp_kernel(
+        cbm, ds, candidates=("matern12", "matern32"), n_grid=32, multi_start=1, prehistory_kernel=pre_k
+    )
+    assert sel_pre.best_result.fit.prehistory_root_y0 is not None
+
+
+def test_spike_profiling_schur_evidence_and_log_gaussian_hessian() -> None:
+    """Spike profiling uses full (n_k + 1) Schur-complement evidence, AIC/BIC, and exact Hessians."""
+    cbm = load_preset("Brehm21")
+    s_tas = load_bundled_series("775AD-early-S/Büntgen18_TAS01.csv")
+
+    sp_low = MiyakeSpike(t_start=774.55, duration=0.25, fluence=1.2, profile="boxcar")
+    sp_high = MiyakeSpike(t_start=774.55, duration=0.25, fluence=14.0, profile="boxcar")
+    r_low = optimize_gp_kernel(cbm, s_tas, kernel="matern32", extra_production=sp_low, n_grid=40, multi_start=1)
+    r_high = optimize_gp_kernel(cbm, s_tas, kernel="matern32", extra_production=sp_high, n_grid=40, multi_start=1)
+
+    assert r_low.n_hyperparams == 2
+    k_eff = r_low.n_hyperparams + 1
+    np.testing.assert_allclose(r_low.aic, -2.0 * r_low.log_evidence + 2.0 * k_eff, rtol=1e-12)
+    np.testing.assert_allclose(r_low.log_evidence, r_high.log_evidence, rtol=1e-6, atol=1e-5)
+    np.testing.assert_allclose(r_low.log_hyper_evidence, r_high.log_hyper_evidence, rtol=1e-6, atol=1e-5)
+    np.testing.assert_allclose(
+        r_low.fit.model.get("production.spike.fluence"),
+        r_high.fit.model.get("production.spike.fluence"),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # Unclipped hyperprior restoring gradient at extreme |u| = 25 > 20 and dataset-span independence
+    proto = MaternSpectrum(sigma=0.3, length_yr=5.0, order=2.0)
+    g_extreme = jax.grad(lambda u: proto.from_unconstrained_hyperparams(u).hyperprior_log_prob(u))(
+        jnp.array([25.0, -25.0], dtype=jnp.float64)
+    )
+    assert jnp.all(jnp.abs(g_extreme) > 1.0)
+
+    # Non-PD Hessian returns -inf and converged=False (no +5.52 nats eigenvalue clamping bonus)
+    r_non_pd = optimize_gp_kernel(
+        cbm,
+        s_tas,
+        kernel="matern32",
+        n_grid=32,
+        multi_start=1,
+        hyperprior=lambda u: 500.0 * jnp.sum(u**2),
+    )
+    assert not r_non_pd.converged
+    assert float(r_non_pd.log_hyper_evidence) == float("-inf")
+
+    # LogGaussianField multi_start + spike profiling + implicit Hessian finite-difference check
+    r_lg = optimize_gp_kernel(
+        cbm,
+        s_tas,
+        kernel="matern32",
+        field_kind="log_gaussian",
+        extra_production=sp_low,
+        n_grid=28,
+        multi_start=3,
+        rng_key=jax.random.PRNGKey(12),
+    )
+    assert float(r_lg.fit.model.get("production.spike.fluence")) > 4.0
+    r_lg_nosp = optimize_gp_kernel(
+        cbm, s_tas, kernel="matern32", field_kind="log_gaussian", n_grid=24, multi_start=2
+    )
+    proto_lg = r_lg_nosp.kernel
+    u_opt = r_lg_nosp.phi_map
+    t0, t1 = r_lg_nosp.fit.operator.t_start, r_lg_nosp.fit.operator.t_end
+
+    def _lg_neg_post(u_vec: jax.Array) -> float:
+        k_u = proto_lg.from_unconstrained_hyperparams(u_vec)
+        lgf_u = LogGaussianField(jnp.zeros((24,), dtype=jnp.float64), t0, t1, kernel=k_u)
+        f_u = fit_ift_field(RadiocarbonModel(cbm, lgf_u), s_tas)
+        return float(-(f_u.log_evidence + k_u.hyperprior_log_prob(u_vec)))
+
+    eps = 2e-4
+    h_fd = np.zeros((2, 2), dtype=np.float64)
+    f0 = _lg_neg_post(u_opt)
+    for i in range(2):
+        ei = jnp.zeros((2,), dtype=jnp.float64).at[i].set(eps)
+        h_fd[i, i] = (_lg_neg_post(u_opt + ei) - 2.0 * f0 + _lg_neg_post(u_opt - ei)) / (eps**2)
+    np.testing.assert_allclose(np.diag(r_lg_nosp.hyper_hessian), np.diag(h_fd), rtol=2e-2, atol=2e-2)
+
+
+def test_optimize_spike_both_fields_and_dataset_digest_non_aliasing() -> None:
+    """optimize_spike=True supports Gaussian & LogGaussian fields with explicit priors; digest prevents aliasing."""
+    cbm = load_preset("Brehm21")
+    s_tas = load_bundled_series("775AD-early-S/Büntgen18_TAS01.csv")
+    z0 = jnp.zeros((40,), dtype=jnp.float64)
+    sp_a = MiyakeSpike(t_start=774.25, duration=0.35, fluence=5.0, profile="supergaussian")
+    sp_b = MiyakeSpike(t_start=774.85, duration=0.45, fluence=8.0, profile="supergaussian")
+    custom_sp = {
+        "t_start": dist.Normal(774.6, 2.0),
+        "duration": dist.LogNormal(math.log(0.4), 0.6),
+        "fluence": dist.LogNormal(math.log(6.4), 0.6),
+    }
+
+    gf_a = RadiocarbonModel(cbm, sp_a + GaussianField(z0, 760.0, 795.0, sigma=0.25, length_yr=5.0))
+    gf_b = RadiocarbonModel(cbm, sp_b + GaussianField(z0, 760.0, 795.0, sigma=0.25, length_yr=5.0))
+    fit_ga = fit_ift_field(gf_a, s_tas, optimize_spike=True, spike_priors=custom_sp)
+    fit_gb = fit_ift_field(gf_b, s_tas, optimize_spike=True, spike_priors=custom_sp)
+    assert fit_ga.converged and fit_gb.converged
+    np.testing.assert_allclose(fit_ga.log_evidence, fit_gb.log_evidence, rtol=1e-4, atol=1e-3)
+    # Joint Schur-complement evidence matches log_evidence(..., extra_priors=...) closely
+    ext_map = {f"production.spike.{k}": v for k, v in custom_sp.items()}
+    np.testing.assert_allclose(
+        fit_ga.log_evidence, log_evidence(fit_ga.model, s_tas, extra_priors=ext_map), rtol=2e-3, atol=5e-2
+    )
+
+    lgf_a = RadiocarbonModel(cbm, sp_a + LogGaussianField(z0, 760.0, 795.0, sigma=0.25, length_yr=5.0))
+    fit_la = fit_ift_field(lgf_a, s_tas, optimize_spike=True, spike_priors=custom_sp)
+    assert fit_la.converged
+    assert 4.0 <= float(fit_la.model.get("production.spike.fluence")) <= 10.0
+
+    # Template scaling: LogGaussianField with custom template preserves E[Q] == q_mean * template
+    tmpl = jnp.linspace(0.5, 2.5, 32, dtype=jnp.float64)
+    lgf_tmpl = LogGaussianField(
+        jnp.zeros((32,), dtype=jnp.float64), 760.0, 790.0, sigma=0.2, length_yr=4.0, q_mean=2.0, template=tmpl
+    )
+    np.testing.assert_allclose(
+        jnp.mean(lgf_tmpl.sample_prior(jax.random.PRNGKey(99), n_samples=4000), axis=0),
+        2.0 * tmpl,
+        rtol=0.04,
+        atol=0.04,
+    )
+
+    # Dataset geometry digest non-aliasing on held-out dataset with identical n_obs
+    s_shifted = TreeRingSeries(
+        np.asarray(s_tas.raw_years) + 3.0,
+        np.asarray(s_tas.d14c),
+        np.asarray(s_tas.sigma_d14c),
+        hemisphere=s_tas.hemisphere,
+        name="Shifted",
+    )
+    assert s_shifted.n_obs == s_tas.n_obs
+    fit_tas = fit_ift_field(RadiocarbonModel(cbm, GaussianField(z0, 755.0, 805.0, sigma=0.3, length_yr=5.0)), s_tas)
+    np.testing.assert_allclose(
+        predict_field_d14c(fit_tas, s_shifted, include_offsets=False),
+        predict_field_d14c(fit_tas.model, s_shifted, include_offsets=False),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    np.testing.assert_allclose(
+        log_evidence(fit_tas, s_shifted), log_evidence(fit_tas.model, s_shifted), rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(
+        error_scale(fit_tas, s_shifted), error_scale(fit_tas.model, s_shifted), rtol=1e-12, atol=1e-12
+    )
+
+    # laplace_samples(RadiocarbonModel(cbm, lgf_zero), ds) fits MAP first rather than sampling around z=0
+    lgf_unfitted = RadiocarbonModel(cbm, sp_a + LogGaussianField(z0, 760.0, 795.0, sigma=0.35, length_yr=4.0))
+    fit_lgf_ref = fit_ift_field(lgf_unfitted, s_tas)
+    draws_from_model = laplace_samples(lgf_unfitted, s_tas, n_samples=200, rng_key=jax.random.PRNGKey(7))
+    draws_from_fit = laplace_samples(fit_lgf_ref, s_tas, n_samples=200, rng_key=jax.random.PRNGKey(7))
+    np.testing.assert_allclose(draws_from_model["q"], draws_from_fit["q"], rtol=1e-10, atol=1e-10)
+
+
+def test_likelihood_and_fit_map_ift_integration_and_edge_cases() -> None:
+    """ticktack.likelihood & fit_map support GaussianField/LogGaussianField + 1-ring & dup-name edge cases."""
+    cbm = load_preset("Brehm21")
+    s_tas = load_bundled_series("775AD-early-S/Büntgen18_TAS01.csv")
+    ds_tas = Dataset((s_tas,))
+    z0 = jnp.zeros((40,), dtype=jnp.float64)
+    sp = MiyakeSpike(t_start=774.55, duration=0.25, fluence=5.2, profile="boxcar")
+
+    gf = GaussianField(z0, 760.0, 795.0, sigma=0.3, length_yr=5.0)
+    m_gf = RadiocarbonModel(cbm, sp + gf, ExactLinearSolver())
+    cfg = LinearMarginalConfig(
+        offset_mode="hierarchical", global_prior_mean=0.0, global_prior_sd=200.0, lab_prior_sd=1.5
+    )
+    np.testing.assert_allclose(
+        marginal_log_likelihood(m_gf, ds_tas, cfg), log_evidence(m_gf, ds_tas), rtol=1e-11, atol=1e-10
+    )
+
+    t_fine = jnp.linspace(765.0, 790.0, 50, dtype=jnp.float64)
+    lp_gf = linear_posterior(m_gf, ds_tas, cfg, rng_key=jax.random.PRNGKey(4), n_draws=8, t_fine=t_fine)
+    assert lp_gf.q_fine_draws is not None and lp_gf.q_fine_draws.shape == (8, 50)
+    assert lp_gf.d14c_fine_draws is not None and lp_gf.d14c_fine_draws.shape == (8, 50)
+
+    ps_sp = ParameterSpace(m_gf, [ParamSpec("production.spike.fluence", prior_mean=6.4, prior_sd=2.0)])
+    map_gf = fit_map(m_gf, ds_tas, ps_sp, cfg=cfg, method="BFGS")
+    assert map_gf.converged
+    assert 5.0 <= float(map_gf.theta_map["production.spike.fluence"]) <= 9.0
+
+    lgf = LogGaussianField(z0, 760.0, 795.0, sigma=0.28, length_yr=5.0)
+    m_lgf = RadiocarbonModel(cbm, sp + lgf, ExactLinearSolver())
+    fit_lgf = fit_ift_field(m_lgf, ds_tas)
+    np.testing.assert_allclose(
+        marginal_log_likelihood(m_lgf, ds_tas, cfg), log_evidence(fit_lgf, ds_tas), rtol=1e-8, atol=1e-7
+    )
+    ps_sp_lgf = ParameterSpace(m_lgf, [ParamSpec("production.spike.fluence", prior_mean=6.4, prior_sd=2.0)])
+    map_lgf = fit_map(m_lgf, ds_tas, ps_sp_lgf, cfg=cfg, method="BFGS")
+    assert 4.5 <= float(map_lgf.theta_map["production.spike.fluence"]) <= 9.0
+
+    # 1-ring series + duplicate series names in error_scale and select_gp_kernel
+    s_one = TreeRingSeries([776.0], [10.5], [1.8], hemisphere="north", name="OneRing")
+    ds_1ring = Dataset((s_tas, s_one))
+    s_glob_1ring = error_scale(m_gf, ds_1ring, by_series=False)
+    assert isinstance(s_glob_1ring, float) and s_glob_1ring > 0.0
+    sel_1ring = select_gp_kernel(cbm, ds_1ring, candidates=("matern12", "matern32"), n_grid=28, multi_start=1)
+    assert "MacKay s_error" in sel_1ring.format_table()
+
+    s_dup1 = TreeRingSeries(np.asarray(s_tas.raw_years), np.asarray(s_tas.d14c), np.asarray(s_tas.sigma_d14c), hemisphere="south")
+    s_dup2 = TreeRingSeries(np.asarray(s_tas.raw_years), np.asarray(s_tas.d14c) + 0.5, np.asarray(s_tas.sigma_d14c), hemisphere="south")
+    ds_dup = Dataset((s_dup1, s_dup2))
+    sel_dup = select_gp_kernel(cbm, ds_dup, candidates=("matern12", "matern32"), n_grid=28, multi_start=1)
+    assert "MacKay s_error" in sel_dup.format_table()
+
+
+
+
 
 

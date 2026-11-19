@@ -8,7 +8,7 @@
 
 ### Graph Topology & Structural Validation
 
-Every `CarbonBoxModel` holds a static `Topology` PyTree defining the directed reservoir graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$, tropospheric box indices $\mathcal{T}$, hemispheric routing tags (`"north"` / `"south"`), and normalized cosmic-ray production allocation $\mathbf{b}$ ($\sum_i b_i = 1$). On construction, `Topology` runs Tarjan's strongly connected components (SCC) algorithm to verify graph reachability from every production-receiving reservoir ($b_i > 0$) and ensure the generator $A$ is nonsingular.
+Every `CarbonBoxModel` holds a static `Topology` PyTree defining the directed reservoir graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$, tropospheric box indices $\mathcal{T}$, hemispheric routing tags (`"north"` / `"south"`), and normalized cosmic-ray production allocation $\mathbf{b}$ ($\sum_i b_i = 1$). On construction, `Topology` runs [Tarjan's strongly connected components](https://en.wikipedia.org/wiki/Tarjan%27s_strongly_connected_components_algorithm) (SCC) algorithm to verify graph reachability from every production-receiving reservoir ($b_i > 0$) and ensure the generator $A$ is nonsingular.
 
 ### Constrained Rate Parameterizations
 
@@ -17,12 +17,12 @@ Rather than exposing raw matrix entries that can violate mass conservation or po
 | Class | Free Parameters | Physical Constraint Enforced | Typical Use Case |
 | :--- | :--- | :--- | :--- |
 | `FixedCBM` | $0$ | Frozen reservoir masses $\mathbf{M}$ and fluxes $F_{i \to j}$ | Standard Miyake / solar / IFT production inference with fixed `Brehm21` or `Guttler15` transport |
-| `BalancedCBM` | $|\mathcal{E}| - n + 1$ cycle-space log fluxes (+ $\ln M_{\text{tot}}$) | Exact pre-industrial $^{12}\text{C}$ mass balance $\sum_j F_{j \to i} = \sum_j F_{i \to j}$ via Perron–Frobenius null-vector stationary masses | Sensitivity analysis & Fisher spectrum on directed multi-box topologies (`Brehm21` has 52 free rates) |
-| `ReversibleCBM` | $(n - 1)$ log mass ratios + $|\mathcal{E}_{\text{undir}}|$ symmetric log conductances | Detailed balance $M_i k_{i \to j} = M_j k_{j \to i}$, guaranteeing real negative eigenvalues of $A$ (`M^{1/2}` similarity to negative-definite symmetric matrix) | Non-oscillatory reversible carbon-exchange priors |
+| `BalancedCBM` | $|\mathcal{E}|$ directed log rates (`log_rates_free`, or $p \le |\mathcal{E}|$ tied groups) + $\ln M_{\text{tot}}$ | Exact pre-industrial $^{12}\text{C}$ mass balance $\sum_j M_j k_{j \to i} = M_i \sum_j k_{i \to j}$ via [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) null-vector stationary masses | Sensitivity analysis & Fisher spectrum on directed multi-box topologies (`Brehm21` has 56 directed free rates, or 52 under N/S symmetry tying) |
+| `ReversibleCBM` | $(n - 1)$ log mass ratios + $|\mathcal{E}_{\text{undir}}|$ symmetric log fluxes (`log_sym_fluxes`) + $\ln M_{\text{tot}}$ | Detailed balance $M_i k_{i \to j} = M_j k_{j \to i}$, guaranteeing real negative eigenvalues of $A$ ($M^{1/2}$ similarity to a negative-definite symmetric matrix) | Non-oscillatory reversible carbon-exchange priors |
 | `OpenCBM` | Directed log rates + non-negative sink vector $\mathbf{s} \ge 0$ | Irreversible sediment burial / carbonate weathering sinks on top of closed transport | Million-year / glacial–interglacial open-system experiments |
 | `EffectiveCBM(K)` | $2K - 2$ unconstrained log rates | Minimal star-graph topology with zero similarity-gauge redundancy; see [Fisher Information & EffectiveCBMs](fisher_and_effective_cbm.md) | Joint carbon-cycle + production inference & Bayesian model comparison |
 
-In `BalancedCBM`, unconstrained log-flux coordinates parameterize the cycle space of $\mathcal{G}$ so that for *any* vector in $\mathbb{R}^{|\mathcal{E}| - n + 1}$, inflow equals outflow at every node; the unique positive Perron–Frobenius right null-vector of the conservative rate matrix gives the relative reservoir $^{12}\text{C}$ fractions $M_i / M_{\text{tot}}$ automatically without constrained optimization.
+In `BalancedCBM`, unconstrained coordinates `log_rates_free` parameterize the directed first-order transfer rates $k_{i \to j} > 0$ (optionally tied across symmetric hemispheric edges via `tie_matrix`) on any strongly connected graph $\mathcal{G}$; solving for the unique positive [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) right null-vector of the conservative rate matrix yields the stationary reservoir $^{12}\text{C}$ fractions $M_i / M_{\text{tot}}$ automatically so Kirchhoff inflow equals outflow at every node without constrained optimization.
 
 ---
 

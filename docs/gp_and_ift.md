@@ -3,7 +3,7 @@
 Cosmic-ray $^{14}\text{C}$ production fluctuates continuously across 11-year Schwabe cycles, centennial Gleissberg / Suess grand solar minima, and geomagnetic dipole excursions, superposed on impulsive solar energetic particle bursts. `ticktack 2.0` provides two complementary, closely unified frameworks for non-parametric and empirical-Bayes cosmic-ray inference — mirroring the Gaussian-process and Information Field Theory architecture of [`virgil`](https://github.com/benjaminpope/virgil):
 
 1. **`ticktack.linear` + `GPProduction` / `LogGPProduction`**: Continuous-time Solin–Särkkä Hilbert-space proper orthogonal decomposition (POD) with stationary pre-history reservoir covariance (`stationary_cbm_gp_cov` via Smith doubling) and state-space Kalman marginalization (`kalman_gp_marginal`).
-2. **`ticktack.fields`**: 1D reflecting-boundary (orthonormal DCT-II) Information Field Theory ([Enßlin, Frommert & Kitaura 2009](https://doi.org/10.1103/PhysRevD.80.105005); [Edenhofer et al. 2024](https://doi.org/10.1051/0004-6361/202347628)) with `GaussianField` and `LogGaussianField`, composable spectral kernels, MacKay marginal evidence (`log_evidence`), laboratory uncertainty auditing (`error_scale`), and automatic GP kernel selection (`select_gp_kernel`).
+2. **`ticktack.fields`**: 1D reflecting-boundary (orthonormal DCT-II) Information Field Theory ([Enßlin, Frommert & Kitaura 2009](https://doi.org/10.1103/PhysRevD.80.105005); [Edenhofer et al. 2024](https://doi.org/10.21105/joss.06593)) with `GaussianField` and `LogGaussianField`, composable spectral kernels, MacKay marginal evidence (`log_evidence`), laboratory uncertainty auditing (`error_scale`), and automatic GP kernel selection (`select_gp_kernel`).
 
 ---
 
@@ -33,7 +33,7 @@ $$
 f(t) = \sum_{j=1}^M \sqrt{S(\omega_j)}\,\phi_j(t)\,z_j, \qquad z_j \stackrel{\text{i.i.d.}}{\sim} \mathcal{N}(0, 1),
 $$
 
-where $\phi_j(t) = L^{-1/2}\sin\!\big(\omega_j(t - t_{\text{center}} + L)\big)$ and $\omega_j = j\pi / (2L)$.
+where $\phi_j(t) = L^{-1/2}\sin\!\big(\omega_j(t - t_{\text{centre}} + L)\big)$ and $\omega_j = j\pi / (2L)$.
 
 - **`GPProduction(kernel, n_modes=32)`**: Models additive fluctuations $\delta Q(t) = f(t)$ linearly, so every basis function $\phi_j(t)$ is propagated analytically through the complex LTI resolvent (`project_causal_gp`) and marginalized in closed form inside `marginal_log_likelihood` and `linear_posterior` with **zero MCMC dimensions**.
 - **`LogGPProduction(kernel, coefficients, exact_basis_variance=True)`**: Enforces strict physical positivity $Q(t) > 0$ across large solar or Miyake excursions via

@@ -25,7 +25,8 @@ MacKay 1992) to 1D cosmic-ray ``14C`` production histories in ``ticktack 2.0``:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+import hashlib
 import math
 from typing import Any, Literal
 import warnings
@@ -41,7 +42,13 @@ import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 import numpy as np
+import numpyro  # noqa: F401
+import numpyro.distributions as dist
+import numpyro.distributions.distribution as _np_dist_mod
 import optimistix as optx
+
+if not hasattr(dist, "distribution"):
+    dist.distribution = _np_dist_mod
 from scipy.linalg import solve_triangular as _scipy_solve_triangular
 from scipy.optimize import minimize as _scipy_minimize
 import zodiax as zdx
@@ -283,6 +290,28 @@ def field_spectrum(
     return _normalize_from_log_spectrum(log_raw, sigma, zero_mode=zero_mode)
 
 
+DEFAULT_LOG_SIGMA_PRIOR: tuple[float, float] = (math.log(0.25), 1.5)
+DEFAULT_LOG_LENGTH_PRIOR: tuple[float, float] = (math.log(5.0), 1.5)
+DEFAULT_LOG_NU_PRIOR: tuple[float, float] = (math.log(1.5), 1.0)
+DEFAULT_LOG_PERIOD_PRIOR: tuple[float, float] = (math.log(11.0), 0.35)
+DEFAULT_LOG_QUALITY_PRIOR: tuple[float, float] = (math.log(3.5), 1.0)
+DEFAULT_SLOPE_PRIOR: tuple[float, float] = (-2.0, 1.5)
+DEFAULT_SPIKE_LOG_FLUENCE_PRIOR: tuple[float, float] = (math.log(5.0), 2.0)
+DEFAULT_SPIKE_LOG_DURATION_PRIOR: tuple[float, float] = (math.log(0.5), 1.5)
+
+
+def _normal_logpdf(
+    x: jax.Array, mean: float | jax.Array, sd: float | jax.Array
+) -> jax.Array:
+    z = (x - mean) / sd
+    return -0.5 * jnp.square(z) - jnp.log(sd) - 0.5 * math.log(2.0 * math.pi)
+
+
+def _safe_exp_hyper(u: jax.Array) -> jax.Array:
+    """Overflow/underflow-guarded exponential matching ``exp(u)`` on ``[-80, 80]``."""
+    return jnp.exp(jnp.clip(u, -80.0, 80.0))
+
+
 class SpectralKernel(zdx.Base):
     """Abstract composable 1D DCT-II power-spectrum kernel (:class:`zodiax.Base`)."""
 
@@ -290,9 +319,21 @@ class SpectralKernel(zdx.Base):
         """Evaluate DCT-II mode variances ``S_j`` of shape ``(n_grid,)``."""
         raise NotImplementedError
 
-    def hyperprior_log_prob(self) -> jax.Array:
-        """Optional internal log-hyperprior contribution (e.g. non-parametric deviations)."""
-        return jnp.asarray(0.0, dtype=jnp.float64)
+    def param_names(self) -> tuple[str, ...]:
+        """Names of unconstrained hyperparameters ``phi``."""
+        raise NotImplementedError
+
+    def unconstrain_hyperparams(self) -> jax.Array:
+        """Extract unconstrained hyperparameter vector ``phi`` from ``self``."""
+        raise NotImplementedError
+
+    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> SpectralKernel:
+        """Construct an updated :class:`SpectralKernel` from unconstrained ``phi``."""
+        raise NotImplementedError
+
+    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
+        """Normalized Gaussian log-hyperprior density on unconstrained ``phi``."""
+        raise NotImplementedError
 
     def __add__(self, other: SpectralKernel) -> SumSpectrum:
         if not isinstance(other, SpectralKernel):
@@ -341,6 +382,43 @@ class MaternSpectrum(SpectralKernel):
             zero_mode=self.zero_mode,
         )
 
+    def param_names(self) -> tuple[str, ...]:
+        if self.learn_order:
+            return ("log_sigma", "log_length_yr", "log_nu")
+        return ("log_sigma", "log_length_yr")
+
+    def unconstrain_hyperparams(self) -> jax.Array:
+        log_sig = jnp.log(jnp.maximum(self.sigma, 1e-30))
+        log_ell = jnp.log(jnp.maximum(self.length_yr, 1e-30))
+        if self.learn_order:
+            log_nu = jnp.log(jnp.maximum(self.order - 0.5, 1e-30))
+            return jnp.stack([log_sig, log_ell, log_nu])
+        return jnp.stack([log_sig, log_ell])
+
+    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> MaternSpectrum:
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        ord_val = (0.5 + _safe_exp_hyper(p[2])) if self.learn_order else self.order
+        return MaternSpectrum(
+            sigma=_safe_exp_hyper(p[0]),
+            length_yr=_safe_exp_hyper(p[1]),
+            order=ord_val,
+            learn_order=self.learn_order,
+            zero_mode=self.zero_mode,
+        )
+
+    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
+        p = (
+            self.unconstrain_hyperparams()
+            if phi is None
+            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        )
+        lp = _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR) + _normal_logpdf(
+            p[1], *DEFAULT_LOG_LENGTH_PRIOR
+        )
+        if self.learn_order:
+            lp = lp + _normal_logpdf(p[2], *DEFAULT_LOG_NU_PRIOR)
+        return lp
+
 
 class SquaredExpSpectrum(SpectralKernel):
     r"""Smooth Squared-Exponential (RBF) DCT-II spectrum ``S_j \propto exp(-0.5 ell^2 lambda_j)``."""
@@ -366,6 +444,35 @@ class SquaredExpSpectrum(SpectralKernel):
         lam = dct_laplacian_eigenvalues(n_grid, dt)
         log_raw = -0.5 * jnp.square(self.length_yr) * lam
         return _normalize_from_log_spectrum(log_raw, self.sigma, zero_mode=self.zero_mode)
+
+    def param_names(self) -> tuple[str, ...]:
+        return ("log_sigma", "log_length_yr")
+
+    def unconstrain_hyperparams(self) -> jax.Array:
+        return jnp.stack(
+            [
+                jnp.log(jnp.maximum(self.sigma, 1e-30)),
+                jnp.log(jnp.maximum(self.length_yr, 1e-30)),
+            ]
+        )
+
+    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> SquaredExpSpectrum:
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        return SquaredExpSpectrum(
+            sigma=_safe_exp_hyper(p[0]),
+            length_yr=_safe_exp_hyper(p[1]),
+            zero_mode=self.zero_mode,
+        )
+
+    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
+        p = (
+            self.unconstrain_hyperparams()
+            if phi is None
+            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        )
+        return _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR) + _normal_logpdf(
+            p[1], *DEFAULT_LOG_LENGTH_PRIOR
+        )
 
 
 class QuasiPeriodicSpectrum(SpectralKernel):
@@ -407,6 +514,39 @@ class QuasiPeriodicSpectrum(SpectralKernel):
         log_raw = -jnp.log(jnp.maximum(denom, 1e-300))
         return _normalize_from_log_spectrum(log_raw, self.sigma, zero_mode=self.zero_mode)
 
+    def param_names(self) -> tuple[str, ...]:
+        return ("log_sigma", "log_period_yr", "log_q_minus_half")
+
+    def unconstrain_hyperparams(self) -> jax.Array:
+        return jnp.stack(
+            [
+                jnp.log(jnp.maximum(self.sigma, 1e-30)),
+                jnp.log(jnp.maximum(self.period_yr, 1e-30)),
+                jnp.log(jnp.maximum(self.quality - 0.5, 1e-30)),
+            ]
+        )
+
+    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> QuasiPeriodicSpectrum:
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        return QuasiPeriodicSpectrum(
+            sigma=_safe_exp_hyper(p[0]),
+            period_yr=_safe_exp_hyper(p[1]),
+            quality=0.5 + _safe_exp_hyper(p[2]),
+            zero_mode=self.zero_mode,
+        )
+
+    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
+        p = (
+            self.unconstrain_hyperparams()
+            if phi is None
+            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        )
+        return (
+            _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR)
+            + _normal_logpdf(p[1], *DEFAULT_LOG_PERIOD_PRIOR)
+            + _normal_logpdf(p[2], *DEFAULT_LOG_QUALITY_PRIOR)
+        )
+
 
 class SumSpectrum(SpectralKernel):
     """Additive composition ``S(omega) = sum_a S_a(omega)`` of :class:`SpectralKernel` terms."""
@@ -432,10 +572,41 @@ class SumSpectrum(SpectralKernel):
             acc = acc + p.spectrum(n_grid, dt)
         return acc
 
-    def hyperprior_log_prob(self) -> jax.Array:
+    def param_names(self) -> tuple[str, ...]:
+        return tuple(
+            f"p{idx + 1}_{nm}"
+            for idx, part in enumerate(self.parts)
+            for nm in part.param_names()
+        )
+
+    def unconstrain_hyperparams(self) -> jax.Array:
+        return jnp.concatenate(
+            [part.unconstrain_hyperparams() for part in self.parts], axis=0
+        )
+
+    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> SumSpectrum:
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        cursor = 0
+        updated: list[SpectralKernel] = []
+        for part in self.parts:
+            sz = len(part.param_names())
+            updated.append(part.from_unconstrained_hyperparams(p[cursor : cursor + sz]))
+            cursor += sz
+        return SumSpectrum(updated)
+
+    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
+        if phi is None:
+            acc = jnp.asarray(0.0, dtype=jnp.float64)
+            for part in self.parts:
+                acc = acc + part.hyperprior_log_prob()
+            return acc
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        cursor = 0
         acc = jnp.asarray(0.0, dtype=jnp.float64)
-        for p in self.parts:
-            acc = acc + p.hyperprior_log_prob()
+        for part in self.parts:
+            sz = len(part.param_names())
+            acc = acc + part.hyperprior_log_prob(p[cursor : cursor + sz])
+            cursor += sz
         return acc
 
 
@@ -507,11 +678,40 @@ class CorrelatedFieldSpectrum(SpectralKernel):
         log_raw = jnp.concatenate([log_pos[:1], log_pos], axis=0)
         return _normalize_from_log_spectrum(log_raw, self.sigma, zero_mode=self.zero_mode)
 
-    def hyperprior_log_prob(self) -> jax.Array:
-        m = self.log_deviations.shape[0]
-        return -0.5 * jnp.sum(jnp.square(self.log_deviations)) - 0.5 * m * math.log(
-            2.0 * math.pi
+    def param_names(self) -> tuple[str, ...]:
+        m = int(self.log_deviations.shape[0])
+        return ("log_sigma", "slope") + tuple(f"xi_spec_{i + 1}" for i in range(m))
+
+    def unconstrain_hyperparams(self) -> jax.Array:
+        return jnp.concatenate(
+            [
+                jnp.stack([jnp.log(jnp.maximum(self.sigma, 1e-30)), self.slope]),
+                self.log_deviations,
+            ],
+            axis=0,
         )
+
+    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> CorrelatedFieldSpectrum:
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        return CorrelatedFieldSpectrum(
+            sigma=_safe_exp_hyper(p[0]),
+            slope=p[1],
+            log_deviations=p[2:],
+            flexibility=self.flexibility,
+            zero_mode=self.zero_mode,
+        )
+
+    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
+        p = (
+            self.unconstrain_hyperparams()
+            if phi is None
+            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        )
+        lp_head = _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR) + _normal_logpdf(
+            p[1], *DEFAULT_SLOPE_PRIOR
+        )
+        lp_xi = jnp.sum(_normal_logpdf(p[2:], 0.0, 1.0))
+        return lp_head + lp_xi
 
 
 # =============================================================================
@@ -805,8 +1005,8 @@ class LogGaussianField(ProductionTerm):
         if self.ito_corrected:
             eta = eta - 0.5 * dct_knot_variance(spec)
         if self.template is not None:
-            norm_t = jnp.maximum(self.template, 0.0) / jnp.max(self.template)
-            eta = eta + jnp.log((norm_t + self.mean_floor) / (1.0 + self.mean_floor))
+            tilde_mu = jnp.maximum(self.template, self.mean_floor)
+            eta = eta + jnp.log(tilde_mu)
         return eta
 
     def evaluate_q_grid(self) -> jax.Array:
@@ -869,32 +1069,85 @@ class DCTResponseOperator(zdx.Base):
     t_end: float = eqx.field(static=True)
     n_grid: int = eqx.field(static=True)
     dt: float = eqx.field(static=True)
+    dataset_digest: str = eqx.field(static=True, default="")
+    template_digest: str = eqx.field(static=True, default="")
 
     @property
     def t_grid(self) -> jax.Array:
         return jnp.linspace(self.t_start, self.t_end, self.n_grid, dtype=jnp.float64)
 
 
+def _compute_dataset_digest(cbm: CarbonBoxModel, dataset: Dataset) -> str:
+    """Deterministic SHA-256 fingerprint of ``(sub_t_starts, sub_t_ends, weights, box_indices)``."""
+    h = hashlib.sha256()
+    h.update(
+        f"nb={cbm.n_boxes};ns={dataset.n_series};no={dataset.n_obs};".encode()
+    )
+    for s in dataset.series:
+        sub_s, sub_e, w_sub = s.quadrature_windows()
+        box_idx = int(cbm.box_index(s.box_name, hemisphere=s.hemisphere))
+        h.update(f"s:{s.name}:b={box_idx}:sh={sub_s.shape};".encode())
+        for arr in (sub_s, sub_e, w_sub):
+            arr_np = _concrete_np(arr)
+            if arr_np is None:
+                return ""
+            h.update(np.ascontiguousarray(np.round(arr_np, 12)).tobytes())
+    return h.hexdigest()
+
+
+def _compute_template_digest(template: ArrayLike | None) -> str:
+    """Deterministic SHA-256 fingerprint for an optional grid envelope ``template``."""
+    if template is None:
+        return "none"
+    t_np = _concrete_np(template)
+    if t_np is None:
+        return ""
+    h = hashlib.sha256()
+    h.update(f"sh={t_np.shape};".encode())
+    h.update(np.ascontiguousarray(np.round(t_np, 14)).tobytes())
+    return h.hexdigest()
+
+
 def _pack_dataset_quadrature(
     cbm: CarbonBoxModel,
     dataset: Dataset,
 ) -> tuple[jax.Array, jax.Array, tuple[tuple[jax.Array, int, int, jax.Array, int], ...]]:
-    """Pack deduplicated sub-window start/end times and series gather indices."""
-    starts_all: list[np.ndarray] = []
-    ends_all: list[np.ndarray] = []
+    """Pack deduplicated sub-window start/end times and series gather indices (JIT-trace safe)."""
+    starts_np_list: list[np.ndarray] = []
+    ends_np_list: list[np.ndarray] = []
+    starts_jnp_list: list[jax.Array] = []
+    ends_jnp_list: list[jax.Array] = []
     raw_specs: list[tuple[int, int, int, jax.Array, int]] = []
+    is_traced = False
     cursor = 0
     for s in dataset.series:
         sub_s, sub_e, w_sub = s.quadrature_windows()  # (N_s, M_s), (N_s, M_s), (M_s,)
         n_s, m_s = int(sub_s.shape[0]), int(sub_s.shape[1])
-        box_idx = cbm.box_index(s.box_name, hemisphere=s.hemisphere)
-        starts_all.append(np.asarray(sub_s, dtype=np.float64).reshape(-1))
-        ends_all.append(np.asarray(sub_e, dtype=np.float64).reshape(-1))
+        box_idx = int(cbm.box_index(s.box_name, hemisphere=s.hemisphere))
+        s_np = _concrete_np(sub_s)
+        e_np = _concrete_np(sub_e)
+        if s_np is None or e_np is None:
+            is_traced = True
+        else:
+            starts_np_list.append(s_np.reshape(-1))
+            ends_np_list.append(e_np.reshape(-1))
+        starts_jnp_list.append(jnp.asarray(sub_s, dtype=jnp.float64).reshape(-1))
+        ends_jnp_list.append(jnp.asarray(sub_e, dtype=jnp.float64).reshape(-1))
         raw_specs.append((cursor, n_s, m_s, w_sub, box_idx))
         cursor += n_s * m_s
 
-    s_cat = np.concatenate(starts_all, axis=0)
-    e_cat = np.concatenate(ends_all, axis=0)
+    if is_traced:
+        uniq_s = jnp.concatenate(starts_jnp_list, axis=0)
+        uniq_e = jnp.concatenate(ends_jnp_list, axis=0)
+        specs_traced: list[tuple[jax.Array, int, int, jax.Array, int]] = []
+        for start_idx, n_s, m_s, w_sub, box_idx in raw_specs:
+            end_idx = start_idx + n_s * m_s
+            inv_slice = jnp.arange(start_idx, end_idx, dtype=jnp.int32)
+            specs_traced.append((inv_slice, n_s, m_s, w_sub, box_idx))
+        return uniq_s, uniq_e, tuple(specs_traced)
+
+    s_cat = np.concatenate(starts_np_list, axis=0)
+    e_cat = np.concatenate(ends_np_list, axis=0)
     pairs = np.column_stack([np.round(s_cat, 11), np.round(e_cat, 11)])
     _, first_idx, inv_all = np.unique(
         pairs, axis=0, return_index=True, return_inverse=True
@@ -958,6 +1211,8 @@ def _compute_dct_operator_jit(
     flat_ends: jax.Array,
     specs: tuple[tuple[jax.Array, int, int, jax.Array, int], ...],
     template: jax.Array | None,
+    dataset_digest: str = "",
+    template_digest: str = "none",
 ) -> DCTResponseOperator:
     dt_f = (t_end - t_start) / float(n_grid - 1)
     t0_arr = jnp.asarray(t_start, dtype=jnp.float64)
@@ -1006,6 +1261,8 @@ def _compute_dct_operator_jit(
         t_end=t_end,
         n_grid=n_grid,
         dt=dt_f,
+        dataset_digest=dataset_digest,
+        template_digest=template_digest,
     )
 
 
@@ -1031,9 +1288,13 @@ def build_dct_response_operator(
     n_g = int(n_grid)
     if n_g < 2:
         raise ValueError(f"n_grid must be >= 2, got {n_grid}.")
-    span_lo, span_hi = ds.time_span
-    t0 = float(span_lo - float(pad_years)) if t_start is None else float(t_start)
-    t1 = float(span_hi + 0.5) if t_end is None else float(t_end)
+    if t_start is None or t_end is None:
+        span_lo, span_hi = ds.time_span
+        t0 = float(span_lo - float(pad_years)) if t_start is None else float(t_start)
+        t1 = float(span_hi + 0.5) if t_end is None else float(t_end)
+    else:
+        t0 = float(t_start)
+        t1 = float(t_end)
     if not (t1 > t0):
         raise ValueError(f"Expected t_end > t_start, got [{t0}, {t1}].")
 
@@ -1041,6 +1302,8 @@ def build_dct_response_operator(
     if tmpl_arr is not None and tmpl_arr.shape != (n_g,):
         raise ValueError(f"template shape {tmpl_arr.shape} must be ({n_g},).")
 
+    ds_digest = _compute_dataset_digest(cbm, ds)
+    tmpl_digest = _compute_template_digest(tmpl_arr)
     flat_s, flat_e, specs = _pack_dataset_quadrature(cbm, ds)
     return _compute_dct_operator_jit(
         cbm,
@@ -1053,7 +1316,46 @@ def build_dct_response_operator(
         flat_e,
         specs,
         tmpl_arr,
+        ds_digest,
+        tmpl_digest,
     )
+
+
+def _ensure_matching_operator(
+    op: DCTResponseOperator | None,
+    cbm: CarbonBoxModel,
+    ds: Dataset,
+    field: GaussianField | LogGaussianField,
+    *,
+    q_std: ArrayLike,
+    alpha_unit: ArrayLike,
+) -> tuple[DCTResponseOperator, bool]:
+    """Return ``(valid_op, matched)`` rebuilding if ``ds`` or ``field`` geometry differs."""
+    tmpl = field.template if isinstance(field, GaussianField) else None
+    ds_digest = _compute_dataset_digest(cbm, ds)
+    tmpl_digest = _compute_template_digest(tmpl)
+    if (
+        op is not None
+        and op.w_grid.shape == (ds.n_obs, field.n_grid)
+        and abs(op.t_start - field.t_start) <= 1e-12
+        and abs(op.t_end - field.t_end) <= 1e-12
+        and ds_digest != ""
+        and op.dataset_digest == ds_digest
+        and tmpl_digest != ""
+        and op.template_digest == tmpl_digest
+    ):
+        return op, True
+    rebuilt = build_dct_response_operator(
+        cbm,
+        ds,
+        t_start=field.t_start,
+        t_end=field.t_end,
+        n_grid=field.n_grid,
+        q_std=q_std,
+        alpha_unit=alpha_unit,
+        template=tmpl,
+    )
+    return rebuilt, False
 
 
 def build_dct_response_matrix(
@@ -1226,7 +1528,7 @@ def predict_field_d14c(
         r_ratio = (y_ss[box_idx] / y_trop) / m_rel[box_idx]
         ss_val = 1000.0 * (r_ratio - 1.0)
 
-        grid_term: ProductionTerm = field.to_gridded(q_std=model.q_std)
+        grid_term: ProductionTerm = field
         for _, ext_t in extras:
             grid_term = grid_term + ext_t
         dy_traj = solver.solve_delta_trajectory(
@@ -1249,28 +1551,31 @@ def predict_field_d14c(
         raise ValueError("dataset_or_series or t_fine must be supplied when passing a RadiocarbonModel.")
 
     ds = _as_dataset(dataset_or_series)
-    if (
+    ds_digest = _compute_dataset_digest(model.cbm, ds)
+    same_training_ds = (
         fit_res is not None
+        and ds_digest != ""
+        and fit_res.operator.dataset_digest == ds_digest
+    )
+    if (
+        same_training_ds
+        and fit_res is not None
         and operator is None
         and baseline_d14c is None
-        and ds.n_obs == fit_res.d14c_pred.shape[0]
     ):
-        return fit_res.d14c_pred if include_offsets else (fit_res.d14c_pred - fit_res.baseline_d14c)
-
-    tmpl = field.template if isinstance(field, GaussianField) else None
-    op = (
-        build_dct_response_operator(
-            model.cbm,
-            ds,
-            t_start=field.t_start,
-            t_end=field.t_end,
-            n_grid=field.n_grid,
-            q_std=model.q_std,
-            alpha_unit=model.alpha_unit,
-            template=tmpl,
+        return (
+            fit_res.d14c_pred
+            if include_offsets
+            else (fit_res.d14c_pred - fit_res.baseline_d14c)
         )
-        if eff_op is None or eff_op.w_grid.shape[0] != ds.n_obs
-        else eff_op
+
+    op, _ = _ensure_matching_operator(
+        eff_op,
+        model.cbm,
+        ds,
+        field,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
     )
     extra_exc = _eval_extra_terms_d14c(
         model.cbm,
@@ -1289,9 +1594,28 @@ def predict_field_d14c(
     pred = op.ss_d14c + extra_exc + field_exc
     if baseline_d14c is not None:
         pred = pred + jnp.asarray(baseline_d14c, dtype=jnp.float64)
-    elif include_offsets and fit_res is not None and fit_res.baseline_d14c.shape[0] == ds.n_obs:
-        pred = pred + fit_res.baseline_d14c
+    elif include_offsets and fit_res is not None:
+        if same_training_ds:
+            pred = pred + fit_res.baseline_d14c
+        else:
+            pred = pred + fit_res.global_offset * op.box_activity_ratios
     return pred
+
+
+def _resolve_prehistory_root_y0(
+    cbm: CarbonBoxModel,
+    alpha_unit: ArrayLike,
+    prehistory_kernel: Any | None,
+) -> jax.Array | None:
+    """Return ``root_y0`` such that ``root_y0 @ root_y0.T == Sigma_{y,0}``."""
+    if prehistory_kernel is None:
+        return None
+    _, root_y0 = stationary_cbm_gp_cov(
+        cbm.matrix_A(),
+        jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector(),
+        prehistory_kernel,
+    )
+    return root_y0
 
 
 def _build_offset_whitening(
@@ -1301,6 +1625,7 @@ def _build_offset_whitening(
     offset_mode: Literal["hierarchical", "none"],
     global_offset_prior_sd: float,
     lab_offset_prior_sd: float,
+    prehistory_root_y0: jax.Array | None = None,
     prehistory_cov_y0: jax.Array | None = None,
     init_state_basis: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
@@ -1318,7 +1643,7 @@ def _build_offset_whitening(
             dataset.n_series,
             box_activity_ratios=box_activity_ratios,
             global_prior_sd=global_offset_prior_sd,
-            lab_prior_sd=lab_offset_prior_sd if dataset.n_series > 1 else 0.0,
+            lab_prior_sd=lab_offset_prior_sd,
         )
         designs.append(x_off)
         means.append(mu_off)
@@ -1328,7 +1653,11 @@ def _build_offset_whitening(
             f"offset_mode must be 'hierarchical' or 'none', got {offset_mode!r}."
         )
 
-    if prehistory_cov_y0 is not None and init_state_basis is not None:
+    if prehistory_root_y0 is not None and init_state_basis is not None:
+        designs.append(init_state_basis)
+        means.append(jnp.zeros((init_state_basis.shape[1],), dtype=jnp.float64))
+        roots.append(prehistory_root_y0)
+    elif prehistory_cov_y0 is not None and init_state_basis is not None:
         cov0 = 0.5 * (prehistory_cov_y0 + prehistory_cov_y0.T)
         evals, evecs = jnp.linalg.eigh(cov0)
         pos = evals > 1e-30
@@ -1387,6 +1716,74 @@ class IFTFieldFitResult(zdx.Base):
     lab_offset_prior_sd: float = eqx.field(static=True)
     converged: bool = eqx.field(static=True)
     n_steps: int = eqx.field(static=True)
+    prehistory_root_y0: jax.Array | None = None
+    prehistory_kernel: Any = None
+
+
+def _parse_spike_priors(
+    spike_priors: Mapping[str, Any] | None,
+    t_start_grid: float,
+    t_end_grid: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Return ``(prior_means, prior_sds)`` on ``(t_start, log_duration, log_fluence)``."""
+    span = max(float(t_end_grid) - float(t_start_grid), 1.0)
+    defaults: dict[str, tuple[float, float]] = {
+        "t_start": (
+            0.5 * (float(t_start_grid) + float(t_end_grid)),
+            max(0.25 * span, 1.0),
+        ),
+        "log_duration": DEFAULT_SPIKE_LOG_DURATION_PRIOR,
+        "log_fluence": DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
+    }
+    alias_map = {
+        "t_start": "t_start",
+        "log_duration": "log_duration",
+        "log_fluence": "log_fluence",
+        "duration": "log_duration",
+        "fluence": "log_fluence",
+    }
+    if spike_priors is not None:
+        unknown = set(spike_priors) - set(alias_map)
+        if unknown:
+            raise ValueError(
+                f"Unknown spike_priors keys {sorted(unknown)}; expected subset of "
+                f"{sorted(alias_map)}."
+            )
+        for k, spec in spike_priors.items():
+            target_k = alias_map[k]
+            if isinstance(spec, dist.Normal) and k in ("t_start", "log_duration", "log_fluence"):
+                mu_f, sd_f = float(spec.loc), float(spec.scale)
+            elif isinstance(spec, dist.LogNormal) and k in ("duration", "fluence"):
+                mu_f, sd_f = float(spec.loc), float(spec.scale)
+            elif isinstance(spec, (tuple, list)) and len(spec) == 2:
+                mu_f, sd_f = float(spec[0]), float(spec[1])
+            else:
+                raise ValueError(
+                    f"Unsupported spike_priors[{k!r}]={spec!r}; pass a (mean, sd) tuple or "
+                    "Normal (for t_start / log_*) / LogNormal (for duration / fluence)."
+                )
+            if not (math.isfinite(mu_f) and math.isfinite(sd_f) and sd_f > 0.0):
+                raise ValueError(
+                    f"spike_priors[{k!r}] must be finite (mean, positive_sd), got {spec!r}."
+                )
+            defaults[target_k] = (mu_f, sd_f)
+    means = jnp.array(
+        [
+            defaults["t_start"][0],
+            defaults["log_duration"][0],
+            defaults["log_fluence"][0],
+        ],
+        dtype=jnp.float64,
+    )
+    sds = jnp.array(
+        [
+            defaults["t_start"][1],
+            defaults["log_duration"][1],
+            defaults["log_fluence"][1],
+        ],
+        dtype=jnp.float64,
+    )
+    return means, sds
 
 
 @jax.jit
@@ -1411,10 +1808,12 @@ def fit_ift_field(
     global_offset_prior_sd: float = 200.0,
     lab_offset_prior_sd: float = 1.5,
     optimize_spike: bool = False,
+    spike_priors: Mapping[str, tuple[float, float]] | None = None,
     max_steps: int = 50,
     tol: float = 1e-8,
     operator: DCTResponseOperator | None = None,
     prehistory_kernel: Any | None = None,
+    prehistory_root_y0: jax.Array | None = None,
 ) -> IFTFieldFitResult:
     """Fit a :class:`GaussianField` (exact Wiener) or :class:`LogGaussianField` (whitened LM).
 
@@ -1423,36 +1822,25 @@ def fit_ift_field(
     baseline offsets ``(Delta_global, delta_{lab,s})``.
 
     * For linear :class:`GaussianField` (with ``optimize_spike=False``), computes the exact
-      closed-form SVD Wiener filter in a single pass (``n_steps = 1``).
+    closed-form SVD Wiener filter in a single pass (``n_steps = 1``).
     * For nonlinear :class:`LogGaussianField` (or joint ``MiyakeSpike`` optimization when
       ``optimize_spike=True``), runs ``optimistix.LevenbergMarquardt`` on the full vector
       residual ``[r_eff(z), z]``, typically converging to ``1e-8`` in 10–25 steps.
     """
     ds = _as_dataset(dataset)
     field, field_path, extras = _extract_field_and_extras(model.production)
-    tmpl = field.template if isinstance(field, GaussianField) else None
-    op = (
-        build_dct_response_operator(
-            model.cbm,
-            ds,
-            t_start=field.t_start,
-            t_end=field.t_end,
-            n_grid=field.n_grid,
-            q_std=model.q_std,
-            alpha_unit=model.alpha_unit,
-            template=tmpl,
-        )
-        if operator is None
-        else operator
+    op, _ = _ensure_matching_operator(
+        operator,
+        model.cbm,
+        ds,
+        field,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
     )
-    pre_cov = (
-        stationary_cbm_gp_cov(
-            model.cbm.matrix_A(),
-            model.alpha_unit * model.cbm.production_vector(),
-            prehistory_kernel,
-        )
-        if prehistory_kernel is not None
-        else None
+    eff_root_y0 = (
+        prehistory_root_y0
+        if prehistory_root_y0 is not None
+        else _resolve_prehistory_root_y0(model.cbm, model.alpha_unit, prehistory_kernel)
     )
     x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
         ds,
@@ -1460,7 +1848,7 @@ def fit_ift_field(
         offset_mode=offset_mode,
         global_offset_prior_sd=global_offset_prior_sd,
         lab_offset_prior_sd=lab_offset_prior_sd,
-        prehistory_cov_y0=pre_cov,
+        prehistory_root_y0=eff_root_y0,
         init_state_basis=op.init_state_basis,
     )
 
@@ -1477,6 +1865,10 @@ def fit_ift_field(
     spike_entries = [
         (p, t) for p, t in extras if optimize_spike and isinstance(t, MiyakeSpike)
     ]
+    sp_prior_means, sp_prior_sds = _parse_spike_priors(
+        spike_priors, field.t_start, field.t_end
+    )
+    spike_occam_term = jnp.asarray(0.0, dtype=jnp.float64)
 
     if isinstance(field, GaussianField) and not spike_entries:
         extra_exc = _eval_extra_terms_d14c(
@@ -1503,7 +1895,6 @@ def fit_ift_field(
             ],
             dtype=jnp.float64,
         )
-        t_mid_prior = sp_term.t_start
         fixed_extras = tuple((p, t) for p, t in extras if p != sp_path)
         fixed_exc = _eval_extra_terms_d14c(
             model.cbm,
@@ -1547,14 +1938,7 @@ def fit_ift_field(
             )
             r_raw = r_fixed_raw + inv_sig * sp_exc
             r_marg = jsl.solve_triangular(chol_marg, r_raw, lower=True)
-            sp_pen = jnp.array(
-                [
-                    (u_sp[0] - t_mid_prior) / 5.0,
-                    (u_sp[1] - math.log(0.25)) / 1.5,
-                    (u_sp[2] - math.log(6.5)) / 1.5,
-                ],
-                dtype=jnp.float64,
-            )
+            sp_pen = (u_sp - sp_prior_means) / sp_prior_sds
             return jnp.concatenate([r_marg, sp_pen], axis=0)
 
         sol = optx.least_squares(
@@ -1570,6 +1954,20 @@ def fit_ift_field(
             n_steps = int(sol.stats.get("num_steps", max_steps))
         except Exception:
             n_steps = max_steps
+
+        h_sp = jax.hessian(
+            lambda u_in: 0.5 * jnp.sum(jnp.square(_varpro_spike_residual(u_in, None)))
+        )(u_sp_opt)
+        h_sp = 0.5 * (h_sp + h_sp.T)
+        lp_sp = jnp.sum(_normal_logpdf(u_sp_opt, sp_prior_means, sp_prior_sds))
+        sign_sp, logdet_sp = jnp.linalg.slogdet(h_sp)
+        if float(sign_sp) <= 0.0:
+            converged = False
+        spike_occam_term = jnp.where(
+            sign_sp > 0.0,
+            lp_sp + 1.5 * math.log(2.0 * math.pi) - 0.5 * logdet_sp,
+            -jnp.inf,
+        )
 
         sp_fitted = eqx.tree_at(
             lambda s: (s.t_start, s.duration, s.fluence),
@@ -1611,7 +2009,6 @@ def fit_ift_field(
                 dtype=jnp.float64,
             )
             y0_vec = jnp.concatenate([z0, u_sp0], axis=0)
-            t_mid_prior = sp_term.t_start
             flat_s, flat_e, packed_specs = _pack_dataset_quadrature(model.cbm, ds)
             trop_idx = jnp.asarray(model.cbm.topology.trop_box_indices, dtype=jnp.int32)
             y_ss = model.cbm.steady_state_c14(q_std=model.q_std, alpha_unit=model.alpha_unit)
@@ -1620,7 +2017,6 @@ def fit_ift_field(
         else:
             sp_path = ""
             y0_vec = z0
-            t_mid_prior = jnp.asarray(0.0, dtype=jnp.float64)
 
         n_z = field.n_grid
         fixed_extras = tuple((p, t) for p, t in extras if p != sp_path)
@@ -1662,14 +2058,7 @@ def fit_ift_field(
                     model.q_std,
                     model.alpha_unit,
                 )
-                sp_pen = jnp.array(
-                    [
-                        (u_sp[0] - t_mid_prior) / 5.0,
-                        (u_sp[1] - math.log(0.25)) / 1.5,
-                        (u_sp[2] - math.log(6.5)) / 1.5,
-                    ],
-                    dtype=jnp.float64,
-                )
+                sp_pen = (u_sp - sp_prior_means) / sp_prior_sds
             else:
                 sp_exc = 0.0
                 sp_pen = jnp.zeros((0,), dtype=jnp.float64)
@@ -1733,8 +2122,56 @@ def fit_ift_field(
         r_eff_map, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
             r_raw_map, j_raw_map, u_nuis
         )
-        s_vals = jnp.linalg.svd(j_eff, full_matrices=False, compute_uv=False)
+        _, s_vals, vt_svd = jnp.linalg.svd(j_eff, full_matrices=False)
         chi2_eff = r_eff_map @ r_eff_map
+        if spike_entries:
+            u_sp_opt = y_opt[n_z:]
+            f_map_exc = (
+                op.w_dct @ (_safe_sqrt(fitted_field.power_spectrum()) * z_hat)
+                if isinstance(fitted_field, GaussianField)
+                else op.w_grid @ fitted_field.evaluate_grid(q_std=fitted_model.q_std)
+            )
+
+            def _r_eff_sp_only(u_in: jax.Array) -> jax.Array:
+                sp_in = eqx.tree_at(
+                    lambda s: (s.t_start, s.duration, s.fluence),
+                    spike_entries[0][1],
+                    (u_in[0], jnp.exp(u_in[1]), jnp.exp(u_in[2])),
+                )
+                sp_e = _eval_packed_term_d14c(
+                    model.cbm,
+                    solver,
+                    sp_in,
+                    flat_s,
+                    flat_e,
+                    packed_specs,
+                    y_trop,
+                    m_rel,
+                    model.q_std,
+                    model.alpha_unit,
+                )
+                rr = inv_sig * (
+                    op.ss_d14c + fixed_exc + sp_e + f_map_exc + nuis_mean_shift - d_obs
+                )
+                return whiten_qr(rr, u_nuis)[0] if u_nuis.shape[1] > 0 else rr
+
+            j_u_eff = jax.jacfwd(_r_eff_sp_only)(u_sp_opt)
+            h_uu = jax.hessian(
+                lambda u_in: 0.5 * jnp.sum(jnp.square(_r_eff_sp_only(u_in)))
+                - jnp.sum(_normal_logpdf(u_in, sp_prior_means, sp_prior_sds))
+            )(u_sp_opt)
+            c_mat = vt_svd @ (j_eff.T @ j_u_eff)
+            h_sp = h_uu - (c_mat.T / (1.0 + jnp.square(s_vals))) @ c_mat
+            h_sp = 0.5 * (h_sp + h_sp.T)
+            lp_sp = jnp.sum(_normal_logpdf(u_sp_opt, sp_prior_means, sp_prior_sds))
+            sign_sp, logdet_sp = jnp.linalg.slogdet(h_sp)
+            if float(sign_sp) <= 0.0:
+                converged = False
+            spike_occam_term = jnp.where(
+                sign_sp > 0.0,
+                lp_sp + 1.5 * math.log(2.0 * math.pi) - 0.5 * logdet_sp,
+                -jnp.inf,
+            )
         extras = fitted_extras
         field = fitted_field
 
@@ -1764,13 +2201,14 @@ def fit_ift_field(
         w_std, _ = _linear_posterior_std(resid_for_nuis, u_nuis)
         w_nuis = mu_nuis + root_nuis @ w_std
         if offset_mode == "hierarchical":
-            n_off = 1 + (ds.n_series if ds.n_series > 1 else 0)
+            has_lab = lab_offset_prior_sd > 0.0 and ds.n_series > 0
+            n_off = 1 + (ds.n_series if has_lab else 0)
             w_off = w_nuis[:n_off]
             g_off = w_off[0]
             l_off = (
                 w_off[1:]
-                if ds.n_series > 1
-                else jnp.zeros((1,), dtype=jnp.float64)
+                if has_lab
+                else jnp.zeros((ds.n_series,), dtype=jnp.float64)
             )
             base_d14c = x_nuis[:, :n_off] @ w_off
         else:
@@ -1791,6 +2229,7 @@ def fit_ift_field(
         - log_norm_d
         - half_logdet_nuis
         - half_logdet_field
+        + spike_occam_term
     )
     gamma = jnp.sum(jnp.square(s_vals) / (1.0 + jnp.square(s_vals)))
 
@@ -1814,6 +2253,8 @@ def fit_ift_field(
         lab_offset_prior_sd=float(lab_offset_prior_sd),
         converged=converged,
         n_steps=n_steps,
+        prehistory_root_y0=eff_root_y0,
+        prehistory_kernel=prehistory_kernel,
     )
 
 
@@ -1866,6 +2307,56 @@ def _exact_linear_evidence_core(
     return ln_z, gamma
 
 
+def _build_extra_prior_adapter(
+    path: str, prior_obj: Any
+) -> tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]:
+    """Return ``(constrain_fn, unconstrain_fn, log_prob_unconstrained_fn)`` for ``prior_obj``."""
+    if (
+        hasattr(prior_obj, "constrain")
+        and hasattr(prior_obj, "unconstrain")
+        and hasattr(prior_obj, "log_prior_unconstrained")
+    ):
+        return (
+            lambda u: jnp.asarray(prior_obj.constrain(u), dtype=jnp.float64).reshape(()),
+            lambda t: jnp.asarray(prior_obj.unconstrain(t), dtype=jnp.float64).reshape(()),
+            lambda u: jnp.asarray(
+                prior_obj.log_prior_unconstrained(u), dtype=jnp.float64
+            ).reshape(()),
+        )
+
+    support = getattr(prior_obj, "support", None)
+    if support is not None:
+        from numpyro.distributions import biject_to
+
+        bij = biject_to(support)
+
+        def _constrain_bij(u: jax.Array) -> jax.Array:
+            return jnp.asarray(bij(u), dtype=jnp.float64).reshape(())
+
+        def _unconstrain_bij(t: jax.Array) -> jax.Array:
+            return jnp.asarray(bij.inv(t), dtype=jnp.float64).reshape(())
+
+        def _lp_u_bij(u: jax.Array) -> jax.Array:
+            th = _constrain_bij(u)
+            ladj = jnp.sum(bij.log_abs_det_jacobian(u, th))
+            return jnp.sum(prior_obj.log_prob(th)) + ladj
+
+        return _constrain_bij, _unconstrain_bij, _lp_u_bij
+
+    if path.endswith((".duration", ".sigma", ".length_yr", ".period_yr")):
+        return (
+            lambda u: _safe_exp_hyper(u).reshape(()),
+            lambda t: jnp.log(jnp.maximum(jnp.asarray(t, dtype=jnp.float64), 1e-30)).reshape(()),
+            lambda u: jnp.sum(prior_obj.log_prob(_safe_exp_hyper(u))) + u,
+        )
+
+    return (
+        lambda u: jnp.asarray(u, dtype=jnp.float64).reshape(()),
+        lambda t: jnp.asarray(t, dtype=jnp.float64).reshape(()),
+        lambda u: jnp.sum(prior_obj.log_prob(u)),
+    )
+
+
 def log_evidence(
     model_or_result: RadiocarbonModel | IFTFieldFitResult,
     dataset: Dataset | TreeRingSeries | None = None,
@@ -1907,10 +2398,14 @@ def log_evidence(
         eff_op = model_or_result.operator if operator is None else operator
         global_offset_prior_sd = model_or_result.global_offset_prior_sd
         lab_offset_prior_sd = model_or_result.lab_offset_prior_sd
+        inherited_root_y0 = model_or_result.prehistory_root_y0
+        inherited_pre_kern = model_or_result.prehistory_kernel
     elif isinstance(model_or_result, RadiocarbonModel):
         model = model_or_result
         eff_offset_mode = "hierarchical" if offset_mode is None else offset_mode
         eff_op = operator
+        inherited_root_y0 = None
+        inherited_pre_kern = None
     else:
         raise TypeError(
             f"Expected RadiocarbonModel or IFTFieldFitResult, got {type(model_or_result)!r}."
@@ -1920,37 +2415,31 @@ def log_evidence(
         raise ValueError("dataset must be provided when evaluating log_evidence from a model.")
     ds = _as_dataset(dataset)
     field, field_path, extras = _extract_field_and_extras(model.production)
-    tmpl = field.template if isinstance(field, GaussianField) else None
-    op = (
-        build_dct_response_operator(
-            model.cbm,
-            ds,
-            t_start=field.t_start,
-            t_end=field.t_end,
-            n_grid=field.n_grid,
-            q_std=model.q_std,
-            alpha_unit=model.alpha_unit,
-            template=tmpl,
-        )
-        if eff_op is None
-        else eff_op
+    op, _ = _ensure_matching_operator(
+        eff_op,
+        model.cbm,
+        ds,
+        field,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
     )
-    pre_cov = (
-        stationary_cbm_gp_cov(
-            model.cbm.matrix_A(),
-            model.alpha_unit * model.cbm.production_vector(),
-            prehistory_kernel,
+    if prehistory_kernel is not None:
+        eff_root_y0 = _resolve_prehistory_root_y0(
+            model.cbm, model.alpha_unit, prehistory_kernel
         )
-        if prehistory_kernel is not None
-        else None
-    )
+    elif inherited_root_y0 is not None:
+        eff_root_y0 = inherited_root_y0
+    else:
+        eff_root_y0 = _resolve_prehistory_root_y0(
+            model.cbm, model.alpha_unit, inherited_pre_kern
+        )
     x_nuis, mu_nuis, _, u_nuis = _build_offset_whitening(
         ds,
         op.box_activity_ratios,
         offset_mode=eff_offset_mode,
         global_offset_prior_sd=global_offset_prior_sd,
         lab_offset_prior_sd=lab_offset_prior_sd,
-        prehistory_cov_y0=pre_cov,
+        prehistory_root_y0=eff_root_y0,
         init_state_basis=op.init_state_basis,
     )
 
@@ -1978,82 +2467,164 @@ def log_evidence(
         ln_z, _ = _exact_linear_evidence_core(x_eff, j_eff, log_norm_d, half_logdet_nuis)
         return ln_z
 
-    # Nonlinear LogGaussianField (or extra_priors Schur complement at MAP)
-    extra_vals = [jnp.asarray(model.get(p), dtype=jnp.float64).reshape(()) for p in extra_paths]
-    extra_vec0 = (
-        jnp.stack(extra_vals, axis=0)
-        if extra_vals
-        else jnp.zeros((0,), dtype=jnp.float64)
+    if not extra_paths:
+        # LogGaussianField with no extra_priors: Laplace evidence around model's z_val
+        extra_exc = _eval_extra_terms_d14c(
+            model.cbm, solver, ds, extras, model.q_std, model.alpha_unit, op.steady_unit_response
+        )
+        z_val = field.latent
+
+        def _r_raw_z_only(z_in: jax.Array) -> jax.Array:
+            f_in = field.with_latent(z_in)
+            f_exc = op.w_grid @ f_in.evaluate_grid(q_std=model.q_std)
+            return inv_sig * (op.ss_d14c + extra_exc + f_exc + nuis_shift - d_obs)
+
+        r_raw = _r_raw_z_only(z_val)
+        j_z_raw = jax.jacfwd(_r_raw_z_only)(z_val)
+        r_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(r_raw, j_z_raw, u_nuis)
+        half_logdet_field, _ = _smooth_logdet_and_gamma(j_eff)
+        return (
+            -0.5 * (r_eff @ r_eff)
+            - 0.5 * (z_val @ z_val)
+            - log_norm_d
+            - half_logdet_nuis
+            - half_logdet_field
+        )
+
+    assert extra_priors is not None
+    d_ext = len(extra_paths)
+    adapters = tuple(_build_extra_prior_adapter(p, extra_priors[p]) for p in extra_paths)
+    u_ext0 = jnp.stack(
+        [
+            adapters[i][1](jnp.asarray(model.get(p), dtype=jnp.float64).reshape(()))
+            for i, p in enumerate(extra_paths)
+        ],
+        axis=0,
     )
 
-    def _r_raw_joint(z_in: jax.Array, e_in: jax.Array) -> jax.Array:
+    def _constrain_u(u_vec: jax.Array) -> jax.Array:
+        return jnp.stack([adapters[i][0](u_vec[i]) for i in range(d_ext)], axis=0)
+
+    def _log_p_u(u_vec: jax.Array) -> jax.Array:
+        acc = jnp.asarray(0.0, dtype=jnp.float64)
+        for i in range(d_ext):
+            acc = acc + adapters[i][2](u_vec[i])
+        return acc
+
+    if isinstance(field, GaussianField):
+        def _profile_neg_log_post(u_vec: jax.Array) -> jax.Array:
+            e_cur = _constrain_u(u_vec)
+            m_cur = model
+            for i, p in enumerate(extra_paths):
+                m_cur = m_cur.set(p, e_cur[i])
+            f_cur, _, ext_cur = _extract_field_and_extras(m_cur.production)
+            ext_exc = _eval_extra_terms_d14c(
+                m_cur.cbm, solver, ds, ext_cur, m_cur.q_std, m_cur.alpha_unit, op.steady_unit_response
+            )
+            x_raw_u = inv_sig * (d_obs - op.ss_d14c - ext_exc - nuis_shift)
+            j_raw_u = inv_sig[:, None] * (
+                op.w_dct * _safe_sqrt(f_cur.power_spectrum())[None, :]
+            )
+            x_eff_u, j_eff_u, h_ld_nuis = _whiten_vec_and_mat_qr(x_raw_u, j_raw_u, u_nuis)
+            ln_z_cond, _ = _exact_linear_evidence_core(
+                x_eff_u, j_eff_u, log_norm_d, h_ld_nuis
+            )
+            return -(ln_z_cond + _log_p_u(u_vec))
+
+        sol_u = optx.minimise(
+            lambda u_in, _: _profile_neg_log_post(u_in),
+            optx.BFGS(rtol=1e-10, atol=1e-10),
+            u_ext0,
+            max_steps=100,
+            throw=False,
+        )
+        u_cand = sol_u.value
+        v_c, g_c = jax.value_and_grad(_profile_neg_log_post)(u_cand)
+        h_raw_c = jax.hessian(_profile_neg_log_post)(u_cand)
+        h_c = 0.5 * (h_raw_c + h_raw_c.T)
+        is_pd = jnp.all(jnp.linalg.eigvalsh(h_c) > 1e-14)
+        h_safe = jnp.where(is_pd, h_c, jnp.eye(d_ext, dtype=jnp.float64))
+        u_newt = u_cand - jnp.linalg.solve(h_safe, g_c)
+        v_newt = _profile_neg_log_post(u_newt)
+        u_map = jnp.where(
+            is_pd & jnp.isfinite(v_newt) & (v_newt <= v_c + 1e-12), u_newt, u_cand
+        )
+        neg_lp_map = _profile_neg_log_post(u_map)
+        h_map = jax.hessian(_profile_neg_log_post)(u_map)
+        h_sym = 0.5 * (h_map + h_map.T)
+        sign, logdet_ext = jnp.linalg.slogdet(h_sym)
+        return jnp.where(
+            sign > 0.0,
+            -neg_lp_map + 0.5 * d_ext * math.log(2.0 * math.pi) - 0.5 * logdet_ext,
+            -jnp.inf,
+        )
+
+    # LogGaussianField with extra_priors: joint MAP over (z, u_ext) + 2nd-order Schur curvature
+    n_z = field.n_grid
+
+    def _r_raw_joint_u(z_in: jax.Array, u_vec: jax.Array) -> jax.Array:
+        e_cur = _constrain_u(u_vec)
         m_cur = model.set(f"{field_path}.latent", z_in)
-        for idx, p in enumerate(extra_paths):
-            m_cur = m_cur.set(p, e_in[idx])
+        for i, p in enumerate(extra_paths):
+            m_cur = m_cur.set(p, e_cur[i])
         f_cur, _, ext_cur = _extract_field_and_extras(m_cur.production)
         ext_exc = _eval_extra_terms_d14c(
             m_cur.cbm, solver, ds, ext_cur, m_cur.q_std, m_cur.alpha_unit, op.steady_unit_response
         )
-        if isinstance(f_cur, GaussianField):
-            f_exc = op.w_dct @ (_safe_sqrt(f_cur.power_spectrum()) * z_in)
-        else:
-            f_exc = op.w_grid @ f_cur.evaluate_grid(q_std=m_cur.q_std)
+        f_exc = op.w_grid @ f_cur.evaluate_grid(q_std=m_cur.q_std)
         return inv_sig * (op.ss_d14c + ext_exc + f_exc + nuis_shift - d_obs)
 
-    if isinstance(field, GaussianField):
-        # Solve exact conditional Wiener mode z_hat at extra_vec0 so log_evidence(..., extra_priors=...)
-        # is strictly invariant to any initial field.latent values.
-        z_zero = jnp.zeros_like(field.latent)
-        r_raw0 = _r_raw_joint(z_zero, extra_vec0)
-        m0 = model
-        for idx, p in enumerate(extra_paths):
-            m0 = m0.set(p, extra_vec0[idx])
-        f0, _, _ = _extract_field_and_extras(m0.production)
-        j_z0 = inv_sig[:, None] * (op.w_dct * _safe_sqrt(f0.power_spectrum())[None, :])
-        r_eff0, j_eff0, _ = _whiten_vec_and_mat_qr(r_raw0, j_z0, u_nuis)
-        z_val, _, _, _ = _wiener_solve_from_svd(-r_eff0, j_eff0)
-    else:
-        z_val = field.latent
+    def _r_eff_joint_u(z_in: jax.Array, u_vec: jax.Array) -> jax.Array:
+        rr = _r_raw_joint_u(z_in, u_vec)
+        return whiten_qr(rr, u_nuis)[0] if u_nuis.shape[1] > 0 else rr
 
-    r_raw = _r_raw_joint(z_val, extra_vec0)
-    j_z_raw, j_ext_raw = jax.jacfwd(_r_raw_joint, argnums=(0, 1))(z_val, extra_vec0)
-    j_all_raw = jnp.concatenate([j_z_raw, j_ext_raw], axis=1)
-    r_eff, j_all_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(r_raw, j_all_raw, u_nuis)
-    n_z = z_val.shape[0]
-    j_eff = j_all_eff[:, :n_z]
+    def _joint_neg_lp(yu: jax.Array, _: Any = None) -> jax.Array:
+        zc, uc = yu[:n_z], yu[n_z:]
+        re = _r_eff_joint_u(zc, uc)
+        return 0.5 * (re @ re) + 0.5 * (zc @ zc) - _log_p_u(uc)
+
+    sol_joint = optx.minimise(
+        _joint_neg_lp,
+        optx.BFGS(rtol=1e-8, atol=1e-8),
+        jnp.concatenate([field.latent, u_ext0], axis=0),
+        max_steps=150,
+        throw=False,
+    )
+    z_val = sol_joint.value[:n_z]
+    u_map = sol_joint.value[n_z:]
+
+    r_raw = _r_raw_joint_u(z_val, u_map)
+    j_z_raw = jax.jacfwd(lambda z_in: _r_raw_joint_u(z_in, u_map))(z_val)
+    r_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(r_raw, j_z_raw, u_nuis)
     half_logdet_field, _ = _smooth_logdet_and_gamma(j_eff)
-
-    chi2_eff = r_eff @ r_eff
-    z2 = z_val @ z_val
     base_ln_z = (
-        -0.5 * chi2_eff
-        - 0.5 * z2
+        -0.5 * (r_eff @ r_eff)
+        - 0.5 * (z_val @ z_val)
         - log_norm_d
         - half_logdet_nuis
         - half_logdet_field
     )
-    if not extra_paths:
-        return base_ln_z
 
-    assert extra_priors is not None
-    j_ext = j_all_eff[:, n_z:]
+    h_uu = jax.hessian(
+        lambda u_in: 0.5 * jnp.sum(jnp.square(_r_eff_joint_u(z_val, u_in))) - _log_p_u(u_in)
+    )(u_map)
+    h_zu = jax.jacfwd(
+        lambda u_in: jax.grad(
+            lambda z_in: 0.5 * jnp.sum(jnp.square(_r_eff_joint_u(z_in, u_in)))
+            + 0.5 * (z_in @ z_in)
+        )(z_val)
+    )(u_map)
     _, s_vals, vt_svd = jnp.linalg.svd(j_eff, full_matrices=False)
-    c_mat = vt_svd @ (j_eff.T @ j_ext)
-    schur = j_ext.T @ j_ext - (c_mat.T / (1.0 + jnp.square(s_vals))) @ c_mat
-    # Include negative Hessian of extra log-priors if differentiable
-    def _log_p_extra(ev: jax.Array) -> jax.Array:
-        acc = jnp.asarray(0.0, dtype=jnp.float64)
-        for idx, p in enumerate(extra_paths):
-            acc = acc + jnp.sum(extra_priors[p].log_prob(ev[idx]))
-        return acc
-
-    lp_val = _log_p_extra(extra_vec0)
-    neg_h_lp = -jax.hessian(_log_p_extra)(extra_vec0)
-    h_ext = 0.5 * (schur + schur.T + neg_h_lp + neg_h_lp.T)
+    v_hzu = vt_svd @ h_zu
+    inv_hzz_hzu = h_zu - vt_svd.T @ (
+        (jnp.square(s_vals) / (1.0 + jnp.square(s_vals)))[:, None] * v_hzu
+    )
+    h_ext = 0.5 * ((h_uu - h_zu.T @ inv_hzz_hzu) + (h_uu - h_zu.T @ inv_hzz_hzu).T)
+    lp_val = _log_p_u(u_map)
     sign, logdet_ext = jnp.linalg.slogdet(h_ext)
     extra_term = jnp.where(
         sign > 0.0,
-        lp_val + 0.5 * len(extra_paths) * math.log(2.0 * math.pi) - 0.5 * logdet_ext,
+        lp_val + 0.5 * d_ext * math.log(2.0 * math.pi) - 0.5 * logdet_ext,
         -jnp.inf,
     )
     return base_ln_z + extra_term
@@ -2068,6 +2639,7 @@ def laplace_samples(
     offset_mode: Literal["hierarchical", "none"] | None = None,
     global_offset_prior_sd: float = 200.0,
     lab_offset_prior_sd: float = 1.5,
+    prehistory_kernel: Any | None = None,
 ) -> dict[str, jax.Array]:
     r"""Draw ``z^{(m)} = z_hat + (I + J^T J)^{-1/2} eps^{(m)}`` via economy SVD.
 
@@ -2089,9 +2661,22 @@ def laplace_samples(
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
 
     if isinstance(model_or_result, IFTFieldFitResult):
+        if dataset is None:
+            raise ValueError(
+                "dataset is required by laplace_samples to evaluate measurement noise weights."
+            )
+        ds = _as_dataset(dataset)
         fit_res = model_or_result
         model = fit_res.model
-        op = fit_res.operator
+        field, _, extras = _extract_field_and_extras(model.production)
+        op, _ = _ensure_matching_operator(
+            fit_res.operator,
+            model.cbm,
+            ds,
+            field,
+            q_std=model.q_std,
+            alpha_unit=model.alpha_unit,
+        )
         eff_offset_mode: Literal["hierarchical", "none"] = (
             fit_res.offset_mode  # type: ignore[assignment]
             if offset_mode is None
@@ -2099,50 +2684,46 @@ def laplace_samples(
         )
         global_offset_prior_sd = fit_res.global_offset_prior_sd
         lab_offset_prior_sd = fit_res.lab_offset_prior_sd
-        if dataset is None:
-            raise ValueError(
-                "dataset is required by laplace_samples to evaluate measurement noise weights."
+        if prehistory_kernel is not None:
+            eff_root_y0 = _resolve_prehistory_root_y0(
+                model.cbm, model.alpha_unit, prehistory_kernel
             )
-        ds = _as_dataset(dataset)
+        elif fit_res.prehistory_root_y0 is not None:
+            eff_root_y0 = fit_res.prehistory_root_y0
+        else:
+            eff_root_y0 = _resolve_prehistory_root_y0(
+                model.cbm, model.alpha_unit, fit_res.prehistory_kernel
+            )
     elif isinstance(model_or_result, RadiocarbonModel):
         if dataset is None:
             raise ValueError("dataset must be provided when sampling from a RadiocarbonModel.")
         ds = _as_dataset(dataset)
         eff_offset_mode = "hierarchical" if offset_mode is None else offset_mode
-        field0, _, _ = _extract_field_and_extras(model_or_result.production)
-        if isinstance(field0, GaussianField):
-            fit_res = fit_ift_field(
-                model_or_result,
-                ds,
-                offset_mode=eff_offset_mode,
-                global_offset_prior_sd=global_offset_prior_sd,
-                lab_offset_prior_sd=lab_offset_prior_sd,
-            )
-            model = fit_res.model
-            op = fit_res.operator
-        else:
-            model = model_or_result
-            op = build_dct_response_operator(
-                model.cbm,
-                ds,
-                t_start=field0.t_start,
-                t_end=field0.t_end,
-                n_grid=field0.n_grid,
-                q_std=model.q_std,
-                alpha_unit=model.alpha_unit,
-            )
+        fit_res = fit_ift_field(
+            model_or_result,
+            ds,
+            offset_mode=eff_offset_mode,
+            global_offset_prior_sd=global_offset_prior_sd,
+            lab_offset_prior_sd=lab_offset_prior_sd,
+            prehistory_kernel=prehistory_kernel,
+        )
+        model = fit_res.model
+        op = fit_res.operator
+        eff_root_y0 = fit_res.prehistory_root_y0
+        field, _, extras = _extract_field_and_extras(model.production)
     else:
         raise TypeError(
             f"Expected RadiocarbonModel or IFTFieldFitResult, got {type(model_or_result)!r}."
         )
 
-    field, _, extras = _extract_field_and_extras(model.production)
     _, _, _, u_nuis = _build_offset_whitening(
         ds,
         op.box_activity_ratios,
         offset_mode=eff_offset_mode,
         global_offset_prior_sd=global_offset_prior_sd,
         lab_offset_prior_sd=lab_offset_prior_sd,
+        prehistory_root_y0=eff_root_y0,
+        init_state_basis=op.init_state_basis,
     )
     inv_sig = 1.0 / ds.sigma_flat
     z_hat = field.latent
@@ -2199,17 +2780,19 @@ def error_scale(
     dataset: Dataset | TreeRingSeries | None = None,
     *,
     by_series: bool = False,
-    offset_mode: Literal["hierarchical", "none"] | None = None,
+    offset_mode: Literal["hierarchical", "flat_per_series", "none"] | None = None,
+    global_offset_prior_sd: float = 200.0,
+    lab_offset_prior_sd: float = 1.5,
+    prehistory_kernel: Any | None = None,
     max_iter: int = 200,
     rtol: float = 1e-10,
 ) -> float | dict[str, float]:
     r"""Re-estimate noise error-bar scaling ``s`` via MacKay's (1992) evidence fixed point.
 
     Radiocarbon port of ``virgil.imaging.error_scale`` solving the empirical-Bayes
-    stationary condition ``s^2 = chi^2(s) / (N_eff - gamma(s))`` (with precision
-    ``beta = 1 / s^2`` and ``gamma(s) = tr(B^{1/2} J (I + J^T B J)^{-1} J^T B^{1/2})``)
-    on the Gauss–Newton linearized data vector ``x_lin = r_data(z_hat) + J_z z_hat``
-    projected orthogonal to unpenalized per-series baseline offsets.
+    stationary condition ``s^2 = chi^2(s) / (N_eff - gamma(s))`` under the exact
+    marginal Gaussian covariance of field modes and hierarchical baseline offsets
+    (or explicit unpenalized ``"flat_per_series"`` projection if requested).
 
     * ``by_series=False`` (default): returns a single global ``float`` ``s``
       (``s < 1`` means quoted error bars are conservative/overstated; after rescaling
@@ -2224,21 +2807,72 @@ def error_scale(
     if isinstance(model_or_result, IFTFieldFitResult):
         fit_res = model_or_result
         model = fit_res.model
-        op = fit_res.operator
-        eff_offset_mode = (
-            fit_res.offset_mode if offset_mode is None else offset_mode
+        field, _, extras = _extract_field_and_extras(model.production)
+        op, _ = _ensure_matching_operator(
+            fit_res.operator,
+            model.cbm,
+            ds,
+            field,
+            q_std=model.q_std,
+            alpha_unit=model.alpha_unit,
         )
+        eff_offset_mode = fit_res.offset_mode if offset_mode is None else offset_mode
+        global_offset_prior_sd = fit_res.global_offset_prior_sd
+        lab_offset_prior_sd = fit_res.lab_offset_prior_sd
+        if prehistory_kernel is not None:
+            eff_root_y0 = _resolve_prehistory_root_y0(
+                model.cbm, model.alpha_unit, prehistory_kernel
+            )
+        elif fit_res.prehistory_root_y0 is not None:
+            eff_root_y0 = fit_res.prehistory_root_y0
+        else:
+            eff_root_y0 = _resolve_prehistory_root_y0(
+                model.cbm, model.alpha_unit, fit_res.prehistory_kernel
+            )
     elif isinstance(model_or_result, RadiocarbonModel):
         eff_offset_mode = "hierarchical" if offset_mode is None else offset_mode
-        fit_res = fit_ift_field(model_or_result, ds, offset_mode=eff_offset_mode)  # type: ignore[arg-type]
+        fit_mode: Literal["hierarchical", "none"] = (
+            "none" if eff_offset_mode == "none" else "hierarchical"
+        )
+        fit_res = fit_ift_field(
+            model_or_result,
+            ds,
+            offset_mode=fit_mode,
+            global_offset_prior_sd=global_offset_prior_sd,
+            lab_offset_prior_sd=lab_offset_prior_sd,
+            prehistory_kernel=prehistory_kernel,
+        )
         model = fit_res.model
         op = fit_res.operator
+        eff_root_y0 = fit_res.prehistory_root_y0
+        field, _, extras = _extract_field_and_extras(model.production)
     else:
         raise TypeError(
             f"Expected RadiocarbonModel or IFTFieldFitResult, got {type(model_or_result)!r}."
         )
 
-    field, _, extras = _extract_field_and_extras(model.production)
+    if eff_offset_mode not in ("hierarchical", "flat_per_series", "none"):
+        raise ValueError(
+            "offset_mode must be 'hierarchical', 'flat_per_series', or 'none', "
+            f"got {eff_offset_mode!r}."
+        )
+
+    whiten_mode: Literal["hierarchical", "none"] = (
+        "hierarchical" if eff_offset_mode == "hierarchical" else "none"
+    )
+    x_nuis, mu_nuis, _, u_nuis = _build_offset_whitening(
+        ds,
+        op.box_activity_ratios,
+        offset_mode=whiten_mode,
+        global_offset_prior_sd=global_offset_prior_sd,
+        lab_offset_prior_sd=lab_offset_prior_sd,
+        prehistory_root_y0=eff_root_y0,
+        init_state_basis=op.init_state_basis,
+    )
+    nuis_shift = (
+        np.asarray(x_nuis @ mu_nuis, dtype=np.float64) if x_nuis.shape[1] > 0 else 0.0
+    )
+
     solver = (
         model.solver
         if isinstance(model.solver, ExactLinearSolver)
@@ -2252,7 +2886,9 @@ def error_scale(
     z_hat = np.asarray(field.latent, dtype=np.float64)
 
     if isinstance(field, GaussianField):
-        x_raw = inv_sig * (d_obs - np.asarray(op.ss_d14c + extra_exc, dtype=np.float64))
+        x_raw = inv_sig * (
+            d_obs - np.asarray(op.ss_d14c + extra_exc, dtype=np.float64) - nuis_shift
+        )
         j_raw = inv_sig[:, None] * np.asarray(
             op.w_dct * _safe_sqrt(field.power_spectrum())[None, :], dtype=np.float64
         )
@@ -2261,7 +2897,10 @@ def error_scale(
             op.w_grid @ field.evaluate_grid(q_std=model.q_std), dtype=np.float64
         )
         r_data = inv_sig * (
-            d_obs - np.asarray(op.ss_d14c + extra_exc, dtype=np.float64) - f_exc_hat
+            d_obs
+            - np.asarray(op.ss_d14c + extra_exc, dtype=np.float64)
+            - nuis_shift
+            - f_exc_hat
         )
         j_raw = np.asarray(
             jax.jacfwd(
@@ -2272,21 +2911,23 @@ def error_scale(
         )
         x_raw = r_data + j_raw @ z_hat
 
-    # Project out per-series constant offsets within each series block (indexed by integer
-    # series index 0 .. n_series - 1 so duplicate series.name never drops rows).
     slices_by_idx: list[np.ndarray] = []
     counts_by_idx: list[int] = []
     x_proj = x_raw.copy()
-    j_proj = j_raw.copy()
+    j_proj = (
+        np.hstack([j_raw, np.asarray(u_nuis, dtype=np.float64)])
+        if u_nuis.shape[1] > 0
+        else j_raw.copy()
+    )
     cursor = 0
     for s in ds.series:
         sl = np.arange(cursor, cursor + s.n_obs, dtype=np.int64)
         slices_by_idx.append(sl)
-        if eff_offset_mode == "hierarchical":
+        if eff_offset_mode == "flat_per_series":
             if s.n_obs <= 1:
                 raise ValueError(
                     f"Series {s.name!r} has only {s.n_obs} observation; cannot estimate "
-                    "error_scale while also projecting a per-series offset."
+                    "error_scale while also projecting an unpenalized per-series offset."
                 )
             w_s = inv_sig[sl] * np.asarray(op.box_activity_ratios[sl], dtype=np.float64)
             q_s = w_s / np.linalg.norm(w_s)
@@ -2503,6 +3144,7 @@ def evidence_grid(
     offset_mode: Literal["hierarchical", "none"] = "hierarchical",
     zero_mode: bool | None = None,
     q_std: float = DEFAULT_Q_STD,
+    prehistory_kernel: Any | None = None,
 ) -> EvidenceGridResult:
     """Evaluate the 2D ``(sigma, length_yr)`` log-evidence surface (mirroring ``virgil``).
 
@@ -2520,6 +3162,9 @@ def evidence_grid(
 
     op = build_dct_response_operator(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
+    )
+    root_y0 = _resolve_prehistory_root_y0(
+        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
     solver = ExactLinearSolver()
     extras = (
@@ -2539,6 +3184,8 @@ def evidence_grid(
         offset_mode=offset_mode,
         global_offset_prior_sd=200.0,
         lab_offset_prior_sd=1.5,
+        prehistory_root_y0=root_y0,
+        init_state_basis=op.init_state_basis,
     )
     inv_sig = 1.0 / ds.sigma_flat
     log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
@@ -2584,7 +3231,15 @@ def evidence_grid(
                 )
                 prod = lgf if extra_production is None else (extra_production + lgf)
                 mdl = RadiocarbonModel(cbm, prod, solver, q_std=q_std)
-                res_ij = fit_ift_field(mdl, ds, offset_mode=offset_mode, operator=op, max_steps=35)
+                res_ij = fit_ift_field(
+                    mdl,
+                    ds,
+                    offset_mode=offset_mode,
+                    operator=op,
+                    max_steps=35,
+                    prehistory_kernel=prehistory_kernel,
+                    prehistory_root_y0=root_y0,
+                )
                 z_warm = res_ij.latent
                 row_vals.append(res_ij.log_evidence)
             rows_out.append(jnp.stack(row_vals, axis=0))
@@ -2629,6 +3284,8 @@ def evidence_grid(
         ds,
         offset_mode=offset_mode,
         operator=op,
+        prehistory_kernel=prehistory_kernel,
+        prehistory_root_y0=root_y0,
     )
 
     return EvidenceGridResult(
@@ -2671,323 +3328,111 @@ _KERNEL_NAME_ALIASES: dict[str, str] = {
 }
 
 
-def _normal_logpdf(x: jax.Array, mean: float | jax.Array, sd: float | jax.Array) -> jax.Array:
-    z = (x - mean) / sd
-    return -0.5 * jnp.square(z) - jnp.log(sd) - 0.5 * math.log(2.0 * math.pi)
-
-
-def _kernel_spec_builders(
+def _prototype_kernel_from_name(
     canonical_name: str,
-    ell_mid: float,
     *,
     zero_mode: bool,
     n_corr_modes: int = 4,
-) -> tuple[
-    Any,
-    Any,
-    tuple[str, ...],
-    jax.Array,
-]:
-    """Return ``(build_kernel_fn, log_hyperprior_fn, param_names, base_phi0)``."""
-    log_sig_mu = math.log(0.25)
-    log_sig_sd = 1.5
-    log_ell_mu = math.log(ell_mid)
-    log_ell_sd = 1.5
-
+) -> SpectralKernel:
+    """Return a dataset-independent prototype :class:`SpectralKernel` for ``canonical_name``."""
     if canonical_name in ("matern12", "matern32", "matern52"):
         ord_fixed = {"matern12": 1.0, "matern32": 2.0, "matern52": 3.0}[canonical_name]
-
-        def build_m(phi: jax.Array) -> SpectralKernel:
-            return MaternSpectrum(
-                sigma=jnp.exp(phi[0]),
-                length_yr=jnp.exp(phi[1]),
-                order=ord_fixed,
-                learn_order=False,
-                zero_mode=zero_mode,
-            )
-
-        def prior_m(phi: jax.Array) -> jax.Array:
-            return _normal_logpdf(phi[0], log_sig_mu, log_sig_sd) + _normal_logpdf(
-                phi[1], log_ell_mu, log_ell_sd
-            )
-
-        phi0 = jnp.array([math.log(0.25), log_ell_mu], dtype=jnp.float64)
-        return build_m, prior_m, ("log_sigma", "log_length_yr"), phi0
-
+        return MaternSpectrum(
+            sigma=0.25,
+            length_yr=5.0,
+            order=ord_fixed,
+            learn_order=False,
+            zero_mode=zero_mode,
+        )
     if canonical_name == "squared_exp":
-
-        def build_se(phi: jax.Array) -> SpectralKernel:
-            return SquaredExpSpectrum(
-                sigma=jnp.exp(phi[0]),
-                length_yr=jnp.exp(phi[1]),
-                zero_mode=zero_mode,
-            )
-
-        def prior_se(phi: jax.Array) -> jax.Array:
-            return _normal_logpdf(phi[0], log_sig_mu, log_sig_sd) + _normal_logpdf(
-                phi[1], log_ell_mu, log_ell_sd
-            )
-
-        phi0 = jnp.array([math.log(0.25), log_ell_mu], dtype=jnp.float64)
-        return build_se, prior_se, ("log_sigma", "log_length_yr"), phi0
-
+        return SquaredExpSpectrum(sigma=0.25, length_yr=5.0, zero_mode=zero_mode)
     if canonical_name == "continuous_matern":
-
-        def build_cm(phi: jax.Array) -> SpectralKernel:
-            return MaternSpectrum(
-                sigma=jnp.exp(phi[0]),
-                length_yr=jnp.exp(phi[1]),
-                order=0.5 + jnp.exp(phi[2]),
-                learn_order=True,
-                zero_mode=zero_mode,
-            )
-
-        def prior_cm(phi: jax.Array) -> jax.Array:
-            return (
-                _normal_logpdf(phi[0], log_sig_mu, log_sig_sd)
-                + _normal_logpdf(phi[1], log_ell_mu, log_ell_sd)
-                + _normal_logpdf(phi[2], math.log(1.5), 1.0)
-            )
-
-        phi0 = jnp.array([math.log(0.25), log_ell_mu, math.log(1.5)], dtype=jnp.float64)
-        return build_cm, prior_cm, ("log_sigma", "log_length_yr", "log_nu"), phi0
-
+        return MaternSpectrum(
+            sigma=0.25,
+            length_yr=5.0,
+            order=2.0,
+            learn_order=True,
+            zero_mode=zero_mode,
+        )
     if canonical_name == "sho_solar":
-
-        def build_sho(phi: jax.Array) -> SpectralKernel:
-            return QuasiPeriodicSpectrum(
-                sigma=jnp.exp(phi[0]),
-                period_yr=jnp.exp(phi[1]),
-                quality=0.5 + jnp.exp(phi[2]),
-                zero_mode=zero_mode,
-            )
-
-        def prior_sho(phi: jax.Array) -> jax.Array:
-            return (
-                _normal_logpdf(phi[0], log_sig_mu, log_sig_sd)
-                + _normal_logpdf(phi[1], math.log(11.0), 0.35)
-                + _normal_logpdf(phi[2], math.log(3.5), 1.0)
-            )
-
-        phi0 = jnp.array(
-            [math.log(0.22), math.log(11.0), math.log(4.5)], dtype=jnp.float64
+        return QuasiPeriodicSpectrum(
+            sigma=0.22,
+            period_yr=11.0,
+            quality=5.0,
+            zero_mode=zero_mode,
         )
-        return build_sho, prior_sho, ("log_sigma", "log_period_yr", "log_q_minus_half"), phi0
-
     if canonical_name == "matern32_plus_solar":
-
-        def build_comp(phi: jax.Array) -> SpectralKernel:
-            return MaternSpectrum(
-                sigma=jnp.exp(phi[0]),
-                length_yr=jnp.exp(phi[1]),
-                order=2.0,
-                zero_mode=zero_mode,
-            ) + QuasiPeriodicSpectrum(
-                sigma=jnp.exp(phi[2]),
-                period_yr=jnp.exp(phi[3]),
-                quality=0.5 + jnp.exp(phi[4]),
-                zero_mode=False,
-            )
-
-        def prior_comp(phi: jax.Array) -> jax.Array:
-            return (
-                _normal_logpdf(phi[0], math.log(0.18), log_sig_sd)
-                + _normal_logpdf(phi[1], log_ell_mu, log_ell_sd)
-                + _normal_logpdf(phi[2], math.log(0.18), log_sig_sd)
-                + _normal_logpdf(phi[3], math.log(11.0), 0.35)
-                + _normal_logpdf(phi[4], math.log(3.5), 1.0)
-            )
-
-        phi0 = jnp.array(
-            [
-                math.log(0.18),
-                log_ell_mu,
-                math.log(0.22),
-                math.log(11.0),
-                math.log(4.5),
-            ],
-            dtype=jnp.float64,
+        return MaternSpectrum(
+            sigma=0.18,
+            length_yr=5.0,
+            order=2.0,
+            zero_mode=zero_mode,
+        ) + QuasiPeriodicSpectrum(
+            sigma=0.22,
+            period_yr=11.0,
+            quality=5.0,
+            zero_mode=False,
         )
-        names = (
-            "log_sigma_matern",
-            "log_length_yr",
-            "log_sigma_solar",
-            "log_period_yr",
-            "log_q_minus_half",
-        )
-        return build_comp, prior_comp, names, phi0
-
     if canonical_name == "correlated_field":
-
-        def build_cf(phi: jax.Array) -> SpectralKernel:
-            return CorrelatedFieldSpectrum(
-                sigma=jnp.exp(phi[0]),
-                slope=phi[1],
-                log_deviations=phi[2:],
-                flexibility=0.5,
-                zero_mode=zero_mode,
-            )
-
-        def prior_cf(phi: jax.Array) -> jax.Array:
-            lp_head = _normal_logpdf(phi[0], log_sig_mu, log_sig_sd) + _normal_logpdf(
-                phi[1], -2.0, 1.5
-            )
-            lp_xi = jnp.sum(_normal_logpdf(phi[2:], 0.0, 1.0))
-            return lp_head + lp_xi
-
-        phi0 = jnp.concatenate(
-            [
-                jnp.array([math.log(0.25), -2.0], dtype=jnp.float64),
-                jnp.zeros((n_corr_modes,), dtype=jnp.float64),
-            ]
+        return CorrelatedFieldSpectrum(
+            sigma=0.25,
+            slope=-2.0,
+            log_deviations=jnp.zeros((n_corr_modes,), dtype=jnp.float64),
+            flexibility=0.5,
+            zero_mode=zero_mode,
         )
-        names = ("log_sigma", "slope") + tuple(
-            f"xi_spec_{m + 1}" for m in range(n_corr_modes)
-        )
-        return build_cf, prior_cf, names, phi0
-
     raise ValueError(
         f"Unknown kernel identifier {canonical_name!r}; expected one of "
         f"{sorted(_KERNEL_NAME_ALIASES)}."
     )
 
-
-def _custom_kernel_builders(
-    kernel_obj: SpectralKernel,
-    ell_mid: float,
-) -> tuple[Any, Any, tuple[str, ...], jax.Array]:
-    """Construct hyperparameter builders recursively for any :class:`SpectralKernel`."""
-    if isinstance(kernel_obj, MaternSpectrum):
-        if kernel_obj.learn_order:
-            b_fn, p_fn, nms, _ = _kernel_spec_builders(
-                "continuous_matern", ell_mid, zero_mode=kernel_obj.zero_mode
+def _kernel_builders_from_spec(
+    spec_item: str | SpectralKernel,
+    *,
+    zero_mode: bool,
+    hyperprior_override: Callable[[jax.Array], jax.Array] | None = None,
+) -> tuple[
+    Callable[[jax.Array], SpectralKernel],
+    Callable[[jax.Array], jax.Array],
+    tuple[str, ...],
+    jax.Array,
+    str,
+]:
+    """Return ``(build_fn, prior_fn, param_names, phi0, cache_tag)`` via :class:`SpectralKernel`."""
+    if isinstance(spec_item, str):
+        k_clean = spec_item.strip().lower()
+        if k_clean not in _KERNEL_NAME_ALIASES:
+            raise ValueError(
+                f"Unknown kernel name {spec_item!r}; expected one of {sorted(_KERNEL_NAME_ALIASES)}."
             )
-            phi0_cm = jnp.array(
-                [
-                    math.log(max(float(kernel_obj.sigma), 1e-3)),
-                    math.log(max(float(kernel_obj.length_yr), 1e-2)),
-                    math.log(max(float(kernel_obj.order) - 0.5, 1e-2)),
-                ],
-                dtype=jnp.float64,
-            )
-            return b_fn, p_fn, nms, phi0_cm
-        ord_f = float(kernel_obj.order)
-
-        def build_custom_m(phi: jax.Array) -> SpectralKernel:
-            return MaternSpectrum(
-                sigma=jnp.exp(phi[0]),
-                length_yr=jnp.exp(phi[1]),
-                order=ord_f,
-                learn_order=False,
-                zero_mode=kernel_obj.zero_mode,
-            )
-
-        def prior_custom_m(phi: jax.Array) -> jax.Array:
-            return _normal_logpdf(phi[0], math.log(0.25), 1.5) + _normal_logpdf(
-                phi[1], math.log(ell_mid), 1.5
-            )
-
-        phi0 = jnp.array(
-            [
-                math.log(max(float(kernel_obj.sigma), 1e-3)),
-                math.log(max(float(kernel_obj.length_yr), 1e-2)),
-            ],
-            dtype=jnp.float64,
+        canon = _KERNEL_NAME_ALIASES[k_clean]
+        proto = _prototype_kernel_from_name(canon, zero_mode=zero_mode)
+        cache_tag = f"canon:{canon}:zm={zero_mode}"
+    elif isinstance(spec_item, SpectralKernel):
+        proto = spec_item
+        cache_tag = _custom_kernel_cache_tag(proto)
+    else:
+        raise TypeError(
+            f"kernel must be a str or SpectralKernel, got {type(spec_item)!r}."
         )
-        return build_custom_m, prior_custom_m, ("log_sigma", "log_length_yr"), phi0
 
-    if isinstance(kernel_obj, SquaredExpSpectrum):
-        b_se, p_se, nms_se, _ = _kernel_spec_builders(
-            "squared_exp", ell_mid, zero_mode=kernel_obj.zero_mode
-        )
-        phi0_se = jnp.array(
-            [
-                math.log(max(float(kernel_obj.sigma), 1e-3)),
-                math.log(max(float(kernel_obj.length_yr), 1e-2)),
-            ],
-            dtype=jnp.float64,
-        )
-        return b_se, p_se, nms_se, phi0_se
+    def build_fn(phi: jax.Array) -> SpectralKernel:
+        return proto.from_unconstrained_hyperparams(phi)
 
-    if isinstance(kernel_obj, QuasiPeriodicSpectrum):
-        b_qp, p_qp, nms_qp, _ = _kernel_spec_builders(
-            "sho_solar", ell_mid, zero_mode=kernel_obj.zero_mode
-        )
-        phi0_qp = jnp.array(
-            [
-                math.log(max(float(kernel_obj.sigma), 1e-3)),
-                math.log(max(float(kernel_obj.period_yr), 1e-2)),
-                math.log(max(float(kernel_obj.quality) - 0.5, 1e-2)),
-            ],
-            dtype=jnp.float64,
-        )
-        return b_qp, p_qp, nms_qp, phi0_qp
+    if hyperprior_override is not None:
+        prior_fn = hyperprior_override
+        cache_tag = f"{cache_tag}:hp={id(hyperprior_override)}"
+    else:
 
-    if isinstance(kernel_obj, CorrelatedFieldSpectrum):
-        n_m = int(kernel_obj.log_deviations.shape[0])
-        flex_f = float(kernel_obj.flexibility)
-        zm_cf = kernel_obj.zero_mode
+        def prior_fn(phi: jax.Array) -> jax.Array:
+            return proto.hyperprior_log_prob(phi)
 
-        def build_custom_cf(phi: jax.Array) -> SpectralKernel:
-            return CorrelatedFieldSpectrum(
-                sigma=jnp.exp(phi[0]),
-                slope=phi[1],
-                log_deviations=phi[2:],
-                flexibility=flex_f,
-                zero_mode=zm_cf,
-            )
-
-        _, p_cf, nms_cf, _ = _kernel_spec_builders(
-            "correlated_field", ell_mid, zero_mode=zm_cf, n_corr_modes=n_m
-        )
-        phi0_cf = jnp.concatenate(
-            [
-                jnp.array(
-                    [
-                        math.log(max(float(kernel_obj.sigma), 1e-3)),
-                        float(kernel_obj.slope),
-                    ],
-                    dtype=jnp.float64,
-                ),
-                jnp.asarray(kernel_obj.log_deviations, dtype=jnp.float64),
-            ],
-            axis=0,
-        )
-        return build_custom_cf, p_cf, nms_cf, phi0_cf
-
-    if isinstance(kernel_obj, SumSpectrum):
-        sub_specs = [_custom_kernel_builders(part, ell_mid) for part in kernel_obj.parts]
-        sub_builds = tuple(s[0] for s in sub_specs)
-        sub_priors = tuple(s[1] for s in sub_specs)
-        offsets: list[tuple[int, int]] = []
-        cursor = 0
-        for s in sub_specs:
-            sz = int(s[3].shape[0])
-            offsets.append((cursor, cursor + sz))
-            cursor += sz
-        bounds = tuple(offsets)
-
-        def build_sum(phi: jax.Array) -> SpectralKernel:
-            return SumSpectrum(
-                tuple(b_fn(phi[lo:hi]) for b_fn, (lo, hi) in zip(sub_builds, bounds))
-            )
-
-        def prior_sum(phi: jax.Array) -> jax.Array:
-            acc = jnp.asarray(0.0, dtype=jnp.float64)
-            for p_fn, (lo, hi) in zip(sub_priors, bounds):
-                acc = acc + p_fn(phi[lo:hi])
-            return acc
-
-        names_sum = tuple(
-            f"p{idx + 1}_{nm}"
-            for idx, s in enumerate(sub_specs)
-            for nm in s[2]
-        )
-        phi0_sum = jnp.concatenate([s[3] for s in sub_specs], axis=0)
-        return build_sum, prior_sum, names_sum, phi0_sum
-
-    raise TypeError(
-        f"Automatic hyperparameter parameterization is not registered for {type(kernel_obj)!r}."
+    return (
+        build_fn,
+        prior_fn,
+        proto.param_names(),
+        proto.unconstrain_hyperparams(),
+        cache_tag,
     )
 
 
@@ -3042,7 +3487,10 @@ def _summarize_hyperparams(kernel: SpectralKernel) -> dict[str, float]:
             for k, v in _summarize_hyperparams(p).items():
                 merged[f"p{idx + 1}_{k}"] = v
         return merged
-    return {}
+    return {
+        nm: float(val)
+        for nm, val in zip(kernel.param_names(), kernel.unconstrain_hyperparams())
+    }
 
 
 def _preoptimize_extra_production(
@@ -3200,15 +3648,16 @@ def _get_cached_gram_grad_fn(
     n_g: int,
     dt: float,
     has_spike_amp: bool,
-) -> Any:
-    """Return a module-cached ``@jax.jit`` ``value_and_grad`` function for ``cache_key``."""
+) -> tuple[Any, Any]:
+    """Return module-cached ``@jax.jit`` ``(value_and_grad_fn, hess_fn)`` for ``cache_key``."""
     cached = _SPEC_JIT_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     def _loss_u(
         u_vec: jax.Array,
-        log_fl0_arr: jax.Array,
+        sp_prior_mu: jax.Array,
+        sp_prior_sd: jax.Array,
         gram_dct: jax.Array,
         wt_x_base: jax.Array,
         x_base_sq: jax.Array,
@@ -3218,12 +3667,12 @@ def _get_cached_gram_grad_fn(
         log_norm_d: jax.Array,
         half_logdet_nuis: jax.Array,
     ) -> jax.Array:
-        u_c = jnp.clip(u_vec, -12.0, 12.0)
-        phi_cur = u_c[:n_k]
-        amp = _safe_sqrt(build_kernel_fn(phi_cur).spectrum(n_g, dt))
+        u_like = jnp.clip(u_vec, -20.0, 20.0)
+        phi_like = u_like[:n_k]
+        amp = _safe_sqrt(build_kernel_fn(phi_like).spectrum(n_g, dt))
         if has_spike_amp:
-            fl = jnp.exp(u_c[n_k])
-            lp_sp = _normal_logpdf(u_c[n_k], log_fl0_arr, 1.5)
+            fl = _safe_exp_hyper(u_like[n_k])
+            lp_sp = _normal_logpdf(u_vec[n_k], sp_prior_mu, sp_prior_sd)
         else:
             fl = jnp.asarray(0.0, dtype=jnp.float64)
             lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
@@ -3239,17 +3688,40 @@ def _get_cached_gram_grad_fn(
             log_norm_d,
             half_logdet_nuis,
         )
-        return nll - (prior_fn(phi_cur) + lp_sp)
+        return nll - (prior_fn(u_vec[:n_k]) + lp_sp)
 
-    fn = jax.jit(jax.value_and_grad(_loss_u, argnums=0))
-    _SPEC_JIT_CACHE[cache_key] = fn
-    return fn
+    pair = (
+        jax.jit(jax.value_and_grad(_loss_u, argnums=0)),
+        jax.jit(jax.hessian(_loss_u, argnums=0)),
+    )
+    _SPEC_JIT_CACHE[cache_key] = pair
+    return pair
+
+
+def _update_extra_spike_fluence(
+    updated_extra: ProductionTerm | None,
+    fl_opt: jax.Array,
+) -> ProductionTerm | None:
+    if updated_extra is None:
+        return None
+    if isinstance(updated_extra, MiyakeSpike):
+        return eqx.tree_at(lambda s: s.fluence, updated_extra, fl_opt)
+    if isinstance(updated_extra, ProductionSum):
+        new_parts = {
+            n: (
+                eqx.tree_at(lambda s: s.fluence, p, fl_opt)
+                if isinstance(p, MiyakeSpike)
+                else p
+            )
+            for n, p in zip(updated_extra.names, updated_extra.parts)
+        }
+        return ProductionSum(new_parts)
+    return updated_extra
 
 
 def _optimize_single_kernel_precomputed(
     label: str,
     cache_tag: str,
-    ell_mid: float,
     build_kernel_fn: Any,
     prior_fn: Any,
     phi0: jax.Array,
@@ -3258,6 +3730,7 @@ def _optimize_single_kernel_precomputed(
     op: DCTResponseOperator,
     x_eff_base: jax.Array,
     w_dct_eff: jax.Array,
+    w_grid_eff: jax.Array,
     unit_spike_eff: jax.Array | None,
     fixed_exc: jax.Array,
     unit_sp_raw: jax.Array | None,
@@ -3266,6 +3739,7 @@ def _optimize_single_kernel_precomputed(
     root_nuis: jax.Array,
     u_nuis: jax.Array,
     spike_fluence_init: float,
+    spike_log_fluence_prior: tuple[float, float],
     updated_extra: ProductionTerm | None,
     log_norm_d: jax.Array,
     half_logdet_nuis: jax.Array,
@@ -3274,15 +3748,18 @@ def _optimize_single_kernel_precomputed(
     multi_start: int,
     q_std: float,
     rng_key: jax.Array,
+    prehistory_root_y0: jax.Array | None = None,
+    prehistory_kernel: Any | None = None,
 ) -> OptimizedKernelResult:
-    """Optimize ``phi`` via multi-start BFGS using a module-cached JIT Gram kernel."""
+    """Optimize ``phi`` (and optional spike log-fluence) via multi-start BFGS."""
     n_k = int(phi0.shape[0])
-    has_spike_amp = unit_spike_eff is not None and field_kind == "gaussian"
+    has_spike_amp = unit_spike_eff is not None
+    sp_prior_mu = jnp.asarray(float(spike_log_fluence_prior[0]), dtype=jnp.float64)
+    sp_prior_sd = jnp.asarray(float(spike_log_fluence_prior[1]), dtype=jnp.float64)
     if has_spike_amp:
         log_fl0 = math.log(max(spike_fluence_init, 1e-3))
         u0 = jnp.concatenate([phi0, jnp.array([log_fl0], dtype=jnp.float64)], axis=0)
     else:
-        log_fl0 = 0.0
         u0 = phi0
 
     d_u = int(u0.shape[0])
@@ -3291,8 +3768,6 @@ def _optimize_single_kernel_precomputed(
         starts = u0[None, :]
     else:
         pert = 0.45 * jax.random.normal(rng_key, (n_starts - 1, d_u), dtype=jnp.float64)
-        if has_spike_amp:
-            pert = pert.at[:, -1].multiply(0.2)
         starts = jnp.concatenate([u0[None, :], u0[None, :] + pert], axis=0)
 
     if field_kind == "gaussian":
@@ -3310,23 +3785,22 @@ def _optimize_single_kernel_precomputed(
             x_dot_sp = jnp.asarray(0.0, dtype=jnp.float64)
             sp_sq = jnp.asarray(0.0, dtype=jnp.float64)
 
-        log_fl0_arr = jnp.asarray(log_fl0, dtype=jnp.float64)
         cache_key = (
             cache_tag,
             n_g,
             round(float(op.dt), 11),
-            round(float(ell_mid), 11),
             bool(has_spike_amp),
             n_k,
         )
-        jit_vg = _get_cached_gram_grad_fn(
+        jit_vg, jit_hess = _get_cached_gram_grad_fn(
             cache_key, build_kernel_fn, prior_fn, n_k, n_g, op.dt, has_spike_amp
         )
 
         def _obj_and_grad_np(u_np: np.ndarray) -> tuple[float, np.ndarray]:
             val_j, g_u = jit_vg(
                 jnp.asarray(u_np, dtype=jnp.float64),
-                log_fl0_arr,
+                sp_prior_mu,
+                sp_prior_sd,
                 gram_dct,
                 wt_x_base,
                 x_base_sq,
@@ -3351,46 +3825,55 @@ def _optimize_single_kernel_precomputed(
                 np.asarray(starts[s_idx], dtype=np.float64),
                 method="BFGS",
                 jac=True,
-                options={"gtol": 1e-6, "maxiter": 80},
+                options={"gtol": 1e-6, "maxiter": 200},
             )
+            if not res_s.success and int(getattr(res_s, "nit", 200)) < 200:
+                res_l = _scipy_minimize(
+                    _obj_and_grad_np,
+                    np.asarray(res_s.x, dtype=np.float64),
+                    method="L-BFGS-B",
+                    jac=True,
+                    options={"ftol": 1e-13, "gtol": 1e-6, "maxiter": 200},
+                )
+                if math.isfinite(float(res_l.fun)) and float(res_l.fun) <= float(res_s.fun) + 1e-12:
+                    res_s = res_l
             val_s = float(res_s.fun)
-            if math.isfinite(val_s) and val_s < best_val:
+            conv_s = bool(res_s.success)
+            if math.isfinite(val_s) and (
+                (conv_s and not converged)
+                or (conv_s == converged and val_s < best_val)
+            ):
                 best_val = val_s
                 best_u_np = np.asarray(res_s.x, dtype=np.float64)
-                converged = bool(res_s.success) or float(np.linalg.norm(res_s.jac)) < 1e-4
+                converged = conv_s
 
         u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
-        hess_all = _finite_diff_hessian_from_grad(
-            lambda u_in: _obj_and_grad_np(u_in)[1], best_u_np
+        hess_all = jit_hess(
+            u_opt,
+            sp_prior_mu,
+            sp_prior_sd,
+            gram_dct,
+            wt_x_base,
+            x_base_sq,
+            wt_sp,
+            x_dot_sp,
+            sp_sq,
+            log_norm_d,
+            half_logdet_nuis,
         )
         phi_opt = u_opt[:n_k]
         kern_opt = build_kernel_fn(phi_opt)
 
-        # Update spike fluence if jointly profiled
-        final_extra = updated_extra
-        if has_spike_amp and updated_extra is not None:
-            fl_opt = jnp.exp(u_opt[n_k])
-            if isinstance(updated_extra, MiyakeSpike):
-                final_extra = eqx.tree_at(lambda s: s.fluence, updated_extra, fl_opt)
-            elif isinstance(updated_extra, ProductionSum):
-                new_parts = {
-                    n: (eqx.tree_at(lambda s: s.fluence, p, fl_opt) if isinstance(p, MiyakeSpike) else p)
-                    for n, p in zip(updated_extra.names, updated_extra.parts)
-                }
-                final_extra = ProductionSum(new_parts)
+        if has_spike_amp:
+            fl_opt = _safe_exp_hyper(u_opt[n_k])
+            final_extra = _update_extra_spike_fluence(updated_extra, fl_opt)
             assert unit_spike_eff is not None and unit_sp_raw is not None
             x_eff_final = x_eff_base - fl_opt * unit_spike_eff
             extra_exc_final = fixed_exc + fl_opt * unit_sp_raw
         else:
+            final_extra = updated_extra
             x_eff_final = x_eff_base
             extra_exc_final = fixed_exc
-
-        hess_phi = hess_all[:n_k, :n_k]
-        if has_spike_amp:
-            # Schur-complement curvature wrt phi marginalizing spike log-fluence
-            h_ss = jnp.maximum(hess_all[n_k, n_k], 1e-4)
-            h_ps = hess_all[:n_k, n_k]
-            hess_phi = hess_phi - jnp.outer(h_ps, h_ps) / h_ss
 
         # Fast closed-form Wiener reconstruction without re-running ODE solves
         spec_opt = kern_opt.spectrum(op.n_grid, op.dt)
@@ -3418,10 +3901,14 @@ def _optimize_single_kernel_precomputed(
             w_std, _ = _linear_posterior_std(resid_nuis, u_nuis)
             w_nuis = mu_nuis + root_nuis @ w_std
             if offset_mode == "hierarchical":
-                n_off = 1 + (ds.n_series if ds.n_series > 1 else 0)
+                n_off = 1 + (ds.n_series if ds.n_series > 0 else 0)
                 w_off = w_nuis[:n_off]
                 g_off = w_off[0]
-                l_off = w_off[1:] if ds.n_series > 1 else jnp.zeros((1,), dtype=jnp.float64)
+                l_off = (
+                    w_off[1:]
+                    if ds.n_series > 0
+                    else jnp.zeros((0,), dtype=jnp.float64)
+                )
                 base_d14c = x_nuis[:, :n_off] @ w_off
             else:
                 g_off = jnp.asarray(0.0, dtype=jnp.float64)
@@ -3442,7 +3929,6 @@ def _optimize_single_kernel_precomputed(
             - half_logdet_field
         )
         gamma_val = jnp.sum(jnp.square(s_vals) / (1.0 + jnp.square(s_vals)))
-        lp_val = prior_fn(phi_opt)
         fit_res = IFTFieldFitResult(
             model=fitted_model,
             latent=z_hat,
@@ -3463,112 +3949,191 @@ def _optimize_single_kernel_precomputed(
             lab_offset_prior_sd=1.5,
             converged=converged,
             n_steps=1,
+            prehistory_root_y0=prehistory_root_y0,
+            prehistory_kernel=prehistory_kernel,
         )
     else:
-        # Nonlinear LogGaussianField: alternating inner LM on z and outer BFGS on phi
-        best_neg_j = float("inf")
-        phi_opt = phi0
-        fit_best: IFTFieldFitResult | None = None
-        for s_idx in range(min(n_starts, 2)):
-            phi_cur = starts[s_idx, :n_k]
-            z_cur = jnp.zeros((op.n_grid,), dtype=jnp.float64)
-            for _ in range(3):
-                k_cur = build_kernel_fn(phi_cur)
-                lgf = LogGaussianField(
-                    z_cur, op.t_start, op.t_end, kernel=k_cur, q_mean=q_std, zero_mode=True
-                )
-                prod_c = lgf if updated_extra is None else (updated_extra + lgf)
-                f_c = fit_ift_field(
-                    RadiocarbonModel(cbm, prod_c, ExactLinearSolver(), q_std=q_std),
-                    ds,
-                    offset_mode=offset_mode,
-                    operator=op,
-                    max_steps=30,
-                )
-                z_cur = f_c.latent
+        n_g = op.n_grid
+        eye_g = jnp.eye(n_g, dtype=jnp.float64)
 
-                # Outer BFGS step on phi using local Gauss-Newton linearization around z_cur
-                q_c = lgf.with_latent(z_cur).evaluate_q_grid()
-                inv_sig = 1.0 / ds.sigma_flat
-                solver_tmp = ExactLinearSolver()
-                _, _, ext_tmp = _extract_field_and_extras(f_c.model.production)
-                ext_exc = _eval_extra_terms_d14c(
-                    cbm,
-                    solver_tmp,
-                    ds,
-                    ext_tmp,
-                    q_std,
-                    ALPHA_ATOMS_CM2_S_TO_KG_YR,
-                    op.steady_unit_response,
-                )
-                x_nuis_t, mu_nuis_t, _, u_nuis_t = _build_offset_whitening(
-                    ds,
-                    op.box_activity_ratios,
-                    offset_mode=offset_mode,
-                    global_offset_prior_sd=200.0,
-                    lab_offset_prior_sd=1.5,
-                )
-                nuis_s = x_nuis_t @ mu_nuis_t if x_nuis_t.shape[1] else 0.0
-                f_exc_c = op.w_grid @ (q_c - q_std)
-                r_raw_c = inv_sig * (ds.d14c_flat - op.ss_d14c - ext_exc - f_exc_c - nuis_s)
-                w_local_dct = dct2((inv_sig[:, None] * op.w_grid) * q_c[None, :], axis=1)
-                r_eff_c, w_loc_eff, h_ld_nuis = _whiten_vec_and_mat_qr(
-                    r_raw_c, w_local_dct, u_nuis_t
-                )
+        def _amp_and_target(u_vec: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+            u_like = jnp.clip(u_vec, -20.0, 20.0)
+            amp = _safe_sqrt(build_kernel_fn(u_like[:n_k]).spectrum(n_g, op.dt))
+            if has_spike_amp:
+                assert unit_spike_eff is not None
+                fl = _safe_exp_hyper(u_like[n_k])
+                x_t = x_eff_base - fl * unit_spike_eff
+                lp_s = _normal_logpdf(u_vec[n_k], sp_prior_mu, sp_prior_sd)
+            else:
+                x_t = x_eff_base
+                lp_s = jnp.asarray(0.0, dtype=jnp.float64)
+            return amp, x_t, prior_fn(u_vec[:n_k]) + lp_s
 
-                def _surrogate_neg(p_in: jax.Array) -> jax.Array:
-                    sp_in = build_kernel_fn(p_in).spectrum(op.n_grid, op.dt)
-                    j_loc = w_loc_eff * _safe_sqrt(sp_in)[None, :]
-                    x_loc = r_eff_c + j_loc @ z_cur
-                    lz, _ = _exact_linear_evidence_core(
-                        x_loc, j_loc, log_norm_d, h_ld_nuis
-                    )
-                    return -(lz + prior_fn(p_in))
+        def _ham_z(z_in: jax.Array, amp: jax.Array, x_t: jax.Array) -> jax.Array:
+            q = q_std * jnp.exp(jnp.clip(idct2(amp * z_in), -30.0, 30.0))
+            r_e = w_grid_eff @ (q - q_std) - x_t
+            return 0.5 * (r_e @ r_e) + 0.5 * (z_in @ z_in)
 
-                sol_p = optx.minimise(
-                    lambda p, _: _surrogate_neg(p),
-                    optx.BFGS(rtol=1e-5, atol=1e-5),
-                    phi_cur,
-                    max_steps=40,
-                    throw=False,
-                )
-                phi_cur = sol_p.value
+        @jax.jit
+        def _solve_inner_z(u_vec: jax.Array, z_init: jax.Array) -> jax.Array:
+            amp, x_t, _ = _amp_and_target(u_vec)
 
-            k_fin = build_kernel_fn(phi_cur)
-            lgf_fin = LogGaussianField(
-                z_cur, op.t_start, op.t_end, kernel=k_fin, q_mean=q_std, zero_mode=True
+            def _res_z(z_in: jax.Array, _: Any) -> jax.Array:
+                q = q_std * jnp.exp(jnp.clip(idct2(amp * z_in), -30.0, 30.0))
+                return jnp.concatenate([w_grid_eff @ (q - q_std) - x_t, z_in], axis=0)
+
+            sol_z = optx.least_squares(
+                _res_z,
+                optx.LevenbergMarquardt(rtol=1e-10, atol=1e-10),
+                z_init,
+                max_steps=60,
+                throw=False,
             )
-            prod_fin = lgf_fin if updated_extra is None else (updated_extra + lgf_fin)
-            f_fin = fit_ift_field(
-                RadiocarbonModel(cbm, prod_fin, ExactLinearSolver(), q_std=q_std),
-                ds,
-                offset_mode=offset_mode,
-                operator=op,
-                max_steps=35,
-            )
-            neg_j = float(-(f_fin.log_evidence + prior_fn(phi_cur)))
-            if neg_j < best_neg_j:
-                best_neg_j = neg_j
-                phi_opt = phi_cur
-                fit_best = f_fin
-                hess_phi = jax.hessian(_surrogate_neg)(phi_cur)
+            z_c = sol_z.value
+            for _ in range(2):
+                g_z = jax.grad(_ham_z, argnums=0)(z_c, amp, x_t)
+                k_zz = 0.5 * (
+                    jax.hessian(_ham_z, argnums=0)(z_c, amp, x_t)
+                    + jax.hessian(_ham_z, argnums=0)(z_c, amp, x_t).T
+                )
+                min_ev = jnp.min(jnp.linalg.eigvalsh(k_zz))
+                damp = jnp.where(min_ev > 1e-8, 0.0, 1e-6 - min_ev)
+                z_step = z_c - jnp.linalg.solve(k_zz + damp * eye_g, g_z)
+                z_c = jnp.where(
+                    _ham_z(z_step, amp, x_t) <= _ham_z(z_c, amp, x_t) + 1e-12,
+                    z_step,
+                    z_c,
+                )
+            return z_c
 
-        assert fit_best is not None
-        fit_res = fit_best
+        def _implicit_laplace_loss(u_vec: jax.Array, z_anchor: jax.Array) -> jax.Array:
+            amp, x_t, lp_tot = _amp_and_target(u_vec)
+            z_c = z_anchor
+            for _ in range(2):
+                g_z = jax.grad(_ham_z, argnums=0)(z_c, amp, x_t)
+                k_zz = jax.hessian(_ham_z, argnums=0)(z_c, amp, x_t)
+                k_zz = 0.5 * (k_zz + k_zz.T)
+                z_c = z_c - jnp.linalg.solve(k_zz, g_z)
+            q = q_std * jnp.exp(jnp.clip(idct2(amp * z_c), -30.0, 30.0))
+            r_e = w_grid_eff @ (q - q_std) - x_t
+            j_e = dct2(w_grid_eff * q[None, :], axis=1) * amp[None, :]
+            chol = jnp.linalg.cholesky(eye_g + j_e.T @ j_e)
+            half_ld = jnp.sum(jnp.log(jnp.diag(chol)))
+            ln_z_lap = (
+                -0.5 * (r_e @ r_e)
+                - 0.5 * (z_c @ z_c)
+                - log_norm_d
+                - half_logdet_nuis
+                - half_ld
+            )
+            return -(ln_z_lap + lp_tot)
+
+        vg_lg = jax.jit(jax.value_and_grad(_implicit_laplace_loss, argnums=0))
+        hess_lg = jax.jit(jax.hessian(_implicit_laplace_loss, argnums=0))
+        z_warm_box = [jnp.zeros((n_g,), dtype=jnp.float64)]
+
+        def _lg_obj_and_grad_np(u_np: np.ndarray) -> tuple[float, np.ndarray]:
+            u_j = jnp.asarray(u_np, dtype=jnp.float64)
+            z_st = _solve_inner_z(u_j, z_warm_box[0])
+            if bool(jnp.all(jnp.isfinite(z_st))):
+                z_warm_box[0] = z_st
+            val_j, g_j = vg_lg(u_j, z_st)
+            v_f = float(val_j)
+            g_arr = np.asarray(g_j, dtype=np.float64)
+            if not (math.isfinite(v_f) and np.all(np.isfinite(g_arr))):
+                return 1e30, np.zeros_like(u_np)
+            return v_f, g_arr
+
+        best_val = float("inf")
+        best_u_np = np.asarray(starts[0], dtype=np.float64)
+        converged = False
+        for s_idx in range(n_starts):
+            z_warm_box[0] = jnp.zeros((n_g,), dtype=jnp.float64)
+            res_s = _scipy_minimize(
+                _lg_obj_and_grad_np,
+                np.asarray(starts[s_idx], dtype=np.float64),
+                method="BFGS",
+                jac=True,
+                options={"gtol": 1e-5, "maxiter": 120},
+            )
+            if not res_s.success and int(getattr(res_s, "nit", 120)) < 120:
+                res_l = _scipy_minimize(
+                    _lg_obj_and_grad_np,
+                    np.asarray(res_s.x, dtype=np.float64),
+                    method="L-BFGS-B",
+                    jac=True,
+                    options={"ftol": 1e-12, "gtol": 1e-5, "maxiter": 120},
+                )
+                if math.isfinite(float(res_l.fun)) and float(res_l.fun) <= float(res_s.fun) + 1e-11:
+                    res_s = res_l
+            val_s = float(res_s.fun)
+            conv_s = bool(res_s.success)
+            if math.isfinite(val_s) and (
+                (conv_s and not converged)
+                or (conv_s == converged and val_s < best_val)
+            ):
+                best_val = val_s
+                best_u_np = np.asarray(res_s.x, dtype=np.float64)
+                converged = conv_s
+
+        u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
+        phi_opt = u_opt[:n_k]
         kern_opt = build_kernel_fn(phi_opt)
+        z_star_opt = _solve_inner_z(u_opt, jnp.zeros((n_g,), dtype=jnp.float64))
+        hess_all = hess_lg(u_opt, z_star_opt)
+        final_extra = (
+            _update_extra_spike_fluence(updated_extra, _safe_exp_hyper(u_opt[n_k]))
+            if has_spike_amp
+            else updated_extra
+        )
+        lgf_fin = LogGaussianField(
+            z_star_opt,
+            op.t_start,
+            op.t_end,
+            kernel=kern_opt,
+            q_mean=q_std,
+            zero_mode=True,
+        )
+        prod_fin = lgf_fin if final_extra is None else (final_extra + lgf_fin)
+        fit_res = fit_ift_field(
+            RadiocarbonModel(cbm, prod_fin, ExactLinearSolver(), q_std=q_std),
+            ds,
+            offset_mode=offset_mode,
+            operator=op,
+            max_steps=60,
+            tol=1e-10,
+            prehistory_kernel=prehistory_kernel,
+            prehistory_root_y0=prehistory_root_y0,
+        )
         ln_z_val = fit_res.log_evidence
-        lp_val = prior_fn(phi_opt)
         gamma_val = fit_res.gamma
-        converged = fit_res.converged
+        converged = bool(converged and fit_res.converged)
 
-    h_sym = 0.5 * (hess_phi + hess_phi.T)
-    evals = jnp.linalg.eigvalsh(h_sym)
-    safe_evals = jnp.maximum(evals, 1e-4)
-    half_logdet_h = 0.5 * jnp.sum(jnp.log(safe_evals))
+    hess_all_sym = 0.5 * (hess_all + hess_all.T)
+    if has_spike_amp:
+        h_pp = hess_all_sym[:n_k, :n_k]
+        h_ps = hess_all_sym[:n_k, n_k]
+        h_ss = hess_all_sym[n_k, n_k]
+        schur = h_pp - jnp.outer(h_ps, h_ps) / jnp.where(h_ss > 0.0, h_ss, 1.0)
+        h_sym = jnp.where(h_ss > 0.0, 0.5 * (schur + schur.T), h_pp)
+        lp_sp_opt = _normal_logpdf(u_opt[n_k], sp_prior_mu, sp_prior_sd)
+    else:
+        h_sym = hess_all_sym
+        lp_sp_opt = jnp.asarray(0.0, dtype=jnp.float64)
+
+    lp_val = prior_fn(phi_opt) + lp_sp_opt
     ln_joint = ln_z_val + lp_val
-    ln_hyper = ln_joint + 0.5 * n_k * math.log(2.0 * math.pi) - half_logdet_h
-    aic_val = -2.0 * ln_z_val + 2.0 * n_k
-    bic_val = -2.0 * ln_z_val + float(n_k) * math.log(max(ds.n_obs, 1))
+    evals_all = jnp.linalg.eigvalsh(hess_all_sym)
+    hess_is_pd = bool(jnp.all(jnp.isfinite(evals_all)) and jnp.all(evals_all > 0.0))
+    if converged and hess_is_pd and bool(jnp.isfinite(ln_joint)):
+        _, logdet_h_all = jnp.linalg.slogdet(hess_all_sym)
+        ln_hyper = ln_joint + 0.5 * d_u * math.log(2.0 * math.pi) - 0.5 * logdet_h_all
+    else:
+        converged = False
+        ln_hyper = jnp.asarray(-jnp.inf, dtype=jnp.float64)
+
+    aic_val = -2.0 * ln_z_val + 2.0 * d_u
+    bic_val = -2.0 * ln_z_val + float(d_u) * math.log(max(ds.n_obs, 1))
 
     return OptimizedKernelResult(
         name=label,
@@ -3596,6 +4161,9 @@ def optimize_gp_kernel(
     *,
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
+    hyperprior: Callable[[jax.Array], jax.Array] | None = None,
+    spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
+    prehistory_kernel: Any | None = None,
     multi_start: int = 3,
     n_grid: int = 128,
     pad_years: float = 15.0,
@@ -3605,12 +4173,8 @@ def optimize_gp_kernel(
 ) -> OptimizedKernelResult:
     r"""Optimize GP spectral hyperparameters via empirical Bayes (MAP-II + Laplace Occam).
 
-    Maximizes ``ln Z(d | phi) + ln p(phi)`` using a precomputed :class:`DCTResponseOperator`:
-    for linear ``field_kind="gaussian"``, runs multi-start ``scipy.optimize.minimize(...,
-    method="BFGS", jac=True)`` over a module-cached ``@jax.jit`` analytical
-    ``jax.value_and_grad`` Gram kernel; for nonlinear ``field_kind="log_gaussian"``,
-    alternates inner Levenberg–Marquardt MAP solves over ``z`` with outer
-    ``optimistix.BFGS`` steps over ``phi``. Returns the Laplace hyper-evidence
+    Maximizes ``ln Z(d | phi) + ln p(phi)`` using a precomputed :class:`DCTResponseOperator`
+    and dataset-independent :class:`SpectralKernel` hyperpriors (overridable via ``hyperprior``).
 
     .. math::
 
@@ -3619,29 +4183,17 @@ def optimize_gp_kernel(
     """
     ds = _as_dataset(dataset)
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
-    span_lo, span_hi = ds.time_span
-    ell_mid = float(np.clip(0.15 * max(span_hi - span_lo, 5.0), 1.5, 25.0))
     zm = field_kind == "log_gaussian"
-
-    if isinstance(kernel, str):
-        key_clean = kernel.strip().lower()
-        if key_clean not in _KERNEL_NAME_ALIASES:
-            raise ValueError(
-                f"Unknown kernel name {kernel!r}; expected one of {sorted(_KERNEL_NAME_ALIASES)}."
-            )
-        canon = _KERNEL_NAME_ALIASES[key_clean]
-        build_fn, prior_fn, _, phi0 = _kernel_spec_builders(canon, ell_mid, zero_mode=zm)
-        cache_tag = f"canon:{canon}:zm={zm}"
-        label = kernel
-    elif isinstance(kernel, SpectralKernel):
-        build_fn, prior_fn, _, phi0 = _custom_kernel_builders(kernel, ell_mid)
-        cache_tag = _custom_kernel_cache_tag(kernel)
-        label = type(kernel).__name__
-    else:
-        raise TypeError(f"kernel must be a str or SpectralKernel, got {type(kernel)!r}.")
+    build_fn, prior_fn, _, phi0, cache_tag = _kernel_builders_from_spec(
+        kernel, zero_mode=zm, hyperprior_override=hyperprior
+    )
+    label = kernel if isinstance(kernel, str) else type(kernel).__name__
 
     op = build_dct_response_operator(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
+    )
+    root_y0 = _resolve_prehistory_root_y0(
+        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
     if extra_production is not None:
         upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
@@ -3659,30 +4211,39 @@ def optimize_gp_kernel(
         offset_mode=offset_mode,
         global_offset_prior_sd=200.0,
         lab_offset_prior_sd=1.5,
+        prehistory_root_y0=root_y0,
+        init_state_basis=op.init_state_basis,
     )
     inv_sig = 1.0 / ds.sigma_flat
     log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
     nuis_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
     x_raw_base = inv_sig * (ds.d14c_flat - op.ss_d14c - fixed_exc - nuis_shift)
     w_dct_scaled = inv_sig[:, None] * op.w_dct
+    w_grid_scaled = inv_sig[:, None] * op.w_grid
+    n_g = op.n_grid
 
     if unit_sp is not None:
-        aug_mat = jnp.concatenate([w_dct_scaled, (inv_sig * unit_sp)[:, None]], axis=1)
+        aug_mat = jnp.concatenate(
+            [w_dct_scaled, w_grid_scaled, (inv_sig * unit_sp)[:, None]], axis=1
+        )
         x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
             x_raw_base, aug_mat, u_nuis
         )
-        w_dct_eff = aug_eff[:, :-1]
+        w_dct_eff = aug_eff[:, :n_g]
+        w_grid_eff = aug_eff[:, n_g : 2 * n_g]
         unit_sp_eff: jax.Array | None = aug_eff[:, -1]
     else:
-        x_eff_base, w_dct_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, w_dct_scaled, u_nuis
+        aug_mat = jnp.concatenate([w_dct_scaled, w_grid_scaled], axis=1)
+        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+            x_raw_base, aug_mat, u_nuis
         )
+        w_dct_eff = aug_eff[:, :n_g]
+        w_grid_eff = aug_eff[:, n_g:]
         unit_sp_eff = None
 
     return _optimize_single_kernel_precomputed(
         label=label,
         cache_tag=cache_tag,
-        ell_mid=ell_mid,
         build_kernel_fn=build_fn,
         prior_fn=prior_fn,
         phi0=phi0,
@@ -3691,6 +4252,7 @@ def optimize_gp_kernel(
         op=op,
         x_eff_base=x_eff_base,
         w_dct_eff=w_dct_eff,
+        w_grid_eff=w_grid_eff,
         unit_spike_eff=unit_sp_eff,
         fixed_exc=fixed_exc,
         unit_sp_raw=unit_sp,
@@ -3699,6 +4261,7 @@ def optimize_gp_kernel(
         root_nuis=root_nuis,
         u_nuis=u_nuis,
         spike_fluence_init=sp_fl,
+        spike_log_fluence_prior=spike_log_fluence_prior,
         updated_extra=upd_extra,
         log_norm_d=log_norm_d,
         half_logdet_nuis=half_logdet_nuis,
@@ -3707,6 +4270,8 @@ def optimize_gp_kernel(
         multi_start=multi_start,
         q_std=q_std,
         rng_key=key,
+        prehistory_root_y0=root_y0,
+        prehistory_kernel=prehistory_kernel,
     )
 
 
@@ -3775,6 +4340,10 @@ def select_gp_kernel(
     *,
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
+    hyperprior: Callable[[jax.Array], jax.Array] | None = None,
+    hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None = None,
+    spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
+    prehistory_kernel: Any | None = None,
     multi_start: int = 3,
     n_grid: int = 128,
     pad_years: float = 15.0,
@@ -3792,8 +4361,6 @@ def select_gp_kernel(
     """
     ds = _as_dataset(dataset)
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
-    span_lo, span_hi = ds.time_span
-    ell_mid = float(np.clip(0.15 * max(span_hi - span_lo, 5.0), 1.5, 25.0))
     zm = field_kind == "log_gaussian"
 
     if candidates is None:
@@ -3812,6 +4379,9 @@ def select_gp_kernel(
     op = build_dct_response_operator(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
     )
+    root_y0 = _resolve_prehistory_root_y0(
+        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
+    )
     if extra_production is not None:
         upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
             cbm, ds, extra_production, op, offset_mode, q_std
@@ -3828,24 +4398,34 @@ def select_gp_kernel(
         offset_mode=offset_mode,
         global_offset_prior_sd=200.0,
         lab_offset_prior_sd=1.5,
+        prehistory_root_y0=root_y0,
+        init_state_basis=op.init_state_basis,
     )
     inv_sig = 1.0 / ds.sigma_flat
     log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
     nuis_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
     x_raw_base = inv_sig * (ds.d14c_flat - op.ss_d14c - fixed_exc - nuis_shift)
     w_dct_scaled = inv_sig[:, None] * op.w_dct
+    w_grid_scaled = inv_sig[:, None] * op.w_grid
+    n_g = op.n_grid
 
     if unit_sp is not None:
-        aug_mat = jnp.concatenate([w_dct_scaled, (inv_sig * unit_sp)[:, None]], axis=1)
+        aug_mat = jnp.concatenate(
+            [w_dct_scaled, w_grid_scaled, (inv_sig * unit_sp)[:, None]], axis=1
+        )
         x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
             x_raw_base, aug_mat, u_nuis
         )
-        w_dct_eff = aug_eff[:, :-1]
+        w_dct_eff = aug_eff[:, :n_g]
+        w_grid_eff = aug_eff[:, n_g : 2 * n_g]
         unit_sp_eff: jax.Array | None = aug_eff[:, -1]
     else:
-        x_eff_base, w_dct_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, w_dct_scaled, u_nuis
+        aug_mat = jnp.concatenate([w_dct_scaled, w_grid_scaled], axis=1)
+        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+            x_raw_base, aug_mat, u_nuis
         )
+        w_dct_eff = aug_eff[:, :n_g]
+        w_grid_eff = aug_eff[:, n_g:]
         unit_sp_eff = None
 
     subkeys = jax.random.split(key, len(cand_items) + 1)
@@ -3853,30 +4433,23 @@ def select_gp_kernel(
 
     results: list[OptimizedKernelResult] = []
     for idx, (label, spec_item) in enumerate(cand_items):
-        if isinstance(spec_item, str):
-            k_clean = spec_item.strip().lower()
-            if k_clean not in _KERNEL_NAME_ALIASES:
-                raise ValueError(
-                    f"Unknown candidate kernel {spec_item!r}; expected one of "
-                    f"{sorted(_KERNEL_NAME_ALIASES)}."
-                )
-            canon = _KERNEL_NAME_ALIASES[k_clean]
-            build_fn, prior_fn, _, phi0 = _kernel_spec_builders(
-                canon, ell_mid, zero_mode=zm
+        hp_override = (
+            hyperpriors[label]
+            if hyperpriors is not None and label in hyperpriors
+            else hyperprior
+        )
+        try:
+            build_fn, prior_fn, _, phi0, cache_tag = _kernel_builders_from_spec(
+                spec_item, zero_mode=zm, hyperprior_override=hp_override
             )
-            cache_tag = f"canon:{canon}:zm={zm}"
-        elif isinstance(spec_item, SpectralKernel):
-            build_fn, prior_fn, _, phi0 = _custom_kernel_builders(spec_item, ell_mid)
-            cache_tag = _custom_kernel_cache_tag(spec_item)
-        else:
+        except TypeError as exc:
             raise TypeError(
                 f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
-            )
+            ) from exc
 
         res_k = _optimize_single_kernel_precomputed(
             label=label,
             cache_tag=cache_tag,
-            ell_mid=ell_mid,
             build_kernel_fn=build_fn,
             prior_fn=prior_fn,
             phi0=phi0,
@@ -3885,6 +4458,7 @@ def select_gp_kernel(
             op=op,
             x_eff_base=x_eff_base,
             w_dct_eff=w_dct_eff,
+            w_grid_eff=w_grid_eff,
             unit_spike_eff=unit_sp_eff,
             fixed_exc=fixed_exc,
             unit_sp_raw=unit_sp,
@@ -3893,6 +4467,7 @@ def select_gp_kernel(
             root_nuis=root_nuis,
             u_nuis=u_nuis,
             spike_fluence_init=sp_fl,
+            spike_log_fluence_prior=spike_log_fluence_prior,
             updated_extra=upd_extra,
             log_norm_d=log_norm_d,
             half_logdet_nuis=half_logdet_nuis,
@@ -3901,18 +4476,32 @@ def select_gp_kernel(
             multi_start=multi_start,
             q_std=q_std,
             rng_key=subkeys[idx],
+            prehistory_root_y0=root_y0,
+            prehistory_kernel=prehistory_kernel,
         )
         results.append(res_k)
 
-    # Sort descending by Laplace hyper-evidence
     ranked = tuple(
-        sorted(results, key=lambda r: float(r.log_hyper_evidence), reverse=True)
+        sorted(
+            results,
+            key=lambda r: (float(r.log_hyper_evidence), float(r.log_evidence)),
+            reverse=True,
+        )
     )
     best = ranked[0]
     ln_hyper_arr = jnp.array([r.log_hyper_evidence for r in ranked], dtype=jnp.float64)
     ln_ev_arr = jnp.array([r.log_evidence for r in ranked], dtype=jnp.float64)
-    delta_lnz = ln_hyper_arr - ln_hyper_arr[0]
-    weights = jax.nn.softmax(ln_hyper_arr)
+    finite_mask = jnp.isfinite(ln_hyper_arr)
+    delta_lnz = jnp.where(
+        jnp.isfinite(ln_hyper_arr[0]),
+        ln_hyper_arr - ln_hyper_arr[0],
+        jnp.full_like(ln_hyper_arr, jnp.nan),
+    )
+    weights = jnp.where(
+        jnp.any(finite_mask),
+        jax.nn.softmax(jnp.where(finite_mask, ln_hyper_arr, -jnp.inf)),
+        jnp.full_like(ln_hyper_arr, jnp.nan),
+    )
     aics = jnp.array([r.aic for r in ranked], dtype=jnp.float64)
     bics = jnp.array([r.bic for r in ranked], dtype=jnp.float64)
     gammas = jnp.array([r.gamma for r in ranked], dtype=jnp.float64)
@@ -3923,13 +4512,31 @@ def select_gp_kernel(
         n_samples=n_posterior_samples,
         rng_key=sample_key,
         offset_mode=offset_mode,
+        prehistory_kernel=prehistory_kernel,
     )
-    s_glob = float(error_scale(best.fit, ds, by_series=False, offset_mode=offset_mode))  # type: ignore[arg-type]
-    try:
-        s_by_ser = error_scale(best.fit, ds, by_series=True, offset_mode=offset_mode)
-        assert isinstance(s_by_ser, dict)
-    except ValueError:
-        s_by_ser = {s.name: s_glob for s in ds.series}
+    s_glob = float(
+        error_scale(
+            best.fit,
+            ds,
+            by_series=False,
+            offset_mode=offset_mode,
+            prehistory_kernel=prehistory_kernel,
+        )
+    )
+    if len(set(ds.series_names)) == ds.n_series:
+        s_by_ser_res = error_scale(
+            best.fit,
+            ds,
+            by_series=True,
+            offset_mode=offset_mode,
+            prehistory_kernel=prehistory_kernel,
+        )
+        assert isinstance(s_by_ser_res, dict)
+        s_by_ser = s_by_ser_res
+    else:
+        s_by_ser = {
+            f"{s.name}#{idx_s}": s_glob for idx_s, s in enumerate(ds.series)
+        }
 
     best_field, _, _ = _extract_field_and_extras(best.fit.model.production)
     post_spec = best_field.power_spectrum()

@@ -26,6 +26,7 @@ Implements four solver components sharing the :class:`AbstractSolver` interface:
 from __future__ import annotations
 
 from collections.abc import Callable
+import functools
 import math
 from typing import Any, Literal
 
@@ -39,7 +40,7 @@ import numpy as np
 from numpy.polynomial.legendre import leggauss
 import zodiax as zdx
 
-from .cbm import CarbonBoxModel
+from .cbm import CarbonBoxModel, EffectiveCBM, ReversibleCBM
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 from .production import (
     GPProduction,
@@ -81,6 +82,122 @@ def _unpack_terms(production: ProductionTerm) -> tuple[ProductionTerm, ...]:
             res.extend(_unpack_terms(p))
         return tuple(res)
     return (production,)
+
+
+def _expm1_safe(z: jax.Array) -> jax.Array:
+    """Cancellation-free ``exp(z) - 1`` for both real ``float64`` and ``complex128``."""
+    if jnp.iscomplexobj(z):
+        x = jnp.real(z)
+        y = jnp.imag(z)
+        sh = jnp.sin(0.5 * y)
+        re = jnp.expm1(x) * jnp.cos(y) - 2.0 * sh * sh
+        im = jnp.exp(x) * jnp.sin(y)
+        return re + 1j * im
+    return jnp.expm1(z)
+
+
+_PSI1_HORNER_COEFFS: tuple[float, ...] = tuple(
+    1.0 / math.factorial(k + 1) for k in range(9, -1, -1)
+)
+_PSI2_HORNER_COEFFS: tuple[float, ...] = tuple(
+    1.0 / math.factorial(k + 2) for k in range(9, -1, -1)
+)
+
+
+def _scalar_psi1(z: ArrayLike) -> jax.Array:
+    """Holomorphic ``psi_1(z) = (exp(z) - 1) / z`` with double-``where`` AD guard at ``z = 0``."""
+    z_arr = jnp.asarray(z)
+    small = jnp.abs(z_arr) < 0.1
+    z_safe = jnp.where(small, 1.0 + 0.0 * z_arr, z_arr)
+    poly = jnp.asarray(_PSI1_HORNER_COEFFS[0], dtype=z_arr.dtype)
+    for coeff in _PSI1_HORNER_COEFFS[1:]:
+        poly = poly * z_arr + coeff
+    far = _expm1_safe(z_safe) / z_safe
+    return jnp.where(small, poly, far)
+
+
+def _scalar_psi2(z: ArrayLike) -> jax.Array:
+    """Holomorphic ``psi_2(z) = (exp(z) - 1 - z) / z^2`` with double-``where`` AD guard at ``z = 0``."""
+    z_arr = jnp.asarray(z)
+    small = jnp.abs(z_arr) < 0.1
+    z_safe = jnp.where(small, 1.0 + 0.0 * z_arr, z_arr)
+    poly = jnp.asarray(_PSI2_HORNER_COEFFS[0], dtype=z_arr.dtype)
+    for coeff in _PSI2_HORNER_COEFFS[1:]:
+        poly = poly * z_arr + coeff
+    far = (_expm1_safe(z_safe) - z_safe) / (z_safe * z_safe)
+    return jnp.where(small, poly, far)
+
+
+@functools.lru_cache(maxsize=64)
+def _cached_eig_concrete(
+    shape: tuple[int, int],
+    a_bytes: bytes,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """LRU-cached spectral factorization ``A = V diag(lam) V_inv`` for concrete ``A``."""
+    n = shape[0]
+    if n == 0 or shape[1] != n:
+        return None
+    mat = np.frombuffer(a_bytes, dtype=np.float64).reshape(shape).copy()
+    if not np.all(np.isfinite(mat)):
+        return None
+    lam, v_mat = np.linalg.eig(mat)
+    cond_v = float(np.linalg.cond(v_mat))
+    if not np.isfinite(cond_v) or cond_v >= 1e6:
+        return None
+    v_inv = np.linalg.solve(v_mat, np.eye(n, dtype=np.complex128))
+    recon_err = float(np.linalg.norm((v_mat * lam[None, :]) @ v_inv - mat))
+    if recon_err > 1e-9 * max(float(np.linalg.norm(mat)), 1.0):
+        return None
+    if np.max(np.abs(lam.imag)) == 0.0 and np.max(np.abs(v_mat.imag)) == 0.0:
+        return (
+            np.ascontiguousarray(lam.real, dtype=np.float64),
+            np.ascontiguousarray(v_mat.real, dtype=np.float64),
+            np.ascontiguousarray(v_inv.real, dtype=np.float64),
+        )
+    return (
+        np.ascontiguousarray(lam, dtype=np.complex128),
+        np.ascontiguousarray(v_mat, dtype=np.complex128),
+        np.ascontiguousarray(v_inv, dtype=np.complex128),
+    )
+
+
+def _modal_decomposition(
+    A: jax.Array,
+    cbm: CarbonBoxModel | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array] | None:
+    """Return ``(lam, V, V_inv)`` satisfying ``A = V diag(lam) V_inv``, or ``None``."""
+    n = A.shape[0]
+    if n == 0:
+        return None
+
+    # Case A: Detailed-balance CBMs (EffectiveCBM, ReversibleCBM) — real symmetric eigh
+    # via flux balance M_i^{-1/2} A_{ij} M_j^{1/2}, valid under both eager and JAX tracers.
+    if isinstance(cbm, (EffectiveCBM, ReversibleCBM)):
+        masses = cbm.reservoir_masses()
+        m_sqrt = jnp.sqrt(masses)
+        s_mat = (A / m_sqrt[:, None]) * m_sqrt[None, :]
+        lam, q_orth = jnp.linalg.eigh(0.5 * (s_mat + s_mat.T))
+        v_mat = m_sqrt[:, None] * q_orth
+        v_inv = q_orth.T / m_sqrt[None, :]
+        return lam, v_mat, v_inv
+
+    # Case B: Concrete (non-traced) A — LRU-cached complex128/float64 eigendecomposition.
+    if not isinstance(A, jax.core.Tracer):
+        try:
+            a_np = np.asarray(A, dtype=np.float64)
+        except (
+            jax.errors.TracerArrayConversionError,
+            jax.errors.ConcretizationTypeError,
+        ):
+            return None
+        cached = _cached_eig_concrete(a_np.shape, a_np.tobytes())
+        if cached is None:
+            return None
+        lam_np, v_np, v_inv_np = cached
+        return jnp.asarray(lam_np), jnp.asarray(v_np), jnp.asarray(v_inv_np)
+
+    # Case C: Traced general non-symmetric A (e.g. BalancedCBM / OpenCBM) -> Van Loan fallback.
+    return None
 
 
 def van_loan_psi1_vec(
@@ -326,13 +443,14 @@ def _eval_trend_binned(
     return jax.vmap(_single_win)(a_r, b_r)
 
 
-def _eval_boxcar_pointwise(
+@eqx.filter_jit
+def _eval_boxcar_pointwise_van_loan(
     A: jax.Array,
     b_scaled: jax.Array,
     spike: MiyakeSpike,
     t: jax.Array,
 ) -> jax.Array:
-    """Exact pointwise boxcar spike response with double-``where`` ``tau_d -> 0+`` guard."""
+    """Van Loan ``expm`` fallback for pointwise boxcar spike evaluation."""
     ts = spike.t_start
     tau_d = jnp.maximum(spike.duration, 0.0)
     fluence = spike.fluence
@@ -347,33 +465,61 @@ def _eval_boxcar_pointwise(
             jnp.where(ti >= ts, 1.0, 0.0),
             delta_act / safe_tau,
         )
-        _, g0_act, _ = van_loan_foh_blocks(A, b_scaled, delta_act)
-        # Note g0_act = delta_act * psi_1(A * delta_act) @ b_scaled.
-        # To keep psi_1(A * delta_act) @ b_scaled smooth at delta_act = 0 without dividing by delta_act,
-        # evaluate psi_1 via unit-scaled vector column!
         _, psi1_act_b = van_loan_psi1_vec(A * delta_act, b_scaled, 1.0)
-        _ = g0_act
         Phi_post = jax.scipy.linalg.expm(A * delta_post)
         return fluence * frac * (Phi_post @ psi1_act_b)
 
     return jax.vmap(_one_t)(t)
 
 
-def _eval_boxcar_binned(
+def _eval_boxcar_pointwise(
+    A: jax.Array,
+    b_scaled: jax.Array,
+    spike: MiyakeSpike,
+    t: jax.Array,
+    *,
+    cbm: CarbonBoxModel | None = None,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> jax.Array:
+    """Exact pointwise boxcar spike response with modal spectral fast path."""
+    eff_modal = _modal_decomposition(A, cbm=cbm) if modal is None else modal
+    if eff_modal is None:
+        return _eval_boxcar_pointwise_van_loan(A, b_scaled, spike, t)
+
+    lam, v_mat, v_inv = eff_modal
+    b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
+
+    ts = spike.t_start
+    tau_d = jnp.maximum(spike.duration, 0.0)
+    fluence = spike.fluence
+    is_tiny = tau_d <= 1e-12
+    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+
+    delta_act = jnp.clip(t - ts, 0.0, tau_d)
+    delta_post = jnp.maximum(t - (ts + tau_d), 0.0)
+    frac = jnp.where(
+        is_tiny,
+        jnp.where(t >= ts, 1.0, 0.0),
+        delta_act / safe_tau,
+    )
+    y_tilde = (
+        (fluence * frac)[:, None]
+        * jnp.exp(delta_post[:, None] * lam[None, :])
+        * _scalar_psi1(delta_act[:, None] * lam[None, :])
+        * b_tilde[None, :]
+    )
+    return jnp.real(y_tilde @ v_mat.T)
+
+
+@eqx.filter_jit
+def _eval_boxcar_binned_van_loan(
     A: jax.Array,
     b_scaled: jax.Array,
     spike: MiyakeSpike,
     a_r: jax.Array,
     b_r: jax.Array,
 ) -> jax.Array:
-    """Exact analytical seasonal window average of a boxcar Miyake pulse.
-
-    Partitions ``[a_r, b_r]`` at ``t_1 = clip(t_s, a_r, b_r)`` and
-    ``t_2 = clip(t_s + tau_d, a_r, b_r)`` using Van Loan ``psi_1, psi_2`` blocks
-    and double-``where`` ``tau_d -> 0+`` protection so both primal values and
-    ``jax.grad`` wrt ``(t_start, duration, fluence)`` remain exact and ``NaN``-free
-    even at ``duration == 0.0``.
-    """
+    """Van Loan ``expm`` fallback for seasonal-window averaged boxcar pulse."""
     ts = spike.t_start
     tau_d = jnp.maximum(spike.duration, 0.0)
     fluence = spike.fluence
@@ -382,8 +528,6 @@ def _eval_boxcar_binned(
 
     def _one_win(ar: jax.Array, br: jax.Array) -> jax.Array:
         width = br - ar
-
-        # 1. Pre-window overlap [u0, u1] = [min(ts, ar), min(ts + tau_d, ar)]
         u0 = jnp.minimum(ts, ar)
         u1 = jnp.minimum(ts + tau_d, ar)
         delta_pre = u1 - u0
@@ -397,7 +541,6 @@ def _eval_boxcar_binned(
         dy_ar = fluence * f_pre * (Phi_to_ar @ psi1_pre_b)
         _, int_pre = van_loan_psi1_vec(A, dy_ar, width)
 
-        # 2. In-window overlap [t1, t2] = [clip(ts, ar, br), clip(ts + tau_d, ar, br)]
         t1 = jnp.clip(ts, ar, br)
         t2 = jnp.clip(ts + tau_d, ar, br)
         delta_in = t2 - t1
@@ -407,27 +550,86 @@ def _eval_boxcar_binned(
             jnp.where((ts >= ar) & (ts < br), 1.0, 0.0),
             delta_in / safe_tau,
         )
-        # Active accumulation integral over [t1, t2]: E * f_in * delta_in * psi_2(A * delta_in) b
         _, _, g1_in = van_loan_foh_blocks(A * delta_in, b_scaled, 1.0)
         int_active = fluence * f_in * delta_in * g1_in
-
-        # Post-spike decay inside [t2, br] of state accumulated on [t1, t2]
         _, psi1_in_b = van_loan_psi1_vec(A * delta_in, b_scaled, 1.0)
         dy_t2 = fluence * f_in * psi1_in_b
         _, int_post = van_loan_psi1_vec(A, dy_t2, delta_post)
-
         return (int_pre + int_active + int_post) / width
 
     return jax.vmap(_one_win)(a_r, b_r)
 
 
-def _eval_smooth_spike_pointwise(
+def _eval_boxcar_binned(
+    A: jax.Array,
+    b_scaled: jax.Array,
+    spike: MiyakeSpike,
+    a_r: jax.Array,
+    b_r: jax.Array,
+    *,
+    cbm: CarbonBoxModel | None = None,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> jax.Array:
+    """Exact analytical seasonal window average of a boxcar Miyake pulse."""
+    eff_modal = _modal_decomposition(A, cbm=cbm) if modal is None else modal
+    if eff_modal is None:
+        return _eval_boxcar_binned_van_loan(A, b_scaled, spike, a_r, b_r)
+
+    lam, v_mat, v_inv = eff_modal
+    b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
+
+    ts = spike.t_start
+    tau_d = jnp.maximum(spike.duration, 0.0)
+    fluence = spike.fluence
+    is_tiny = tau_d <= 1e-12
+    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+    width = b_r - a_r
+
+    u0 = jnp.minimum(ts, a_r)
+    u1 = jnp.minimum(ts + tau_d, a_r)
+    delta_pre = u1 - u0
+    f_pre = jnp.where(
+        is_tiny,
+        jnp.where(ts < a_r, 1.0, 0.0),
+        delta_pre / safe_tau,
+    )
+    int_pre_modes = (
+        (fluence * f_pre * width)[:, None]
+        * _scalar_psi1(width[:, None] * lam[None, :])
+        * jnp.exp((a_r - u1)[:, None] * lam[None, :])
+        * _scalar_psi1(delta_pre[:, None] * lam[None, :])
+    )
+
+    t1 = jnp.clip(ts, a_r, b_r)
+    t2 = jnp.clip(ts + tau_d, a_r, b_r)
+    delta_in = t2 - t1
+    delta_post = b_r - t2
+    f_in = jnp.where(
+        is_tiny,
+        jnp.where((ts >= a_r) & (ts < b_r), 1.0, 0.0),
+        delta_in / safe_tau,
+    )
+    z_in = delta_in[:, None] * lam[None, :]
+    int_active_modes = (fluence * f_in * delta_in)[:, None] * _scalar_psi2(z_in)
+    int_post_modes = (
+        (fluence * f_in * delta_post)[:, None]
+        * _scalar_psi1(delta_post[:, None] * lam[None, :])
+        * _scalar_psi1(z_in)
+    )
+    y_tilde = (
+        (int_pre_modes + int_active_modes + int_post_modes) / width[:, None]
+    ) * b_tilde[None, :]
+    return jnp.real(y_tilde @ v_mat.T)
+
+
+@eqx.filter_jit
+def _eval_smooth_spike_pointwise_van_loan(
     A: jax.Array,
     b_scaled: jax.Array,
     spike: MiyakeSpike,
     t: jax.Array,
 ) -> jax.Array:
-    """16-point Gauss–Legendre clamped quadrature for smooth ``MiyakeSpike`` profiles."""
+    """Van Loan ``expm`` fallback for smooth ``MiyakeSpike`` pointwise evaluation."""
     ts = spike.t_start
     tau_d = jnp.maximum(spike.duration, 0.0)
     fluence = spike.fluence
@@ -457,12 +659,11 @@ def _eval_smooth_spike_pointwise(
                 (tilde_a + span * xi - ts) / safe_tau,
             )
             tau_q = jnp.where(is_tiny, ts + tau_d * u_q, tilde_a + span * xi)
-            phi_q = spike.unit_profile(u_q)  # (16,)
-
+            phi_q = spike.unit_profile(u_q)
             local_lags = jnp.maximum(tilde_b - tau_q, 0.0)
             vecs = jax.vmap(lambda lag: jax.scipy.linalg.expm(A * lag) @ b_scaled)(
                 local_lags
-            )  # (16, n)
+            )
             panel_vec = (wq * phi_q) @ vecs
             Phi_shift = jax.scipy.linalg.expm(A * jnp.maximum(ti - tilde_b, 0.0))
             return fluence * ratio * (Phi_shift @ panel_vec)
@@ -472,19 +673,82 @@ def _eval_smooth_spike_pointwise(
     return jax.vmap(_one_t)(t)
 
 
-def _eval_smooth_spike_binned(
+def _eval_smooth_spike_pointwise(
+    A: jax.Array,
+    b_scaled: jax.Array,
+    spike: MiyakeSpike,
+    t: jax.Array,
+    *,
+    cbm: CarbonBoxModel | None = None,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> jax.Array:
+    """16-point Gauss–Legendre clamped quadrature for smooth ``MiyakeSpike`` profiles."""
+    eff_modal = _modal_decomposition(A, cbm=cbm) if modal is None else modal
+    if eff_modal is None:
+        return _eval_smooth_spike_pointwise_van_loan(A, b_scaled, spike, t)
+
+    lam, v_mat, v_inv = eff_modal
+    b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
+
+    ts = spike.t_start
+    tau_d = jnp.maximum(spike.duration, 0.0)
+    fluence = spike.fluence
+    is_tiny = tau_d <= 1e-12
+    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+    panels_arr = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
+    u_los = panels_arr[:, 0]
+    u_his = panels_arr[:, 1]
+    du = u_his - u_los
+    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
+    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
+
+    p_a = ts + tau_d * u_los
+    p_b = ts + tau_d * u_his
+    tilde_a = jnp.minimum(p_a[None, :], t[:, None])
+    tilde_b = jnp.minimum(p_b[None, :], t[:, None])
+    span = tilde_b - tilde_a
+    ratio = jnp.where(
+        is_tiny,
+        jnp.where(t[:, None] >= ts, du[None, :], 0.0),
+        span / safe_tau,
+    )
+    u_q = jnp.where(
+        is_tiny,
+        u_los[None, :, None] + du[None, :, None] * xi[None, None, :],
+        (tilde_a[:, :, None] + span[:, :, None] * xi[None, None, :] - ts) / safe_tau,
+    )
+    tau_q = jnp.where(
+        is_tiny,
+        ts + tau_d * u_q,
+        tilde_a[:, :, None] + span[:, :, None] * xi[None, None, :],
+    )
+    phi_q = spike.unit_profile(u_q)
+    local_lags = jnp.maximum(tilde_b[:, :, None] - tau_q, 0.0)
+    w_phi = (wq[None, None, :] * phi_q).astype(lam.dtype)
+    panel_modes = jnp.einsum(
+        "tpq,tpqn->tpn",
+        w_phi,
+        jnp.exp(local_lags[..., None] * lam[None, None, None, :]),
+    )
+    shift_lags = jnp.maximum(t[:, None] - tilde_b, 0.0)
+    shifted = (
+        (fluence * ratio)[:, :, None]
+        * jnp.exp(shift_lags[:, :, None] * lam[None, None, :])
+        * panel_modes
+    )
+    y_tilde = jnp.sum(shifted, axis=1) * b_tilde[None, :]
+    return jnp.real(y_tilde @ v_mat.T)
+
+
+@eqx.filter_jit
+def _eval_smooth_spike_binned_van_loan(
     A: jax.Array,
     b_scaled: jax.Array,
     spike: MiyakeSpike,
     a_r: jax.Array,
     b_r: jax.Array,
 ) -> jax.Array:
-    """16-point Gauss–Legendre seasonal-window integration for smooth ``MiyakeSpike`` profiles.
-
-    Applies Fubini's theorem to reduce the double ``(t, tau)`` integral on each
-    window ``[a_r, b_r]`` to 1D Gauss–Legendre quadrature over smoothly clamped
-    spike sub-panels with exact analytical ``psi_1`` integration in ``t``.
-    """
+    """Van Loan ``expm`` fallback for seasonal-window smooth ``MiyakeSpike`` profiles."""
     ts = spike.t_start
     tau_d = jnp.maximum(spike.duration, 0.0)
     fluence = spike.fluence
@@ -503,7 +767,6 @@ def _eval_smooth_spike_binned(
             p_a = ts + tau_d * u_lo
             p_b = ts + tau_d * u_hi
 
-            # (a) Pre-window clamped sub-panel (-inf, ar]
             pre_a = jnp.minimum(p_a, ar)
             pre_b = jnp.minimum(p_b, ar)
             pre_span = pre_b - pre_a
@@ -527,7 +790,6 @@ def _eval_smooth_spike_binned(
             Phi_to_ar = jax.scipy.linalg.expm(A * jnp.maximum(ar - pre_b, 0.0))
             dy_ar_p = fluence * pre_ratio * (Phi_to_ar @ panel_pre)
 
-            # (b) In-window clamped sub-panel [ar, br]
             in_a = jnp.clip(p_a, ar, br)
             in_b = jnp.clip(p_b, ar, br)
             in_span = in_b - in_a
@@ -556,6 +818,110 @@ def _eval_smooth_spike_binned(
         return (int_pre_total + int_in) / width
 
     return jax.vmap(_one_win)(a_r, b_r)
+
+
+def _eval_smooth_spike_binned(
+    A: jax.Array,
+    b_scaled: jax.Array,
+    spike: MiyakeSpike,
+    a_r: jax.Array,
+    b_r: jax.Array,
+    *,
+    cbm: CarbonBoxModel | None = None,
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> jax.Array:
+    """16-point Gauss–Legendre seasonal-window integration for smooth ``MiyakeSpike`` profiles."""
+    eff_modal = _modal_decomposition(A, cbm=cbm) if modal is None else modal
+    if eff_modal is None:
+        return _eval_smooth_spike_binned_van_loan(A, b_scaled, spike, a_r, b_r)
+
+    lam, v_mat, v_inv = eff_modal
+    b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
+
+    ts = spike.t_start
+    tau_d = jnp.maximum(spike.duration, 0.0)
+    fluence = spike.fluence
+    is_tiny = tau_d <= 1e-12
+    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+    panels_arr = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
+    u_los = panels_arr[:, 0]
+    u_his = panels_arr[:, 1]
+    du = u_his - u_los
+    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
+    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
+
+    width = b_r - a_r
+    p_a = ts + tau_d * u_los
+    p_b = ts + tau_d * u_his
+
+    # (a) Pre-window clamped sub-panels (-inf, a_r]
+    pre_a = jnp.minimum(p_a[None, :], a_r[:, None])
+    pre_b = jnp.minimum(p_b[None, :], a_r[:, None])
+    pre_span = pre_b - pre_a
+    pre_ratio = jnp.where(
+        is_tiny,
+        jnp.where(ts < a_r[:, None], du[None, :], 0.0),
+        pre_span / safe_tau,
+    )
+    u_pre = jnp.where(
+        is_tiny,
+        u_los[None, :, None] + du[None, :, None] * xi[None, None, :],
+        (pre_a[:, :, None] + pre_span[:, :, None] * xi[None, None, :] - ts) / safe_tau,
+    )
+    tau_pre = jnp.where(
+        is_tiny,
+        ts + tau_d * u_pre,
+        pre_a[:, :, None] + pre_span[:, :, None] * xi[None, None, :],
+    )
+    phi_pre = spike.unit_profile(u_pre)
+    lags_pre = jnp.maximum(pre_b[:, :, None] - tau_pre, 0.0)
+    w_phi_pre = (wq[None, None, :] * phi_pre).astype(lam.dtype)
+    panel_pre_modes = jnp.einsum(
+        "wpq,wpqn->wpn",
+        w_phi_pre,
+        jnp.exp(lags_pre[..., None] * lam[None, None, None, :]),
+    )
+    shift_to_ar = jnp.maximum(a_r[:, None] - pre_b, 0.0)
+    dy_ar_modes = jnp.sum(
+        (fluence * pre_ratio)[:, :, None]
+        * jnp.exp(shift_to_ar[:, :, None] * lam[None, None, :])
+        * panel_pre_modes,
+        axis=1,
+    )
+    int_pre_modes = (
+        width[:, None] * _scalar_psi1(width[:, None] * lam[None, :]) * dy_ar_modes
+    )
+
+    # (b) In-window clamped sub-panels [a_r, b_r]
+    in_a = jnp.clip(p_a[None, :], a_r[:, None], b_r[:, None])
+    in_b = jnp.clip(p_b[None, :], a_r[:, None], b_r[:, None])
+    in_span = in_b - in_a
+    in_ratio = jnp.where(
+        is_tiny,
+        jnp.where((ts >= a_r[:, None]) & (ts < b_r[:, None]), du[None, :], 0.0),
+        in_span / safe_tau,
+    )
+    u_in = jnp.where(
+        is_tiny,
+        u_los[None, :, None] + du[None, :, None] * xi[None, None, :],
+        (in_a[:, :, None] + in_span[:, :, None] * xi[None, None, :] - ts) / safe_tau,
+    )
+    tau_in = jnp.where(
+        is_tiny,
+        ts + tau_d * u_in,
+        in_a[:, :, None] + in_span[:, :, None] * xi[None, None, :],
+    )
+    phi_in = spike.unit_profile(u_in)
+    rem = jnp.maximum(b_r[:, None, None] - tau_in, 0.0)
+    w_phi_in = (wq[None, None, :] * phi_in).astype(lam.dtype)
+    rem_psi1 = rem[..., None] * _scalar_psi1(
+        rem[..., None] * lam[None, None, None, :]
+    )
+    panel_in_modes = jnp.einsum("wpq,wpqn->wpn", w_phi_in, rem_psi1)
+    int_in_modes = jnp.sum((fluence * in_ratio)[:, :, None] * panel_in_modes, axis=1)
+
+    y_tilde = ((int_pre_modes + int_in_modes) / width[:, None]) * b_tilde[None, :]
+    return jnp.real(y_tilde @ v_mat.T)
 
 
 def _foh_cumulative_integral(
@@ -864,11 +1230,18 @@ class ExactLinearSolver(AbstractSolver):
         term: ProductionTerm,
         t: jax.Array,
         q_std: ArrayLike,
+        *,
+        cbm: CarbonBoxModel | None = None,
+        modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     ) -> jax.Array:
         n = A.shape[0]
         if isinstance(term, SteadyProduction):
             dq = term.rate - jnp.asarray(q_std, dtype=jnp.float64)
-            v_ss = jnp.linalg.solve(-A, b_scaled)
+            if modal is not None:
+                lam_s, v_s, vi_s = modal
+                v_ss = jnp.real(v_s @ ((vi_s @ b_scaled.astype(vi_s.dtype)) / (-lam_s)))
+            else:
+                v_ss = jnp.linalg.solve(-A, b_scaled)
             return jnp.broadcast_to((dq * v_ss)[None, :], (t.shape[0], n))
 
         if isinstance(term, HarmonicSolar):
@@ -879,8 +1252,12 @@ class ExactLinearSolver(AbstractSolver):
 
         if isinstance(term, MiyakeSpike):
             if term.profile == "boxcar":
-                return _eval_boxcar_pointwise(A, b_scaled, term, t)
-            return _eval_smooth_spike_pointwise(A, b_scaled, term, t)
+                return _eval_boxcar_pointwise(
+                    A, b_scaled, term, t, cbm=cbm, modal=modal
+                )
+            return _eval_smooth_spike_pointwise(
+                A, b_scaled, term, t, cbm=cbm, modal=modal
+            )
 
         if isinstance(term, GPProduction) and term.coefficients is None:
             return jnp.zeros((t.shape[0], n), dtype=jnp.float64)
@@ -896,8 +1273,55 @@ class ExactLinearSolver(AbstractSolver):
         q_std: ArrayLike,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Return ``(t0_grid, dt, delta_q_grid)`` for a general/gridded FOH term."""
+        raw_term = term
         if hasattr(term, "to_gridded"):
             term = term.to_gridded(q_std=q_std)
+
+        has_static_uniform_grid = (
+            isinstance(getattr(raw_term, "t_start", None), (int, float))
+            and isinstance(getattr(raw_term, "t_end", None), (int, float))
+            and isinstance(getattr(raw_term, "n_grid", None), int)
+            and isinstance(term, GriddedProduction)
+        )
+        if has_static_uniform_grid:
+            t0_u = float(raw_term.t_start)  # type: ignore[attr-defined]
+            t1_u = float(raw_term.t_end)  # type: ignore[attr-defined]
+            dt_u = (t1_u - t0_u) / float(int(raw_term.n_grid) - 1)  # type: ignore[attr-defined]
+            dq_u = (
+                term.values
+                if term.is_delta
+                else term.values - jnp.asarray(q_std, dtype=jnp.float64)
+            )
+            try:
+                tmin_f = float(np.asarray(t_min_req))
+                tmax_f = float(np.asarray(t_max_req))
+            except (
+                jax.errors.TracerArrayConversionError,
+                jax.errors.ConcretizationTypeError,
+            ):
+                return (
+                    jnp.asarray(t0_u, dtype=jnp.float64),
+                    jnp.asarray(dt_u, dtype=jnp.float64),
+                    dq_u,
+                )
+            if t0_u <= tmin_f + 1e-12 and t1_u >= tmax_f - 1e-12:
+                return (
+                    jnp.asarray(t0_u, dtype=jnp.float64),
+                    jnp.asarray(dt_u, dtype=jnp.float64),
+                    dq_u,
+                )
+            start_f = min(tmin_f, t0_u)
+            end_f = max(tmax_f, t1_u)
+            dt_f = 1.0 / float(self.oversample)
+            n_steps = max(int(math.ceil((end_f - start_f) / dt_f)) + 2, 3)
+            grid = start_f + jnp.arange(n_steps, dtype=jnp.float64) * dt_f
+            dq = raw_term.delta_q(grid, q_std=q_std)
+            return (
+                jnp.asarray(start_f, dtype=jnp.float64),
+                jnp.asarray(dt_f, dtype=jnp.float64),
+                dq,
+            )
+
         if isinstance(term, GriddedProduction):
             tg = term.t_grid
             # Check if tg is concrete and uniform and covers [t_min_req, t_max_req]
@@ -1029,11 +1453,18 @@ class ExactLinearSolver(AbstractSolver):
         a_r: jax.Array,
         b_r: jax.Array,
         q_std: ArrayLike,
+        *,
+        cbm: CarbonBoxModel | None = None,
+        modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     ) -> jax.Array:
         n = A.shape[0]
         if isinstance(term, SteadyProduction):
             dq = term.rate - jnp.asarray(q_std, dtype=jnp.float64)
-            v_ss = jnp.linalg.solve(-A, b_scaled)
+            if modal is not None:
+                lam_s, v_s, vi_s = modal
+                v_ss = jnp.real(v_s @ ((vi_s @ b_scaled.astype(vi_s.dtype)) / (-lam_s)))
+            else:
+                v_ss = jnp.linalg.solve(-A, b_scaled)
             return jnp.broadcast_to((dq * v_ss)[None, :], (a_r.shape[0], n))
 
         if isinstance(term, HarmonicSolar):
@@ -1044,8 +1475,12 @@ class ExactLinearSolver(AbstractSolver):
 
         if isinstance(term, MiyakeSpike):
             if term.profile == "boxcar":
-                return _eval_boxcar_binned(A, b_scaled, term, a_r, b_r)
-            return _eval_smooth_spike_binned(A, b_scaled, term, a_r, b_r)
+                return _eval_boxcar_binned(
+                    A, b_scaled, term, a_r, b_r, cbm=cbm, modal=modal
+                )
+            return _eval_smooth_spike_binned(
+                A, b_scaled, term, a_r, b_r, cbm=cbm, modal=modal
+            )
 
         if isinstance(term, GPProduction) and term.coefficients is None:
             return jnp.zeros((a_r.shape[0], n), dtype=jnp.float64)
@@ -1062,16 +1497,22 @@ class ExactLinearSolver(AbstractSolver):
         alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
         t0: ArrayLike | None = None,
         y0: ArrayLike | None = None,
+        modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     ) -> jax.Array:
         t_arr = jnp.atleast_1d(jnp.asarray(t_eval, dtype=jnp.float64))
         A = cbm.matrix_A()
         b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
         terms = _unpack_terms(production)
+        if modal is None:
+            needs_modal = y0 is not None or any(
+                isinstance(tm, (MiyakeSpike, SteadyProduction)) for tm in terms
+            )
+            modal = _modal_decomposition(A, cbm=cbm) if needs_modal else None
 
         total = jnp.zeros((t_arr.shape[0], cbm.n_boxes), dtype=jnp.float64)
         for term in terms:
             total = total + self._eval_single_term_pointwise(
-                A, b_scaled, term, t_arr, q_std
+                A, b_scaled, term, t_arr, q_std, cbm=cbm, modal=modal
             )
 
         if y0 is not None:
@@ -1082,12 +1523,21 @@ class ExactLinearSolver(AbstractSolver):
             t_init_1d = jnp.reshape(t_init, (1,))
             for term in terms:
                 dy_part0 = dy_part0 + self._eval_single_term_pointwise(
-                    A, b_scaled, term, t_init_1d, q_std
+                    A, b_scaled, term, t_init_1d, q_std, cbm=cbm, modal=modal
                 )[0]
             diff0 = dy_target0 - dy_part0
-            hom = jax.vmap(
-                lambda ti: jax.scipy.linalg.expm(A * (ti - t_init)) @ diff0
-            )(t_arr)
+            if modal is not None:
+                lam, v_mat, v_inv = modal
+                d_tilde = v_inv @ diff0.astype(v_inv.dtype)
+                hom_tilde = (
+                    jnp.exp((t_arr - t_init)[:, None] * lam[None, :])
+                    * d_tilde[None, :]
+                )
+                hom = jnp.real(hom_tilde @ v_mat.T)
+            else:
+                hom = jax.vmap(
+                    lambda ti: jax.scipy.linalg.expm(A * (ti - t_init)) @ diff0
+                )(t_arr)
             total = total + hom
 
         return total
@@ -1104,6 +1554,7 @@ class ExactLinearSolver(AbstractSolver):
         alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
         t0: ArrayLike | None = None,
         y0: ArrayLike | None = None,
+        modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     ) -> jax.Array:
         a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
             t_starts, t_ends, sub_weights
@@ -1111,11 +1562,16 @@ class ExactLinearSolver(AbstractSolver):
         A = cbm.matrix_A()
         b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
         terms = _unpack_terms(production)
+        if modal is None:
+            needs_modal = y0 is not None or any(
+                isinstance(tm, (MiyakeSpike, SteadyProduction)) for tm in terms
+            )
+            modal = _modal_decomposition(A, cbm=cbm) if needs_modal else None
 
         total = jnp.zeros((a_flat.shape[0], cbm.n_boxes), dtype=jnp.float64)
         for term in terms:
             total = total + self._eval_single_term_binned(
-                A, b_scaled, term, a_flat, b_flat, q_std
+                A, b_scaled, term, a_flat, b_flat, q_std, cbm=cbm, modal=modal
             )
 
         if y0 is not None:
@@ -1128,16 +1584,27 @@ class ExactLinearSolver(AbstractSolver):
             t_init_1d = jnp.reshape(t_init, (1,))
             for term in terms:
                 dy_part0 = dy_part0 + self._eval_single_term_pointwise(
-                    A, b_scaled, term, t_init_1d, q_std
+                    A, b_scaled, term, t_init_1d, q_std, cbm=cbm, modal=modal
                 )[0]
             diff0 = dy_target0 - dy_part0
 
-            def _hom_win(ar: jax.Array, br: jax.Array) -> jax.Array:
-                state_ar = jax.scipy.linalg.expm(A * (ar - t_init)) @ diff0
-                _, int_h = van_loan_psi1_vec(A, state_ar, br - ar)
-                return int_h / (br - ar)
+            if modal is not None:
+                lam, v_mat, v_inv = modal
+                d_tilde = v_inv @ diff0.astype(v_inv.dtype)
+                widths = b_flat - a_flat
+                hom_tilde = (
+                    _scalar_psi1(widths[:, None] * lam[None, :])
+                    * jnp.exp((a_flat - t_init)[:, None] * lam[None, :])
+                    * d_tilde[None, :]
+                )
+                total = total + jnp.real(hom_tilde @ v_mat.T)
+            else:
+                def _hom_win(ar: jax.Array, br: jax.Array) -> jax.Array:
+                    state_ar = jax.scipy.linalg.expm(A * (ar - t_init)) @ diff0
+                    _, int_h = van_loan_psi1_vec(A, state_ar, br - ar)
+                    return int_h / (br - ar)
 
-            total = total + jax.vmap(_hom_win)(a_flat, b_flat)
+                total = total + jax.vmap(_hom_win)(a_flat, b_flat)
 
         if is_1d:
             return total
@@ -1145,6 +1612,127 @@ class ExactLinearSolver(AbstractSolver):
         n_r, m_w = orig_shape
         reshaped = total.reshape((n_r, m_w, cbm.n_boxes))
         return jnp.sum(reshaped * w_2d[:, :, None], axis=1)
+
+
+def _cbm_has_nonautonomous_masses(cbm: CarbonBoxModel) -> bool:
+    """Return ``True`` if ``cbm`` overrides ``reservoir_masses_at`` or ``matrix_A_at``."""
+    return (
+        type(cbm).reservoir_masses_at is not CarbonBoxModel.reservoir_masses_at
+        or type(cbm).matrix_A_at is not CarbonBoxModel.matrix_A_at
+    )
+
+
+def _filter_event_timestamps(
+    ts_list: list[jax.Array],
+    t_start_int: jax.Array,
+    t_end_int: jax.Array,
+) -> jax.Array | None:
+    """Filter or mask solver step/jump timestamps strictly to ``(t_start_int, t_end_int)``."""
+    if not ts_list:
+        return None
+    flat = jnp.concatenate([jnp.atleast_1d(s).reshape(-1) for s in ts_list])
+    if flat.size == 0:
+        return None
+    if (
+        not isinstance(flat, jax.core.Tracer)
+        and not isinstance(t_start_int, jax.core.Tracer)
+        and not isinstance(t_end_int, jax.core.Tracer)
+    ):
+        flat_np = np.asarray(flat, dtype=np.float64)
+        lo_f = float(t_start_int)
+        hi_f = float(t_end_int)
+        kept = np.unique(flat_np[(flat_np > lo_f) & (flat_np < hi_f)])
+        if kept.size == 0:
+            return None
+        return jnp.asarray(kept, dtype=jnp.float64)
+
+    # Under JAX tracing (static shapes required): map <= t_start_int to -inf and
+    # >= t_end_int to +inf, which diffrax.ClipStepSizeController ignores via
+    # searchsorted(..., side="right") and minimum(_t, t1).
+    masked = jnp.where(
+        flat <= t_start_int,
+        -jnp.inf,
+        jnp.where(flat >= t_end_int, jnp.inf, flat),
+    )
+    return jnp.sort(masked)
+
+
+def _collect_initial_time_and_events(
+    terms: tuple[ProductionTerm, ...],
+    earliest_obs: jax.Array,
+    latest_obs: jax.Array,
+    t0_override: ArrayLike | None,
+) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
+    """Determine integration start ``t0``, continuous ``step_ts``, and discontinuous ``jump_ts``."""
+    t0_candidates: list[jax.Array] = [earliest_obs]
+    step_list: list[jax.Array] = []
+    jump_list: list[jax.Array] = []
+
+    for term in terms:
+        if isinstance(term, MiyakeSpike):
+            panels = term.unit_support_panels()
+            u_min = panels[0][0]
+            dur = jnp.maximum(term.duration, 0.0)
+            onset = term.t_start + dur * u_min - 0.02
+            t0_candidates.append(onset)
+            if term.profile == "boxcar":
+                jump_list.extend([term.t_start, term.t_start + dur])
+            elif term.profile == "gamma":
+                if term.gamma_shape <= 1.0:
+                    jump_list.append(term.t_start)
+                else:
+                    step_list.append(term.t_start)
+                for _, u_hi in panels[:-1]:
+                    step_list.append(term.t_start + dur * u_hi)
+            else:
+                for u_lo, _ in panels:
+                    step_list.append(term.t_start + dur * u_lo)
+                step_list.append(term.t_start + dur * panels[-1][1])
+        elif isinstance(term, LinearTrend) and term.switched_on:
+            tr = jnp.asarray(term.t_ref, dtype=jnp.float64)
+            t0_candidates.append(tr)
+            step_list.append(tr)
+        elif isinstance(term, GriddedProduction):
+            t0_candidates.append(term.t_grid[0])
+            step_list.append(term.t_grid)
+        elif isinstance(term, (LogGPProduction, GPProduction)) and term.domain is not None:
+            t0_candidates.append(jnp.asarray(term.domain[0], dtype=jnp.float64))
+
+    if t0_override is not None:
+        t_start_int = jnp.asarray(t0_override, dtype=jnp.float64)
+    else:
+        t_start_int = jnp.min(jnp.stack([jnp.reshape(c, ()) for c in t0_candidates]))
+
+    t_end_int = jnp.maximum(jnp.reshape(latest_obs, ()), t_start_int + 1e-9)
+    step_ts = _filter_event_timestamps(step_list, t_start_int, t_end_int)
+    jump_ts = _filter_event_timestamps(jump_list, t_start_int, t_end_int)
+    return t_start_int, step_ts, jump_ts
+
+
+def _equilibrium_dy0_and_drift_anchor(
+    A0: jax.Array,
+    b_scaled: jax.Array,
+    terms: tuple[ProductionTerm, ...],
+    t_start_int: jax.Array,
+    q_std: ArrayLike,
+) -> tuple[jax.Array, jax.Array]:
+    """Compute eternal background state ``dy(t_start_int)`` and secular drift anchor."""
+    dy0 = jnp.zeros((A0.shape[0],), dtype=jnp.float64)
+    secular_rhs_anchor = jnp.zeros((A0.shape[0],), dtype=jnp.float64)
+    v_ss = jnp.linalg.solve(-A0, b_scaled)
+    t1d = jnp.reshape(t_start_int, (1,))
+
+    for term in terms:
+        if isinstance(term, SteadyProduction):
+            dq = term.rate - jnp.asarray(q_std, dtype=jnp.float64)
+            dy0 = dy0 + dq * v_ss
+        elif isinstance(term, HarmonicSolar):
+            dy0 = dy0 + _eval_harmonic_pointwise(A0, b_scaled, term, t1d)[0]
+        elif isinstance(term, LinearTrend) and not term.switched_on:
+            dy0 = dy0 + term.slope * (t_start_int - term.t_ref) * v_ss
+            secular_rhs_anchor = secular_rhs_anchor + term.slope * v_ss
+
+    return dy0, secular_rhs_anchor
 
 
 class DiffraxSolver(AbstractSolver):
@@ -1205,59 +1793,9 @@ class DiffraxSolver(AbstractSolver):
         latest_obs: jax.Array,
         t0_override: ArrayLike | None,
     ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
-        """Determine integration start ``t0``, continuous ``step_ts``, and discontinuous ``jump_ts``."""
-        t0_candidates: list[jax.Array] = [earliest_obs]
-        step_list: list[jax.Array] = []
-        jump_list: list[jax.Array] = []
-
-        for term in terms:
-            if isinstance(term, MiyakeSpike):
-                panels = term.unit_support_panels()
-                u_min = panels[0][0]
-                dur = jnp.maximum(term.duration, 0.0)
-                onset = term.t_start + dur * u_min - 0.02
-                t0_candidates.append(onset)
-                if term.profile == "boxcar":
-                    jump_list.extend([term.t_start, term.t_start + dur])
-                elif term.profile == "gamma":
-                    if term.gamma_shape <= 1.0:
-                        jump_list.append(term.t_start)
-                    else:
-                        step_list.append(term.t_start)
-                    for _, u_hi in panels[:-1]:
-                        step_list.append(term.t_start + dur * u_hi)
-                else:
-                    for u_lo, _ in panels:
-                        step_list.append(term.t_start + dur * u_lo)
-                    step_list.append(term.t_start + dur * panels[-1][1])
-            elif isinstance(term, LinearTrend) and term.switched_on:
-                tr = jnp.asarray(term.t_ref, dtype=jnp.float64)
-                t0_candidates.append(tr)
-                step_list.append(tr)
-            elif isinstance(term, GriddedProduction):
-                t0_candidates.append(term.t_grid[0])
-                step_list.append(term.t_grid)
-            elif isinstance(term, (LogGPProduction, GPProduction)) and term.domain is not None:
-                t0_candidates.append(jnp.asarray(term.domain[0], dtype=jnp.float64))
-
-        if t0_override is not None:
-            t_start_int = jnp.asarray(t0_override, dtype=jnp.float64)
-        else:
-            t_start_int = jnp.min(jnp.stack([jnp.reshape(c, ()) for c in t0_candidates]))
-
-        step_ts = None
-        if step_list:
-            flat_steps = jnp.concatenate([jnp.atleast_1d(s) for s in step_list])
-            # Keep strictly inside (t_start_int, latest_obs) or clamp safely
-            step_ts = jnp.sort(flat_steps)
-
-        jump_ts = None
-        if jump_list:
-            flat_jumps = jnp.concatenate([jnp.atleast_1d(j) for j in jump_list])
-            jump_ts = jnp.sort(flat_jumps)
-
-        _ = latest_obs
-        return t_start_int, step_ts, jump_ts
+        return _collect_initial_time_and_events(
+            terms, earliest_obs, latest_obs, t0_override
+        )
 
     def _equilibrium_dy0_and_drift_anchor(
         self,
@@ -1267,23 +1805,9 @@ class DiffraxSolver(AbstractSolver):
         t_start_int: jax.Array,
         q_std: ArrayLike,
     ) -> tuple[jax.Array, jax.Array]:
-        """Compute eternal background state ``dy(t_start_int)`` and secular drift anchor."""
-        dy0 = jnp.zeros((A0.shape[0],), dtype=jnp.float64)
-        secular_rhs_anchor = jnp.zeros((A0.shape[0],), dtype=jnp.float64)
-        v_ss = jnp.linalg.solve(-A0, b_scaled)
-        t1d = jnp.reshape(t_start_int, (1,))
-
-        for term in terms:
-            if isinstance(term, SteadyProduction):
-                dq = term.rate - jnp.asarray(q_std, dtype=jnp.float64)
-                dy0 = dy0 + dq * v_ss
-            elif isinstance(term, HarmonicSolar):
-                dy0 = dy0 + _eval_harmonic_pointwise(A0, b_scaled, term, t1d)[0]
-            elif isinstance(term, LinearTrend) and not term.switched_on:
-                dy0 = dy0 + term.slope * (t_start_int - term.t_ref) * v_ss
-                secular_rhs_anchor = secular_rhs_anchor + term.slope * v_ss
-
-        return dy0, secular_rhs_anchor
+        return _equilibrium_dy0_and_drift_anchor(
+            A0, b_scaled, terms, t_start_int, q_std
+        )
 
     def _A_at(self, cbm: CarbonBoxModel, t: jax.Array) -> jax.Array:
         if self.matrix_A_fn is not None:
@@ -1463,7 +1987,11 @@ class DiffraxSolver(AbstractSolver):
         t0: ArrayLike | None = None,
         y0: ArrayLike | None = None,
     ) -> jax.Array:
-        if not self.has_time_varying_masses:
+        if relative_to not in ("standard", "ambient"):
+            raise ValueError(
+                f"relative_to must be 'standard' or 'ambient'; got {relative_to!r}."
+            )
+        if not (self.has_time_varying_masses or _cbm_has_nonautonomous_masses(cbm)):
             return super().predict_d14c(
                 cbm,
                 production,
@@ -1481,7 +2009,9 @@ class DiffraxSolver(AbstractSolver):
             )
 
         # Time-varying M_c(t) (e.g. fossil-fuel 12C Suess dilution):
-        # integrate instantaneous specific activity (y_c(t) / M_c(t)) / R_ref - 1
+        # integrate instantaneous specific activity normalized by M_c(t) * R_ref,
+        # diluting both pre-industrial ambient offset (delta_global * y_ss / 1000)
+        # and dynamical excursion delta_y(t) consistently by M_c(t).
         a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
@@ -1491,10 +2021,16 @@ class DiffraxSolver(AbstractSolver):
         ts_sorted = all_bounds[order]
 
         A0 = cbm.matrix_A()
-        m0 = cbm.reservoir_masses()
         b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
         y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
         r_ref = cbm.reference_specific_activity(q_std=q_std, alpha_unit=alpha_unit)
+        dg_arr = jnp.asarray(delta_global, dtype=jnp.float64)
+        excursion_scale = (
+            1.0 + dg_arr / 1000.0
+            if relative_to == "ambient"
+            else jnp.asarray(1.0, dtype=jnp.float64)
+        )
+        y_base = y_ss * (1.0 + dg_arr / 1000.0)
         terms = _unpack_terms(production)
 
         t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
@@ -1516,13 +2052,26 @@ class DiffraxSolver(AbstractSolver):
             t: jax.Array, state: tuple[jax.Array, jax.Array], args: Any
         ) -> tuple[jax.Array, jax.Array]:
             dy, _ = state
-            cbm_arg, prod_arg, b_sc, y_ss_arg, A0_arg, sec_anc, r_ref_arg, q_s = args
+            (
+                cbm_arg,
+                prod_arg,
+                b_sc,
+                y_ss_arg,
+                y_base_arg,
+                exc_scale_arg,
+                A0_arg,
+                sec_anc,
+                r_ref_arg,
+                q_s,
+            ) = args
             At = self._A_at(cbm_arg, t)
             mt = self._masses_at(cbm_arg, t)
             dq_t = prod_arg.delta_q(t, q_std=q_s)
             non_auton = (At - A0_arg) @ y_ss_arg
             ddy = At @ dy + non_auton + b_sc * dq_t + sec_anc
-            inst_d14c = 1000.0 * (((y_ss_arg + dy) / mt) / r_ref_arg - 1.0)
+            inst_d14c = 1000.0 * (
+                ((y_base_arg + exc_scale_arg * dy) / mt) / r_ref_arg - 1.0
+            )
             return ddy, inst_d14c
 
         controller = diffrax.PIDController(
@@ -1538,7 +2087,18 @@ class DiffraxSolver(AbstractSolver):
             t1=t_end_int,
             dt0=self.dt0,
             y0=(dy_init, R_int_init),
-            args=(cbm, production, b_scaled, y_ss, A0, secular_anchor, r_ref, q_std),
+            args=(
+                cbm,
+                production,
+                b_scaled,
+                y_ss,
+                y_base,
+                excursion_scale,
+                A0,
+                secular_anchor,
+                r_ref,
+                q_std,
+            ),
             saveat=diffrax.SaveAt(ts=ts_sorted),
             stepsize_controller=controller,
             max_steps=self.max_steps,
@@ -1556,11 +2116,7 @@ class DiffraxSolver(AbstractSolver):
                 axis=1,
             )
 
-        r_ss_ratio = (y_ss / m0) / r_ref
-        d14c_all = (
-            d14c_win + jnp.asarray(delta_global, dtype=jnp.float64) * r_ss_ratio
-        )
-        selected = _select_boxes(d14c_all, box_indices)
+        selected = _select_boxes(d14c_win, box_indices)
         return selected + jnp.asarray(delta_lab, dtype=jnp.float64)
 
 
@@ -1636,6 +2192,8 @@ class ModaxSolver(AbstractSolver):
     rtol: float = eqx.field(static=True)
     atol: float = eqx.field(static=True)
     max_steps: int = eqx.field(static=True)
+    masses_fn: Callable[[jax.Array], jax.Array] | None = eqx.field(static=True)
+    matrix_A_fn: Callable[[jax.Array], jax.Array] | None = eqx.field(static=True)
     _custom_backend_fn: Callable[..., jax.Array] | None = eqx.field(static=True)
 
     def __init__(
@@ -1645,6 +2203,8 @@ class ModaxSolver(AbstractSolver):
         rtol: float = 1e-8,
         atol: float = 1e-8,
         max_steps: int = 100_000,
+        masses_fn: Callable[[jax.Array], jax.Array] | None = None,
+        matrix_A_fn: Callable[[jax.Array], jax.Array] | None = None,
         backend_fn: Callable[..., jax.Array] | None = None,
     ):
         if method not in ("Rodas5P", "Tsit5"):
@@ -1655,7 +2215,23 @@ class ModaxSolver(AbstractSolver):
         self.rtol = float(rtol)
         self.atol = float(atol)
         self.max_steps = int(max_steps)
+        self.masses_fn = masses_fn
+        self.matrix_A_fn = matrix_A_fn
         self._custom_backend_fn = backend_fn
+
+    def _A_at(self, cbm: CarbonBoxModel, t: jax.Array) -> jax.Array:
+        if self.matrix_A_fn is not None:
+            return self.matrix_A_fn(t)
+        return cbm.matrix_A_at(t)
+
+    def _masses_at(self, cbm: CarbonBoxModel, t: jax.Array) -> jax.Array:
+        if self.masses_fn is not None:
+            return self.masses_fn(t)
+        return cbm.reservoir_masses_at(t)
+
+    @property
+    def has_time_varying_masses(self) -> bool:
+        return self.masses_fn is not None or self.matrix_A_fn is not None
 
     @staticmethod
     def wrap_log_likelihood(
@@ -1675,11 +2251,12 @@ class ModaxSolver(AbstractSolver):
         t0: ArrayLike | None = None,
         y0: ArrayLike | None = None,
     ) -> jax.Array:
+        t_arr = jnp.atleast_1d(jnp.asarray(t_eval, dtype=jnp.float64)).reshape(-1)
         if self._custom_backend_fn is not None:
             return self._custom_backend_fn(
                 cbm,
                 production,
-                jnp.atleast_1d(jnp.asarray(t_eval, dtype=jnp.float64)),
+                t_arr,
                 q_std=q_std,
                 alpha_unit=alpha_unit,
                 t0=t0,
@@ -1687,35 +2264,55 @@ class ModaxSolver(AbstractSolver):
             )
 
         modax = _load_modax_module()
-        t_arr = jnp.atleast_1d(jnp.asarray(t_eval, dtype=jnp.float64))
+        if not isinstance(t_arr, jax.core.Tracer):
+            t_sorted, inv_idx = jnp.unique(t_arr, return_inverse=True)
+        else:
+            order = jnp.argsort(t_arr)
+            inv_idx = jnp.argsort(order)
+            t_sorted = t_arr[order]
+
+        A0 = cbm.matrix_A()
         b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
         y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-        t_init = t_arr[0] if t0 is None else jnp.asarray(t0, dtype=jnp.float64)
-        dy_init = (
-            jnp.zeros((cbm.n_boxes,), dtype=jnp.float64)
-            if y0 is None
-            else jnp.asarray(y0, dtype=jnp.float64) - y_ss
+        terms = _unpack_terms(production)
+
+        t_start_int, _, _ = _collect_initial_time_and_events(
+            terms, t_sorted[0], t_sorted[-1], t0
         )
+        t_end_int = jnp.maximum(t_sorted[-1], t_start_int + 1e-9)
+
+        dy0_eq, secular_anchor = _equilibrium_dy0_and_drift_anchor(
+            A0, b_scaled, terms, t_start_int, q_std
+        )
+        if y0 is not None:
+            dy_init = jnp.asarray(y0, dtype=jnp.float64) - y_ss
+            secular_anchor = jnp.zeros_like(secular_anchor)
+        else:
+            dy_init = dy0_eq
 
         solver_cls = getattr(modax, self.method)
 
         def _rhs(t: jax.Array, dy: jax.Array, args: Any) -> jax.Array:
-            cbm_a, prod_a, b_sc, q_s = args
-            return cbm_a.matrix_A_at(t) @ dy + b_sc * prod_a.delta_q(t, q_std=q_s)
+            cbm_a, prod_a, b_sc, y_ss_a, A0_a, sec_anc, q_s = args
+            At = self._A_at(cbm_a, t)
+            dq_t = prod_a.delta_q(t, q_s)
+            non_auton = (At - A0_a) @ y_ss_a
+            return At @ dy + non_auton + b_sc * dq_t + sec_anc
 
         sol = modax.diffeqsolve(
             _rhs,
             solver_cls(),
-            t0=t_init,
-            t1=t_arr[-1],
+            t0=t_start_int,
+            t1=t_end_int,
             y0=dy_init,
-            ts=t_arr,
-            args=(cbm, production, b_scaled, q_std),
+            ts=t_sorted,
+            args=(cbm, production, b_scaled, y_ss, A0, secular_anchor, q_std),
             rtol=self.rtol,
             atol=self.atol,
             max_steps=self.max_steps,
         )
-        return getattr(sol, "ys", sol)
+        ys_sorted = getattr(sol, "ys", sol)
+        return ys_sorted[inv_idx]
 
     def solve_delta_binned(
         self,
@@ -1751,3 +2348,80 @@ class ModaxSolver(AbstractSolver):
         assert w_2d is not None
         n_r, m_w = orig_shape
         return jnp.sum(avg.reshape((n_r, m_w, cbm.n_boxes)) * w_2d[:, :, None], axis=1)
+
+    def predict_d14c(
+        self,
+        cbm: CarbonBoxModel,
+        production: ProductionTerm,
+        t_starts: ArrayLike,
+        t_ends: ArrayLike,
+        *,
+        sub_weights: ArrayLike | None = None,
+        box_indices: int | ArrayLike | None = None,
+        q_std: ArrayLike = DEFAULT_Q_STD,
+        alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+        delta_global: ArrayLike = 0.0,
+        delta_lab: ArrayLike = 0.0,
+        relative_to: Literal["standard", "ambient"] = "standard",
+        t0: ArrayLike | None = None,
+        y0: ArrayLike | None = None,
+    ) -> jax.Array:
+        if relative_to not in ("standard", "ambient"):
+            raise ValueError(
+                f"relative_to must be 'standard' or 'ambient'; got {relative_to!r}."
+            )
+        if not (self.has_time_varying_masses or _cbm_has_nonautonomous_masses(cbm)):
+            return super().predict_d14c(
+                cbm,
+                production,
+                t_starts,
+                t_ends,
+                sub_weights=sub_weights,
+                box_indices=box_indices,
+                q_std=q_std,
+                alpha_unit=alpha_unit,
+                delta_global=delta_global,
+                delta_lab=delta_lab,
+                relative_to=relative_to,
+                t0=t0,
+                y0=y0,
+            )
+
+        a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
+            t_starts, t_ends, sub_weights
+        )
+        xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
+        wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
+        quad_t = (a_flat[:, None] + (b_flat - a_flat)[:, None] * xi[None, :]).reshape(-1)
+        dy_quad = self.solve_delta_trajectory(
+            cbm,
+            production,
+            quad_t,
+            q_std=q_std,
+            alpha_unit=alpha_unit,
+            t0=t0,
+            y0=y0,
+        )
+        mt_quad = jax.vmap(lambda ti: self._masses_at(cbm, ti))(quad_t)
+        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
+        r_ref = cbm.reference_specific_activity(q_std=q_std, alpha_unit=alpha_unit)
+        dg_arr = jnp.asarray(delta_global, dtype=jnp.float64)
+        excursion_scale = (
+            1.0 + dg_arr / 1000.0
+            if relative_to == "ambient"
+            else jnp.asarray(1.0, dtype=jnp.float64)
+        )
+        y_base = y_ss * (1.0 + dg_arr / 1000.0)
+        inst_d14c = 1000.0 * (
+            ((y_base[None, :] + excursion_scale * dy_quad) / mt_quad) / r_ref - 1.0
+        ).reshape((a_flat.shape[0], xi.shape[0], cbm.n_boxes))
+        d14c_win = jnp.einsum("wqn,q->wn", inst_d14c, wq)
+        if not is_1d:
+            assert w_2d is not None
+            n_r, m_w = orig_shape
+            d14c_win = jnp.sum(
+                d14c_win.reshape((n_r, m_w, cbm.n_boxes)) * w_2d[:, :, None],
+                axis=1,
+            )
+        selected = _select_boxes(d14c_win, box_indices)
+        return selected + jnp.asarray(delta_lab, dtype=jnp.float64)

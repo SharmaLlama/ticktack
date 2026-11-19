@@ -1210,6 +1210,60 @@ class OpenCBM(CarbonBoxModel):
         )
 
 
+def _calibrate_effective_deep_sink_jax(
+    n_boxes: int,
+    log_k_strat_to_trop: jax.Array,
+    log_k_trop_to_strat: jax.Array,
+    log_k_trop_to_sinks: jax.Array,
+    log_sink_taus: jax.Array,
+    *,
+    eta_strat: float,
+    trop_mass: float,
+    target_r_ref: float,
+    decay_rate: float,
+    q_std: float = DEFAULT_Q_STD,
+    alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+) -> jax.Array:
+    """Smooth ``C^infty`` JAX calibration of ``k_deep >= 0`` to match ``target_r_ref``."""
+    lam = jnp.asarray(decay_rate, dtype=jnp.float64)
+    k01 = jnp.exp(log_k_strat_to_trop)
+    k10 = jnp.exp(log_k_trop_to_strat)
+
+    rhs_top = (1.0 - eta_strat) + eta_strat * k01 / (lam + k01)
+    target_g1 = (trop_mass * target_r_ref) / (alpha_unit * q_std)
+    target_denom = rhs_top / target_g1
+    strat_term = lam * k10 / (lam + k01)
+    eps_lo = 1e-6 * lam
+
+    if n_boxes == 2:
+        raw_k = target_denom - lam - strat_term
+        return eps_lo * jax.nn.softplus(raw_k / eps_lo)
+
+    k_up_all = jnp.exp(log_k_trop_to_sinks)
+    inv_taus = jnp.exp(-log_sink_taus)
+    other_sinks = (
+        jnp.sum(k_up_all[:-1] * lam / (lam + inv_taus[:-1]))
+        if n_boxes > 3
+        else jnp.asarray(0.0, dtype=jnp.float64)
+    )
+    needed_last = target_denom - lam - strat_term - other_sinks
+    k_up = k_up_all[-1]
+    inv_tau_last = inv_taus[-1]
+
+    # Smooth C^infty upper barrier keeping eff_needed < k_up without any jump:
+    # den = margin * k_up + eps_hi * softplus((max_needed - needed_last) / eps_hi)
+    # equals k_up - needed_last to machine precision in the interior (needed_last <= 0.95 * k_up)
+    # and smoothly approaches margin * k_up > 0 as needed_last -> +inf.
+    margin = 1e-3
+    max_needed = (1.0 - margin) * k_up
+    eps_hi = margin * k_up
+    den = margin * k_up + eps_hi * jax.nn.softplus((max_needed - needed_last) / eps_hi)
+    eff_needed = k_up - den
+
+    raw_k = (eff_needed * (lam + inv_tau_last) - k_up * lam) / den
+    return eps_lo * jax.nn.softplus(raw_k / eps_lo)
+
+
 def _calibrate_effective_deep_sink(
     n_boxes: int,
     k_strat_to_trop: float,
@@ -1225,36 +1279,26 @@ def _calibrate_effective_deep_sink(
     alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
 ) -> float:
     """Solve analytically for ``k_deep >= 0`` on the slowest box to match ``target_r_ref``."""
-    lam = float(decay_rate)
-    rhs_top = (1.0 - eta_strat) + eta_strat * k_strat_to_trop / (lam + k_strat_to_trop)
-    target_g1 = (trop_mass * target_r_ref) / (alpha_unit * q_std)
-    target_denom = rhs_top / target_g1
-
-    strat_term = lam * k_trop_to_strat / (lam + k_strat_to_trop)
-    if n_boxes == 2:
-        k_deep = target_denom - lam - strat_term
-        return max(float(k_deep), 0.0)
-
-    m = n_boxes - 2
-    other_sinks = 0.0
-    for j in range(m - 1):
-        inv_tau = 1.0 / float(sink_taus[j])
-        other_sinks += float(k_trop_to_sinks[j]) * lam / (lam + inv_tau)
-
-    needed_last = target_denom - lam - strat_term - other_sinks
-    k_up = float(k_trop_to_sinks[m - 1])
-    inv_tau_last = 1.0 / float(sink_taus[m - 1])
-
-    # Solve k_up * (lam + k_deep) / (lam + inv_tau_last + k_deep) = needed_last
-    if needed_last <= k_up * lam / (lam + inv_tau_last):
-        return 0.0
-    if needed_last >= k_up * 0.999:
-        # Cap if single sink uptake is near saturation
-        return float(10.0 * inv_tau_last)
-
-    num = needed_last * (lam + inv_tau_last) - k_up * lam
-    den = k_up - needed_last
-    return max(float(num / den), 0.0)
+    k_up_arr = np.asarray(k_trop_to_sinks, dtype=np.float64)
+    taus_arr = np.asarray(sink_taus, dtype=np.float64)
+    val = _calibrate_effective_deep_sink_jax(
+        n_boxes,
+        jnp.log(jnp.asarray(k_strat_to_trop, dtype=jnp.float64)),
+        jnp.log(jnp.asarray(k_trop_to_strat, dtype=jnp.float64)),
+        jnp.log(jnp.asarray(k_up_arr, dtype=jnp.float64))
+        if k_up_arr.size > 0
+        else jnp.zeros((0,), dtype=jnp.float64),
+        jnp.log(jnp.asarray(taus_arr, dtype=jnp.float64))
+        if taus_arr.size > 0
+        else jnp.zeros((0,), dtype=jnp.float64),
+        eta_strat=eta_strat,
+        trop_mass=trop_mass,
+        target_r_ref=target_r_ref,
+        decay_rate=decay_rate,
+        q_std=q_std,
+        alpha_unit=alpha_unit,
+    )
+    return float(val)
 
 
 def _inv_softplus(y: float) -> float:
@@ -1271,24 +1315,31 @@ class EffectiveCBM(CarbonBoxModel):
     1. Fixed cosmic-ray stratospheric production fraction ``eta_strat = 0.70``
        (eliminating the continuous ``(k_01, k_10, eta)`` 3-into-2 gauge mode).
     2. Fixed reference tropospheric mass ``trop_mass = 501.5 GtC`` (fixing the
-       zero-Fisher global mass-scale gauge) and calibrated open deep-ocean loss rate
-       ``deep_sink_rate >= 0`` on the slowest box so pre-industrial ``R_ref`` matches
-       ``Guttler15`` (``~1.3195 kg/GtC``).
+       zero-Fisher global mass-scale gauge) and dynamically calibrated open loss
+       rate ``deep_sink_rate >= 0`` on the slowest reservoir (``Sink_{K-2}`` for
+       ``K >= 3``, or effective atmosphere-to-ocean sequestration on ``Troposphere``
+       for ``K == 2``) so pre-industrial ``R_ref`` matches ``Guttler15``
+       (``~1.3195 kg/GtC``) smoothly across all PyTree updates and autodiff passes.
     3. Strict sink residence-time ordering ``ln tau_1 < ln tau_2 < ... < ln tau_{K-2}``
        via ``softplus`` increments ``ln tau_j = ln tau_{j-1} + softplus(delta_j)``,
        eliminating all ``(K - 2)!`` discrete sink-permutation modes.
 
-    The dynamic JAX array leaves have total dimension ``1 + 1 + (K - 2) + (K - 2) = 2K - 2``.
+    The dynamic JAX array leaves have total dimension ``1 + 1 + (K - 2) + (K - 2) = 2K - 2``
+    when ``deep_sink_rate`` is calibrated dynamically (default).
     """
 
     log_k_strat_to_trop: jax.Array
     log_k_trop_to_strat: jax.Array
     log_k_trop_to_sinks: jax.Array
     sink_tau_params: jax.Array
+    explicit_deep_sink_rate: jax.Array | None
     K: int = eqx.field(static=True)
     eta_strat: float = eqx.field(static=True)
     trop_mass: float = eqx.field(static=True)
-    deep_sink_rate: float = eqx.field(static=True)
+    calibrate_deep_sink: bool = eqx.field(static=True)
+    target_r_ref: float = eqx.field(static=True)
+    q_std_cal: float = eqx.field(static=True)
+    alpha_unit_cal: float = eqx.field(static=True)
 
     def __init__(
         self,
@@ -1300,9 +1351,11 @@ class EffectiveCBM(CarbonBoxModel):
         sink_tau_params: ArrayLike | None = None,
         eta_strat: float = 0.70,
         trop_mass: float = GUTTLER15_TROP_MASS_GTC,
-        deep_sink_rate: float | None = None,
+        deep_sink_rate: ArrayLike | None = None,
         target_r_ref: float = GUTTLER15_R_REF_KG_PER_GTC,
         decay_rate: float = DECAY_CAMBRIDGE,
+        q_std: float = DEFAULT_Q_STD,
+        alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
     ):
         k_int = int(K)
         if k_int < 2:
@@ -1333,6 +1386,9 @@ class EffectiveCBM(CarbonBoxModel):
         self.eta_strat = float(eta_strat)
         self.trop_mass = float(trop_mass)
         self.decay_rate = float(decay_rate)
+        self.target_r_ref = float(target_r_ref)
+        self.q_std_cal = float(q_std)
+        self.alpha_unit_cal = float(alpha_unit)
 
         # Physically motivated defaults matching Guttler15 stratosphere & decadal/centennial uptake
         default_k01 = 45.0 / 88.5
@@ -1395,35 +1451,23 @@ class EffectiveCBM(CarbonBoxModel):
             )
 
         if deep_sink_rate is None:
-            c_k01 = _concrete_array(jnp.exp(self.log_k_strat_to_trop))
-            c_k10 = _concrete_array(jnp.exp(self.log_k_trop_to_strat))
-            c_kup = _concrete_array(jnp.exp(self.log_k_trop_to_sinks))
-            c_taus = _concrete_array(self.sink_timescales())
-            if (
-                c_k01 is not None
-                and c_k10 is not None
-                and c_kup is not None
-                and c_taus is not None
-            ):
-                self.deep_sink_rate = _calibrate_effective_deep_sink(
-                    k_int,
-                    float(c_k01),
-                    float(c_k10),
-                    c_kup,
-                    c_taus,
-                    eta_strat=self.eta_strat,
-                    trop_mass=self.trop_mass,
-                    target_r_ref=float(target_r_ref),
-                    decay_rate=self.decay_rate,
-                )
-            else:
-                self.deep_sink_rate = 0.005
+            self.calibrate_deep_sink = True
+            self.explicit_deep_sink_rate = None
         else:
-            self.deep_sink_rate = float(deep_sink_rate)
+            self.calibrate_deep_sink = False
+            self.explicit_deep_sink_rate = jnp.asarray(
+                deep_sink_rate, dtype=jnp.float64
+            ).reshape(())
 
     @property
     def n_parameters(self) -> int:
-        return 2 * self.K - 2
+        base = 2 * self.K - 2
+        return base if self.explicit_deep_sink_rate is None else base + 1
+
+    @property
+    def deep_sink_rate(self) -> jax.Array:
+        """Active open loss rate ``k_deep`` (``yr^-1``) on the deepest box."""
+        return self.sink_rates()[-1]
 
     def log_sink_timescales(self) -> jax.Array:
         """Strictly ordered log residence times ``ln tau_1 < ... < ln tau_{K-2}``."""
@@ -1474,7 +1518,25 @@ class EffectiveCBM(CarbonBoxModel):
 
     def sink_rates(self) -> jax.Array:
         out = jnp.zeros((self.n_boxes,), dtype=jnp.float64)
-        return out.at[-1].set(float(self.deep_sink_rate))
+        if not self.calibrate_deep_sink:
+            assert self.explicit_deep_sink_rate is not None
+            return out.at[-1].set(
+                jnp.maximum(jnp.asarray(self.explicit_deep_sink_rate, dtype=jnp.float64), 0.0)
+            )
+        k_deep = _calibrate_effective_deep_sink_jax(
+            self.K,
+            self.log_k_strat_to_trop,
+            self.log_k_trop_to_strat,
+            self.log_k_trop_to_sinks,
+            self.log_sink_timescales(),
+            eta_strat=self.eta_strat,
+            trop_mass=self.trop_mass,
+            target_r_ref=self.target_r_ref,
+            decay_rate=self.decay_rate,
+            q_std=self.q_std_cal,
+            alpha_unit=self.alpha_unit_cal,
+        )
+        return out.at[-1].set(k_deep)
 
     def production_vector(self) -> jax.Array:
         out = jnp.zeros((self.n_boxes,), dtype=jnp.float64)
