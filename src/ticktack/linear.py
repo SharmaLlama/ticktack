@@ -2278,7 +2278,7 @@ def kalman_gp_marginal(
                 [jnp.zeros((d_xi, n_tracks), dtype=jnp.float64), phi_xi],
             ]
         )
-        # Tiny 1e-30 variance on idle accumulator slots keeps P_{k+1|k} strictly SPD for RTS
+        # Tiny 1e-30 variance on idle accumulator slots keeps slot diagonal non-zero
         idle_reg = 1e-30 * jnp.eye(n_tracks, dtype=jnp.float64)
         sig_aa = wk @ sig_ss @ wk.T + idle_reg
         sig_a_xi = wk @ sig_s_xi
@@ -2417,8 +2417,12 @@ def kalman_gp_marginal(
         m_next_s, p_next_s, mx_next_s = carry
         m_k_f, p_k_f, m_kp1_p, p_kp1_p, phi_k, mx_k_f, mx_kp1_p = inputs
         # G_k = P_{k|k} Φ_kᵀ P_{k+1|k}⁻¹ => G_kᵀ = P_{k+1|k}⁻¹ (Φ_k P_{k|k})
+        # Scale-matched Tikhonov ridge inside RTS only keeps P_reg = P_{k+1|k} + eps I
+        # strictly SPD on uncontrollable 22-box CBM modes without perturbing forward loglike,
+        # while P_reg >= Φ_k P_{k|k} Φ_kᵀ guarantees P_{k|N} >= 0 by Schur complement.
+        eps_rts = 1e-12 * jnp.maximum(jnp.max(jnp.abs(jnp.diag(p_kp1_p))), 1e-18)
         chol_p = jnp.linalg.cholesky(
-            p_kp1_p + 1e-30 * jnp.eye(d_state, dtype=jnp.float64)
+            0.5 * (p_kp1_p + p_kp1_p.T) + eps_rts * jnp.eye(d_state, dtype=jnp.float64)
         )
         g_t = jsl.cho_solve((chol_p, True), phi_k @ p_k_f)
         g_k = g_t.T
