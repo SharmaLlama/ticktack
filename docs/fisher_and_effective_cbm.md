@@ -2,7 +2,7 @@
 
 Published multi-reservoir carbon box models contain up to 22 boxes and more than 50 exchange rates (`Brehm21` has 22 boxes and 56 directed flow-balanced rates, or 52 under N/S symmetry tying; `Guttler15` has 11 boxes and 20 rates). Yet tree-ring $\Delta^{14}\text{C}$ observations measure only **one** (or in two-hemisphere compilations, two closely coupled) tropospheric reservoir(s) over a finite window of decades. Attempting to infer all 56 transfer rates jointly with cosmic-ray production $Q(t)$ produces severe posterior ridges and non-identifiability.
 
-`ticktack.fisher`, `EffectiveCBM`, and `sample_smc` turn this structural ill-conditioning into a quantitative, gauge-free model-selection framework.
+`ticktack.fisher`, `EffectiveCBM`, `SubspaceCBM`, and `sample_smc` turn this structural ill-conditioning into a quantitative, gauge-free model-selection and subspace-inference framework.
 
 ---
 
@@ -71,7 +71,14 @@ Given noise-whitened forward Jacobians $\widetilde{J}_\theta = \Sigma_n^{-1/2} \
      I_{\text{bits}} = \frac{1}{2\ln 2}\sum_{k=1}^d \ln(1 + \mu_k).
      $$
 
-For relaxation-mode analysis in observable pole–residue coordinates $\{(r_k, \gamma_k)\}$ of the impulse response $g_{\text{trop}}(\tau) = \sum_k r_k e^{-\gamma_k \tau}$, `relaxation_fisher_modes` maps the data window directly onto the Laplace eigenmodes of $A$.
+For relaxation-mode analysis in observable pole–residue coordinates $\{(r_k, \gamma_k)\}$ of the impulse response $g_{\text{trop}}(\tau) = \sum_k r_k e^{-\gamma_k \tau}$, `relaxation_fisher_modes` maps the data window directly onto the Laplace eigenmodes of $A$. To inspect which physical reservoirs participate in each Fisher direction, `plot_cbm_tikz_modes` renders the normalized signed reservoir loadings on the published [Zhang et al. (2022, arXiv:2210.13775)](https://arxiv.org/abs/2210.13775) TikZ box geometries using node `alpha` opacity weighting and a symmetric diverging `RdBu_r` colourbar.
+
+### Small-Eigenvalue Fisher Modes ($10^{-9} < \mu_k < 1$) vs the Observation-Span Nullspace
+
+Evaluating `cbm_fisher_spectrum` for `Brehm21` (22 boxes, 56 directed free rates) on the 774 CE compilation (`775CE`) illustrates the separation between data-dominated modes, weakly informed physical modes, and the exact observation-span nullspace:
+
+- **Data-dominated modes ($\mu_k > 1$, modes $1\text{--}3$)**: Only the top three modes cross the prior-to-data threshold $\mu_k = 1$ ($\mu_1 \approx 34.3$ down to $\mu_3 \gtrsim 1$), giving $d_{\text{eff}} \approx 2\text{--}3$ and driving fast stratosphere–troposphere–biosphere and mixed-layer dilution.
+- **Small-eigenvalue physical modes ($10^{-9} < \mu_k < 1$, modes $4\text{--}12$)**: A further nine genuine eigenmodes remain well above numerical noise (down to $\mu_{12} \approx 2.1 \times 10^{-8}$) before a 21-decade rank cliff ($\mu_{13} \sim 10^{-29}$) imposed by the finite observation span and the 14 post-spike NH/SH seasonal sampling bins (`k > 12`). Although prior-dominated at the nominal $\sigma_0 = 0.35$ log-rate width on a decadal spike, modes $4\text{--}12$ capture physical surface-ocean, litter, biospheric, and inter-hemispheric asymmetry directions that matter under broader rate priors or when published transfer rates are misspecified, shifting the inferred fit and coupling to spike duration and fluence.
 
 ```python
 import jax.numpy as jnp
@@ -109,7 +116,19 @@ The total dynamic parameter count is therefore **$1 + 1 + (K - 2) + (K - 2) = 2K
 
 ---
 
-## 4. Tempered Sequential Monte Carlo & Bayesian Evidence (`sample_smc`)
+## 4. Fisher Subspace Parametrization (`SubspaceCBM`)
+
+Rather than discarding all carbon-cycle uncertainty outside a minimal star graph, `SubspaceCBM` (aliased as `FisherSubspaceCBM`) restricts a flow-balanced Perron–Frobenius model to its top $m$ Schur-marginalized Fisher log-rate eigenmodes while maintaining exact Kirchhoff mass balance everywhere:
+
+$$
+\ln \mathbf{k}_{\text{free}}(\boldsymbol{\alpha}) = \ln \mathbf{k}_{\text{free},0} + B\,\boldsymbol{\alpha}, \qquad \boldsymbol{\alpha} \in \mathbb{R}^m.
+$$
+
+Constructed via `SubspaceCBM.from_fisher(base_cbm, spectrum, n_modes)`, the static basis matrix $B$ equals `spectrum.parameter_loadings[:p_free, :n_modes]` (where `p_free` is the number of free log rates in `base_cbm`). Only `alpha` is dynamic (`alpha = 0` reproduces `base_cbm` to machine precision, and `to_balanced_cbm()` converts any sample back to a `BalancedCBM`), leaving zero gauge nullspace in `ParameterSpace` and `cbm_fisher_spectrum`. Because $B = L_{\Pi} V_{:,:m}$, placing an independent standard normal prior `ParamSpec("cbm.alpha", "identity", prior_mean=0.0, prior_sd=1.0)` on `alpha` is mathematically identical to restricting the $\mathcal{N}(\ln \mathbf{k}_0, \Sigma_0)$ prior of `BalancedCBM` to its leading $m$ Schur-marginalized Fisher eigenmodes – letting joint `fit_map` or `sample_nuts` fits include small-eigenvalue modes ($10^{-9} < \mu_k < 1$, e.g. $m = 6$ or $m = 12$) without exploring the $k > 12$ nullspace. Full parametric posteriors over `alpha` and spike coordinates from either `sample_nuts` or weighted `sample_smc` ensembles can then be inspected with `plot_corner` (`ChainConsumer >= 1.0`).
+
+---
+
+## 5. Tempered Sequential Monte Carlo & Bayesian Evidence (`sample_smc`)
 
 To select the reservoir count $K \in \{1, 2, 3, 4\}$ (or compare competing spike profiles and CBMs) via exact Bayes factors $B_{K, K'} = Z_K / Z_{K'}$ without harmonic-mean or Laplace approximations, `ticktack.sampling.sample_smc` wraps [`BlackJAX`](https://blackjax-devs.github.io/blackjax/)'s **adaptive tempered Sequential Monte Carlo** sampler:
 

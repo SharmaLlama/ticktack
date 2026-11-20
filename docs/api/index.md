@@ -14,7 +14,7 @@ Specialized constants, preset serialization helpers, and low-level linear-algebr
 
 ### Models & Forward Operators
 
-- **[Carbon Box Models & Presets](cbm.md)** (`ticktack.cbm`, `ticktack.presets`, `ticktack.constants`): `Topology`, `CarbonBoxModel`, `FixedCBM`, `BalancedCBM`, `ReversibleCBM`, `OpenCBM`, `EffectiveCBM`, `load_preset`, `PresetSpec`, and radiometric/isotopic constants.
+- **[Carbon Box Models & Presets](cbm.md)** (`ticktack.cbm`, `ticktack.presets`, `ticktack.constants`): `Topology`, `CarbonBoxModel`, `FixedCBM`, `BalancedCBM`, `ReversibleCBM`, `OpenCBM`, `EffectiveCBM`, `SubspaceCBM` (`FisherSubspaceCBM`), `load_preset`, `PresetSpec`, and radiometric/isotopic constants.
 - **[Production Terms](production.md)** (`ticktack.production`): `ProductionTerm`, `SteadyProduction`, `MiyakeSpike`, `HarmonicSolar`, `LinearTrend`, `GriddedProduction`, `GPProduction`, `LogGPProduction`, and `ProductionSum`.
 - **[Solvers & RadiocarbonModel](solvers_model.md)** (`ticktack.solvers`, `ticktack.model`): `ExactLinearSolver`, `DiffraxSolver`, `ModaxSolver`, `wrap_jvp_only_scalar_fn`, and `RadiocarbonModel`.
 
@@ -27,4 +27,4 @@ Specialized constants, preset serialization helpers, and low-level linear-algebr
 ### Bayesian Inference, Fisher Geometry, & Visualization
 
 - **[Likelihood, Fitting, Sampling & Fisher](inference.md)** (`ticktack.likelihood`, `ticktack.fitting`, `ticktack.sampling`, `ticktack.fisher`): `ParamSpec`, `ParameterSpace`, `LinearMarginalConfig`, `marginal_log_likelihood`, `linear_posterior`, `fit_map`, `sample_nuts`, `fit_svi`, `sample_smc`, `cbm_fisher_spectrum`, and `relaxation_fisher_modes`.
-- **[Plotting & Legacy Compatibility](plotting_legacy.md)** (`ticktack.plotting` & legacy `v1` reproduction flags): `plot_d14c_fit`, `plot_production_posterior`, `plot_fisher_spectrum`, `plot_cbm_eigenmodes`, `plot_field_draws`, `plot_evidence_grid`, and legacy `ticktack 1.x` audit options.
+- **[Plotting & Legacy Compatibility](plotting_legacy.md)** (`ticktack.plotting` & legacy `v1` reproduction flags): `plot_d14c_fit`, `plot_production_posterior`, `plot_fisher_spectrum`, `plot_cbm_eigenmodes`, `plot_cbm_tikz_modes`, `plot_corner`, `plot_field_draws`, `plot_evidence_grid`, and legacy `ticktack 1.x` audit options.
