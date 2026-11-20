@@ -565,6 +565,34 @@ def _laplace_cov_rev_jit(
     return 0.5 * (cov + cov.T)
 
 
+@eqx.filter_jit
+def _neg_log_post_grad_jit(
+    u_vec: jax.Array,
+    fast_lk_spec: FastLogLikeSpec,
+    map_space: Literal["unconstrained", "constrained"],
+) -> jax.Array:
+    return jax.grad(lambda u_: _neg_log_post_from_spec(u_, fast_lk_spec, map_space))(
+        u_vec
+    )
+
+
+def _regularize_hessian_to_cov(
+    H: jax.Array,
+    prior_sds: jax.Array,
+    regularize: float,
+) -> jax.Array:
+    H_sym = 0.5 * (H + H.T)
+    prior_prec_floor = 1.0 / jnp.maximum(jnp.max(jnp.square(prior_sds)), 1.0)
+    eigvals, eigvecs = jnp.linalg.eigh(H_sym)
+    scale_floor = jnp.maximum(
+        regularize * jnp.maximum(jnp.max(jnp.abs(eigvals)), 1.0),
+        1e-8 * prior_prec_floor,
+    )
+    safe_eigvals = jnp.maximum(eigvals, scale_floor)
+    cov = (eigvecs * (1.0 / safe_eigvals)[None, :]) @ eigvecs.T
+    return 0.5 * (cov + cov.T)
+
+
 def _laplace_covariance(
     u_map: jax.Array,
     model: RadiocarbonModel,
@@ -594,6 +622,24 @@ def _laplace_covariance(
         else fast_lk_spec
     )
     reg_flt = float(regularize)
+    if spec.mode == "dynamic" and model.cbm.n_boxes > 8:
+        # Central finite-difference of exact 1st-order grad avoids massive
+        # 2nd-order Van Loan expm XLA graphs on large multi-box CBMs while
+        # achieving O(eps^2) ~ 1e-10 Hessian accuracy in float64.
+        eps = 1e-5
+        eye = jnp.eye(d, dtype=jnp.float64)
+        cols = [
+            (
+                _neg_log_post_grad_jit(u_map + eps * eye[i], spec, map_space)
+                - _neg_log_post_grad_jit(u_map - eps * eye[i], spec, map_space)
+            )
+            / (2.0 * eps)
+            for i in range(d)
+        ]
+        H = jnp.column_stack(cols)
+        return _regularize_hessian_to_cov(
+            H, spec.parameter_space.prior_sds, reg_flt
+        )
     if d <= 16:
         return _laplace_cov_fwd_jit(u_map, spec, reg_flt, map_space)
     return _laplace_cov_rev_jit(u_map, spec, reg_flt, map_space)

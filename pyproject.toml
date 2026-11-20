@@ -35,6 +35,8 @@ dependencies = [
     "h5py",
     "scipy",
     "matplotlib",
+    "pandas",
+    "chainconsumer>=1.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

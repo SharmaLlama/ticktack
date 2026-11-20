@@ -49,6 +49,7 @@ from .likelihood import (
     _marginal_design_is_static,
     _offset_column_count,
     _offset_only_cfg,
+    _partition_terms_for_cfg,
     _uses_joint_mode,
     joint_log_likelihood,
     linear_posterior,
@@ -186,13 +187,14 @@ def _nuts_cond_draw_batch_jit(
     lin_cfg: LinearMarginalConfig,
     t_fine_arr: jax.Array | None,
     sigma_jitter_arr: jax.Array | None,
-) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
+    n_solar: int = 0,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
     n_series = dataset.n_series
     n_off = _offset_column_count(lin_cfg, n_series)
 
     def _cond_draw_one(
         u_one: jax.Array, key_one: jax.Array
-    ) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
+    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array | None, jax.Array | None]:
         m_one = parameter_space.constrain(u_one, model)
         lp = linear_posterior(
             m_one,
@@ -227,9 +229,18 @@ def _nuts_cond_draw_batch_jit(
             g_draw = jnp.asarray(0.0, dtype=jnp.float64)
             l_draw = jnp.zeros((n_series,), dtype=jnp.float64)
 
+        if n_solar > 0:
+            s_draw = (
+                w_draw[n_off : n_off + n_solar]
+                if k_tot >= n_off + n_solar
+                else jnp.zeros((n_solar,), dtype=jnp.float64)
+            )
+        else:
+            s_draw = None
+
         qf_d = lp.q_fine_draws[0] if lp.q_fine_draws is not None else None
         df_d = lp.d14c_fine_draws[0] if lp.d14c_fine_draws is not None else None
-        return g_draw, l_draw, qf_d, df_d
+        return g_draw, l_draw, s_draw, qf_d, df_d
 
     return jax.lax.map(
         lambda pair: _cond_draw_one(pair[0], pair[1]),
@@ -489,8 +500,13 @@ def sample_nuts(
         lin_cfg = _offset_only_cfg(cfg) if (joint_mode or is_lgf_marg) else cfg
         n_off = _offset_column_count(lin_cfg, dataset.n_series)
         n_series = dataset.n_series
+        _, _solar_terms, _, _, _ = _partition_terms_for_cfg(model.production, lin_cfg)
+        n_solar = sum(
+            2 * int(jnp.asarray(s.omegas, dtype=jnp.float64).reshape(-1).size)
+            for s in _solar_terms
+        )
 
-        if n_off > 0 or t_fine is not None:
+        if n_off > 0 or n_solar > 0 or t_fine is not None:
             rng_key, lin_key = jax.random.split(rng_key)
             draw_keys = jax.random.split(lin_key, u_flat.shape[0])
             t_fine_arr = (
@@ -528,13 +544,19 @@ def sample_nuts(
                     )
                     if lin_cfg.offset_mode == "per_series" and n_off > 0:
                         g_d = jnp.mean(l_d)
+                    s_d = (
+                        w_draw[n_off : n_off + n_solar]
+                        if n_solar > 0 and w_draw.shape[0] >= n_off + n_solar
+                        else jnp.zeros((n_solar,), dtype=jnp.float64)
+                    )
                     return (
                         g_d,
                         l_d,
+                        s_d,
                         lp.q_fine_draws[0] if lp.q_fine_draws is not None else None,
                         lp.d14c_fine_draws[0] if lp.d14c_fine_draws is not None else None,
                     )
-                g_all, l_all, qf_all, df_all = jax.vmap(_cond_draw_mdx)(u_flat, draw_keys)
+                g_all, l_all, s_all, qf_all, df_all = jax.vmap(_cond_draw_mdx)(u_flat, draw_keys)
             elif (
                 t_fine_arr is None
                 and dataset.n_obs > 0
@@ -577,9 +599,13 @@ def sample_nuts(
                 else:
                     g_all = jnp.zeros((n_draws_tot,), dtype=jnp.float64)
                     l_all = jnp.zeros((n_draws_tot, n_series), dtype=jnp.float64)
+                if n_solar > 0 and k_tot >= n_off + n_solar:
+                    s_all = w_draws[:, n_off : n_off + n_solar]
+                else:
+                    s_all = jnp.zeros((n_draws_tot, n_solar), dtype=jnp.float64)
                 qf_all, df_all = None, None
             else:
-                g_all, l_all, qf_all, df_all = _nuts_cond_draw_batch_jit(
+                g_all, l_all, s_all, qf_all, df_all = _nuts_cond_draw_batch_jit(
                     u_flat,
                     draw_keys,
                     model,
@@ -588,6 +614,7 @@ def sample_nuts(
                     lin_cfg,
                     t_fine_arr,
                     jit_arr,
+                    n_solar=n_solar,
                 )
             if n_off > 0:
                 posterior_dict["offset_global"] = np.asarray(
@@ -595,6 +622,10 @@ def sample_nuts(
                 )
                 posterior_dict["offset_lab"] = np.asarray(
                     l_all.reshape(num_chains, num_samples, n_series)
+                )
+            if n_solar > 0 and s_all is not None:
+                posterior_dict["solar_coeffs"] = np.asarray(
+                    s_all.reshape(num_chains, num_samples, n_solar)
                 )
             if t_fine is not None and qf_all is not None and df_all is not None:
                 idata_groups["posterior_predictive"] = {
