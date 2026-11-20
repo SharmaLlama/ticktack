@@ -180,6 +180,70 @@ class TestDiagnosticPlottingHelpers:
         finally:
             plt.close(fig_raw)
 
+    def test_plot_corner_idata_weighted_smc_and_statelessness(self):
+        import arviz as az
+
+        rc_before = dict(plt.rcParams)
+        rng = np.random.default_rng(42)
+
+        # 1. InferenceData input with param_names mapping + truth crosshairs
+        idata = az.from_dict(
+            {
+                "posterior": {
+                    "t_start": rng.normal(774.5, 0.15, size=(2, 120)),
+                    "duration": np.abs(rng.normal(0.5, 0.12, size=(2, 120))) + 0.05,
+                    "fluence": rng.normal(6.3, 0.30, size=(2, 120)),
+                }
+            }
+        )
+        pnames = {
+            "t_start": r"$t_{\mathrm{start}}$ (CE)",
+            "duration": r"$\tau_d$ (yr)",
+            "fluence": r"$F$",
+        }
+        fig1, axes1 = tt.plot_corner(
+            idata,
+            param_names=pnames,
+            name="NUTS",
+            truth=[774.5, 0.5, 6.3],
+            truth_name="MAP",
+        )
+        try:
+            assert len(fig1.axes) >= 9
+            assert axes1.size == len(fig1.axes)
+        finally:
+            plt.close(fig1)
+
+        # 2. Multi-chain weighted SMC overlay
+        n_p = 180
+        p_flat = np.column_stack(
+            [
+                rng.normal(774.5, 0.15, n_p),
+                np.abs(rng.normal(0.5, 0.12, n_p)) + 0.05,
+                rng.normal(3.4, 0.18, n_p),
+            ]
+        )
+        p_gp = np.column_stack(
+            [
+                rng.normal(774.6, 0.18, n_p),
+                np.abs(rng.normal(0.55, 0.14, n_p)) + 0.05,
+                rng.normal(3.5, 0.40, n_p),
+            ]
+        )
+        w_flat = rng.dirichlet(np.ones(n_p))
+        w_gp = rng.dirichlet(np.ones(n_p))
+        fig2, axes2 = tt.plot_corner(
+            {"Flat Baseline": (p_flat, w_flat), "Marginalized GP": (p_gp, w_gp)},
+            param_names=[r"$t_{\mathrm{start}}$ (CE)", r"$\tau_d$ (yr)", r"$Q / q_0$ (yr)"],
+        )
+        try:
+            assert len(fig2.axes) >= 9
+            assert axes2.size == len(fig2.axes)
+        finally:
+            plt.close(fig2)
+
+        assert dict(plt.rcParams) == rc_before
+
 
 class TestDocsExampleNotebooks:
     @pytest.mark.parametrize("rel_path", DOCS_EXAMPLE_NOTEBOOKS)
@@ -234,7 +298,7 @@ class TestDocsExampleNotebooks:
                     assert raw_png.startswith(b"\x89PNG\r\n\x1a\n")
                     n_png += 1
 
-        assert 5 <= n_code <= 6
+        assert 5 <= n_code <= 7
         assert n_png >= 2
         joined_stdout = "\n".join(all_stdout)
         assert "v1" in joined_stdout and "warm=" in joined_stdout
