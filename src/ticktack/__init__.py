@@ -61,9 +61,11 @@ from .cbm import (  # noqa: E402
     BalancedCBM,
     CarbonBoxModel,
     EffectiveCBM,
+    FisherSubspaceCBM,
     FixedCBM,
     OpenCBM,
     ReversibleCBM,
+    SubspaceCBM,
     Topology,
 )
 
@@ -129,9 +131,11 @@ from .linear import (  # noqa: E402
 
 # Fisher / information-geometry
 from .fisher import (  # noqa: E402
+    CBMModeImpulseResult,
     FisherSpectrumResult,
     RelaxationModesResult,
     cbm_fisher_spectrum,
+    cbm_mode_impulse_responses,
     expected_fisher,
     fisher_projection,
     laplace_covariance,
@@ -170,6 +174,9 @@ from .sampling import (  # noqa: E402
 # Plotting
 from .plotting import (  # noqa: E402
     plot_cbm_eigenmodes,
+    plot_cbm_mode_impulse_responses,
+    plot_cbm_tikz_modes,
+    plot_corner,
     plot_d14c_fit,
     plot_evidence_grid,
     plot_field_draws,
@@ -223,9 +230,11 @@ __all__ = [
     "BalancedCBM",
     "CarbonBoxModel",
     "EffectiveCBM",
+    "FisherSubspaceCBM",
     "FixedCBM",
     "OpenCBM",
     "ReversibleCBM",
+    "SubspaceCBM",
     "Topology",
     # presets
     "load_preset",
@@ -275,9 +284,11 @@ __all__ = [
     "whiten_qr",
     "whiten_rank_one",
     # fisher
+    "CBMModeImpulseResult",
     "FisherSpectrumResult",
     "RelaxationModesResult",
     "cbm_fisher_spectrum",
+    "cbm_mode_impulse_responses",
     "expected_fisher",
     "fisher_projection",
     "laplace_covariance",
@@ -306,6 +317,9 @@ __all__ = [
     "sample_smc",
     # plotting
     "plot_cbm_eigenmodes",
+    "plot_cbm_mode_impulse_responses",
+    "plot_cbm_tikz_modes",
+    "plot_corner",
     "plot_d14c_fit",
     "plot_evidence_grid",
     "plot_field_draws",

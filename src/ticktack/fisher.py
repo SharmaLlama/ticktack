@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any, Literal, NamedTuple
 
 import equinox as eqx
@@ -39,11 +39,16 @@ import jax.numpy as jnp
 import jax.scipy.linalg as jsl
 import numpy as onp
 from jax.flatten_util import ravel_pytree
+from jax.typing import ArrayLike
+
+from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 
 __all__ = [
+    "CBMModeImpulseResult",
     "FisherSpectrumResult",
     "RelaxationModesResult",
     "cbm_fisher_spectrum",
+    "cbm_mode_impulse_responses",
     "expected_fisher",
     "fisher_projection",
     "laplace_covariance",
@@ -136,6 +141,41 @@ def _whiten_jacobian(
     )
 
 
+def _jacfwd_chunked(
+    fn: Callable[[jax.Array], jax.Array],
+    x: jax.Array,
+    *,
+    chunk_size: int = 12,
+) -> jax.Array:
+    """Compute forward-mode Jacobian ``∂fn(x)/∂x`` with bounded XLA compilation memory.
+
+    When ``p <= chunk_size`` or ``x`` is a JAX tracer (e.g. inside ``jax.jit``
+    or higher-order ``jax.grad`` / ``check_grads``), delegates directly to
+    ``jax.jacfwd(fn)(x)`` so low-dimensional problems pay zero overhead and
+    preserve exact higher-order autodiff. When ``p > chunk_size`` and ``x`` is
+    concrete, JIT-compiles a single-tangent JVP kernel once and evaluates it
+    across the ``p`` unit basis vectors, bounding peak XLA memory on large
+    multi-box CBMs while remaining bit-identical in ``float64``.
+    """
+    x_arr = jnp.asarray(x, dtype=jnp.float64).reshape(-1)
+    p = int(x_arr.shape[0])
+    if p == 0:
+        y0 = jnp.asarray(fn(x_arr), dtype=jnp.float64).reshape(-1)
+        return jnp.zeros((y0.shape[0], 0), dtype=jnp.float64)
+
+    c = max(int(chunk_size), 1)
+    if p <= c or _concrete(x_arr) is None:
+        return jax.jacfwd(fn)(x_arr)
+
+    @jax.jit
+    def _jvp1(x_val: jax.Array, tang: jax.Array) -> jax.Array:
+        return jax.jvp(fn, (x_val,), (tang,))[1]
+
+    eye = jnp.eye(p, dtype=jnp.float64)
+    cols = [_jvp1(x_arr, eye[i]) for i in range(p)]
+    return jnp.column_stack(cols)
+
+
 def expected_fisher(
     forward_fn: Callable[[Any], Any],
     params: Any,
@@ -180,7 +220,7 @@ def expected_fisher(
     def flat_forward(vec: jax.Array) -> jax.Array:
         return jnp.asarray(forward_fn(unravel(vec)), dtype=jnp.float64).reshape(-1)
 
-    jacobian = jax.jacfwd(flat_forward)(flat_params)
+    jacobian = _jacfwd_chunked(flat_forward, flat_params)
     whitened = _whiten_jacobian(jacobian, sigma_or_prec, kind=kind)
     fmat = whitened.T @ whitened
     fmat = 0.5 * (fmat + fmat.T)
@@ -652,25 +692,26 @@ def cbm_fisher_spectrum(
                 break
 
     if psi_nuisance is None:
-        j_theta_raw = jax.jacfwd(
-            lambda th: jnp.asarray(forward_fn(unravel_theta(th)), dtype=jnp.float64).reshape(-1)
-        )(flat_theta)
+        j_theta_raw = _jacfwd_chunked(
+            lambda th: jnp.asarray(forward_fn(unravel_theta(th)), dtype=jnp.float64).reshape(-1),
+            flat_theta,
+        )
         w_theta = _whiten_jacobian(j_theta_raw, sigma_or_prec, kind=noise_kind)
         w_psi = jnp.zeros((w_theta.shape[0], 0), dtype=jnp.float64)
         joint_fisher = 0.5 * (w_theta.T @ w_theta + (w_theta.T @ w_theta).T)
     else:
         flat_psi, unravel_psi = _partition_inexact(psi_nuisance)
 
-        def joint_forward(th: jax.Array, ps: jax.Array) -> jax.Array:
+        def joint_forward_flat(z: jax.Array) -> jax.Array:
             return jnp.asarray(
-                forward_fn(unravel_theta(th), unravel_psi(ps)), dtype=jnp.float64
+                forward_fn(unravel_theta(z[:p_full]), unravel_psi(z[p_full:])),
+                dtype=jnp.float64,
             ).reshape(-1)
 
-        j_theta_raw, j_psi_raw = jax.jacfwd(joint_forward, argnums=(0, 1))(
-            flat_theta, flat_psi
-        )
+        flat_joint = jnp.concatenate([flat_theta, flat_psi], axis=0)
+        j_joint_raw = _jacfwd_chunked(joint_forward_flat, flat_joint)
         w_joint = _whiten_jacobian(
-            jnp.concatenate([j_theta_raw, j_psi_raw], axis=1),
+            j_joint_raw,
             sigma_or_prec,
             kind=noise_kind,
         )
@@ -772,7 +813,7 @@ def cbm_fisher_spectrum(
             val = jnp.asarray(mass_fn(unravel_theta(th)), dtype=jnp.float64).reshape(-1)
             return jnp.log(val) if log_space_observables else val
 
-        j_mass = jax.jacfwd(_eval_mass)(flat_theta)
+        j_mass = _jacfwd_chunked(_eval_mass, flat_theta)
         mass_loadings = j_mass @ parameter_loadings
 
     flux_loadings: jax.Array | None = None
@@ -781,7 +822,7 @@ def cbm_fisher_spectrum(
             val = jnp.asarray(flux_fn(unravel_theta(th)), dtype=jnp.float64).reshape(-1)
             return jnp.log(val) if log_space_observables else val
 
-        j_flux = jax.jacfwd(_eval_flux)(flat_theta)
+        j_flux = _jacfwd_chunked(_eval_flux, flat_theta)
         flux_loadings = j_flux @ parameter_loadings
 
     return FisherSpectrumResult(
@@ -998,4 +1039,351 @@ def relaxation_fisher_modes(
         info_nats=info_nats,
         info_bits=info_bits,
         measure=measure,
+    )
+
+
+class CBMModeImpulseResult(NamedTuple):
+    """Per-mode impulse-response perturbations of a Carbon Box Model.
+
+    Attributes
+    ----------
+    t_lag : jax.Array
+        Non-negative post-impulse lag grid ``τ`` (yr), shape ``(n_lag,)``.
+    hemispheres : tuple[str, ...]
+        Hemisphere keys evaluated (e.g. ``("north", "south")``).
+    baseline : dict[str, jax.Array]
+        Nominal tropospheric impulse response ``h_{hem, 0}(τ)`` for each
+        hemisphere, shape ``(n_lag,)``.
+    mode_contributions : dict[str, jax.Array]
+        Directional impulse-response derivatives
+        ``δh_{hem, k}(τ) = ∂h_{hem}(τ; θ_0 + α_k w_k) / ∂α_k |_{α_k=0}``
+        for each hemisphere, shape ``(n_modes, n_lag)``, corresponding to a
+        ``+1 σ_prior`` perturbation along each selected eigenmode.
+    mode_indices : tuple[int, ...]
+        0-based mode indices represented along axis 0 of ``mode_contributions``.
+    eigenvalues : jax.Array
+        Mode eigenvalues ``μ_k`` (from ``spectrum``) or squared singular values
+        ``s_k²`` (from direct impulse-response Jacobian SVD), shape ``(n_modes,)``.
+    singular_values : jax.Array
+        Mode singular values ``s_k = sqrt(μ_k)``, shape ``(n_modes,)``.
+    parameter_loadings : jax.Array
+        Parameter-space mode directions ``w_k = L_Π v_k`` for the selected
+        modes, shape ``(p_full, n_modes)``.
+    units : str
+        Unit convention (``"permil_per_q0_yr"``, ``"permil_per_fluence"``, or
+        ``"raw"``).
+    source : str
+        ``"fisher"`` when pushing forward a supplied ``FisherSpectrumResult``,
+        or ``"impulse_svd"`` when computed via direct continuous impulse-response
+        Jacobian SVD.
+    """
+
+    t_lag: jax.Array
+    hemispheres: tuple[str, ...]
+    baseline: dict[str, jax.Array]
+    mode_contributions: dict[str, jax.Array]
+    mode_indices: tuple[int, ...]
+    eigenvalues: jax.Array
+    singular_values: jax.Array
+    parameter_loadings: jax.Array
+    units: str
+    source: str
+
+
+def _resolve_trop_box_index(cbm: Any, hemisphere: str) -> int:
+    """Resolve the tropospheric box index for ``hemisphere`` on ``cbm``."""
+    try:
+        return int(cbm.box_index("Troposphere", hemisphere=hemisphere))
+    except (ValueError, AttributeError, KeyError):
+        pass
+    topo = cbm.topology
+    h = str(hemisphere).strip().lower()
+    for i, (name, bh) in enumerate(zip(topo.box_names, topo.hemispheres)):
+        if bh == h and "trop" in name.lower():
+            return i
+    trop_idx = topo.trop_box_indices
+    return int(trop_idx[0]) if len(trop_idx) > 0 else 0
+
+
+def _auto_exclude_total_mass_mask(cbm: Any) -> onp.ndarray | None:
+    """Return active-parameter boolean mask excluding ``log_total_mass`` / ``theta_tot``."""
+    if not isinstance(cbm, eqx.Module):
+        return None
+    for gauge_attr in ("log_total_mass", "theta_tot"):
+        if hasattr(cbm, gauge_attr) and eqx.is_inexact_array(getattr(cbm, gauge_attr)):
+            diff_tree, _ = eqx.partition(cbm, eqx.is_inexact_array)
+            ones_tree = jax.tree_util.tree_map(
+                lambda leaf: onp.ones(leaf.shape, dtype=onp.float64), diff_tree
+            )
+            marked_tree = eqx.tree_at(
+                lambda m, attr=gauge_attr: getattr(m, attr),
+                ones_tree,
+                onp.zeros(getattr(diff_tree, gauge_attr).shape, dtype=onp.float64),
+            )
+            flat_mask_np = onp.concatenate(
+                [onp.ravel(leaf) for leaf in jax.tree_util.tree_leaves(marked_tree)]
+            )
+            return flat_mask_np > 0.5
+    return None
+
+
+def _trapezoidal_weights(t_lag: jax.Array) -> jax.Array:
+    """Composite trapezoidal quadrature weights for 1D lag grid ``t_lag``."""
+    n = int(t_lag.shape[0])
+    if n <= 1:
+        return jnp.ones((n,), dtype=jnp.float64)
+    dt = jnp.abs(jnp.diff(t_lag))
+    w = jnp.zeros((n,), dtype=jnp.float64)
+    w = w.at[0].set(0.5 * dt[0])
+    w = w.at[-1].set(0.5 * dt[-1])
+    if n > 2:
+        w = w.at[1:-1].set(0.5 * (dt[:-1] + dt[1:]))
+    return w
+
+
+def cbm_mode_impulse_responses(
+    cbm: Any,
+    t_lag: ArrayLike,
+    spectrum: FisherSpectrumResult | None = None,
+    *,
+    modes: Sequence[int] | None = None,
+    hemispheres: Sequence[Literal["north", "south"]] = ("north", "south"),
+    prior_cbm_sd: float = 0.35,
+    q_std: float = DEFAULT_Q_STD,
+    alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    units: Literal["permil_per_q0_yr", "permil_per_fluence", "raw"] = "permil_per_q0_yr",
+) -> CBMModeImpulseResult:
+    """Compute individual tropospheric impulse-response contributions of CBM eigenmodes.
+
+    For post-impulse lag ``τ >= 0`` (years), let
+    ``g_b(τ; θ) = α_unit e_bᵀ exp(A(θ) τ) b(θ)`` be the causal inventory
+    impulse response in tropospheric reservoir ``b``. In observable ``Δ¹⁴C``
+    units:
+
+    * ``"permil_per_q0_yr"`` (default):
+      ``h_b(τ; θ) = 1000 q_std g_b(τ; θ) / (y_{trop,ss}(θ) m_{rel,b}(θ))``
+      (``‰ / (q_0 yr)``).
+    * ``"permil_per_fluence"``:
+      ``h_b(τ; θ) = 1000 g_b(τ; θ) / (y_{trop,ss}(θ) m_{rel,b}(θ))``
+      (``‰ / (atom cm⁻² s⁻¹ yr)``).
+    * ``"raw"``: ``g_b(τ; θ)``.
+
+    Two modes of operation are supported:
+
+    1. **Fisher-mode pushforward** (``spectrum is not None``): pushes each
+       selected Schur-marginalized parameter loading ``w_k = L_Π v_k``
+       (``+1 σ_prior`` step along Fisher eigenmode ``k``) through ``h_hem(τ; θ)``
+       via exact forward-mode ``jax.jvp``.
+    2. **Direct continuous impulse-response Jacobian SVD** (``spectrum is None``):
+       stacks ``h_hem(τ; θ)`` across ``hemispheres`` and ``t_lag``, applies
+       trapezoidal ``sqrt(Δτ)`` quadrature weighting, computes the prior-whitened
+       SVD ``J_h L_Π = U_h diag(s_k) V_hᵀ`` (excluding ``log_total_mass``), and
+       returns the resulting orthogonal temporal mode contributions.
+    """
+    if units not in ("permil_per_q0_yr", "permil_per_fluence", "raw"):
+        raise ValueError(
+            "units must be 'permil_per_q0_yr', 'permil_per_fluence', or 'raw'; "
+            f"got {units!r}."
+        )
+    hem_tuple = tuple(str(h) for h in hemispheres)
+    if not hem_tuple:
+        raise ValueError("hemispheres must be a non-empty sequence.")
+
+    tau_arr = jnp.asarray(t_lag, dtype=jnp.float64).reshape(-1)
+    n_lag = int(tau_arr.shape[0])
+    if n_lag == 0:
+        raise ValueError("t_lag must be non-empty.")
+    c_tau = _concrete(tau_arr)
+    if c_tau is not None and onp.any(c_tau < 0.0):
+        raise ValueError("All time lags t_lag must be >= 0.")
+
+    box_indices = tuple(_resolve_trop_box_index(cbm, h) for h in hem_tuple)
+    box_idx_arr = jnp.asarray(box_indices, dtype=jnp.int32)
+    trop_idx_arr = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
+    q_std_f = float(q_std)
+    alpha_unit_f = float(alpha_unit)
+
+    # Detect uniform lag grid starting at >= 0 for fast O(1)-expm scan propagation:
+    _use_uniform_scan = False
+    _dt_uniform = 0.0
+    _t0_uniform = 0.0
+    if c_tau is not None and n_lag >= 2:
+        diffs = onp.diff(c_tau)
+        if diffs[0] > 0.0 and onp.allclose(diffs, diffs[0], rtol=1e-10, atol=1e-12):
+            _use_uniform_scan = True
+            _dt_uniform = float(diffs[0])
+            _t0_uniform = float(c_tau[0])
+
+    flat_theta, unravel_theta = _partition_inexact(cbm)
+    p_full = int(flat_theta.shape[0])
+
+    def _eval_h_matrix(th_flat: jax.Array) -> jax.Array:
+        """Return shape ``(n_hem, n_lag)`` observable impulse responses."""
+        cbm_v = unravel_theta(th_flat)
+        mat_a = cbm_v.matrix_A()
+        b_vec = cbm_v.production_vector()
+        if _use_uniform_scan:
+            v0 = jsl.expm(mat_a * _t0_uniform) @ b_vec if _t0_uniform > 0.0 else b_vec
+            step_exp = jsl.expm(mat_a * _dt_uniform)
+
+            def _scan_step(v_curr: jax.Array, _: None) -> tuple[jax.Array, jax.Array]:
+                return step_exp @ v_curr, v_curr
+
+            _, states = jax.lax.scan(_scan_step, v0, None, length=n_lag)
+        else:
+            def _one_tau(tau: jax.Array) -> jax.Array:
+                return jsl.expm(mat_a * jnp.maximum(tau, 0.0)) @ b_vec
+
+            states = jax.lax.map(_one_tau, tau_arr, batch_size=32)
+
+        # g_hem: (n_hem, n_lag)
+        g_hem = alpha_unit_f * states[:, box_idx_arr].T
+        if units == "raw":
+            return g_hem
+
+        y_ss = cbm_v.steady_state_c14(q_std=q_std_f, alpha_unit=alpha_unit_f)
+        y_trop = jnp.sum(y_ss[trop_idx_arr])
+        m_rel = cbm_v.relative_reservoir_masses()[box_idx_arr]
+        scale = 1000.0 * (q_std_f if units == "permil_per_q0_yr" else 1.0)
+        return scale * g_hem / (y_trop * m_rel[:, None])
+
+    if spectrum is not None:
+        all_loadings = jnp.asarray(spectrum.parameter_loadings, dtype=jnp.float64)
+        all_evals = jnp.asarray(spectrum.eigenvalues, dtype=jnp.float64)
+        if all_loadings.shape[0] != p_full:
+            raise ValueError(
+                f"spectrum.parameter_loadings has {all_loadings.shape[0]} rows, "
+                f"expected {p_full} matching cbm."
+            )
+        n_avail = int(all_loadings.shape[1])
+        if modes is None:
+            mode_indices = tuple(range(n_avail))
+        else:
+            mode_indices = tuple(int(m) for m in modes)
+            for m in mode_indices:
+                if m < 0 or m >= n_avail:
+                    raise IndexError(
+                        f"Mode index {m} out of range for spectrum with {n_avail} modes."
+                    )
+
+        idx_arr = jnp.asarray(mode_indices, dtype=jnp.int32)
+        sel_loadings = all_loadings[:, idx_arr]
+        sel_evals = all_evals[idx_arr]
+        sel_svals = jnp.sqrt(jnp.maximum(sel_evals, 0.0))
+
+        if _concrete(flat_theta) is not None and _concrete(sel_loadings) is not None:
+            @jax.jit
+            def _jvp_single(th_val: jax.Array, tang: jax.Array) -> tuple[jax.Array, jax.Array]:
+                return jax.jvp(_eval_h_matrix, (th_val,), (tang,))
+
+            h0 = _eval_h_matrix(flat_theta)
+            dh_list: list[jax.Array] = []
+            for j in range(len(mode_indices)):
+                _, dh_j = _jvp_single(flat_theta, sel_loadings[:, j])
+                dh_list.append(dh_j)
+            dh_stack = (
+                jnp.stack(dh_list, axis=1)
+                if dh_list
+                else jnp.zeros((len(hem_tuple), 0, n_lag), dtype=jnp.float64)
+            )
+        else:
+            h0 = _eval_h_matrix(flat_theta)
+            if len(mode_indices) == 0:
+                dh_stack = jnp.zeros((len(hem_tuple), 0, n_lag), dtype=jnp.float64)
+            else:
+                dh_stack = jax.vmap(
+                    lambda tang: jax.jvp(_eval_h_matrix, (flat_theta,), (tang,))[1],
+                    in_axes=1,
+                    out_axes=1,
+                )(sel_loadings)
+
+        baseline = {h: h0[i] for i, h in enumerate(hem_tuple)}
+        mode_contribs = {h: dh_stack[i] for i, h in enumerate(hem_tuple)}
+        return CBMModeImpulseResult(
+            t_lag=tau_arr,
+            hemispheres=hem_tuple,
+            baseline=baseline,
+            mode_contributions=mode_contribs,
+            mode_indices=mode_indices,
+            eigenvalues=sel_evals,
+            singular_values=sel_svals,
+            parameter_loadings=sel_loadings,
+            units=units,
+            source="fisher",
+        )
+
+    # Direct continuous impulse-response Jacobian SVD (spectrum is None):
+    def _eval_h_flat(th_flat: jax.Array) -> jax.Array:
+        return _eval_h_matrix(th_flat).reshape(-1)
+
+    h0 = _eval_h_matrix(flat_theta)
+    j_h = _jacfwd_chunked(_eval_h_flat, flat_theta)  # (n_hem * n_lag, p_full)
+
+    auto_mask = _auto_exclude_total_mass_mask(cbm)
+    l_pi, active_mask = _resolve_cbm_prior_root(
+        p_full,
+        active_cbm_mask=auto_mask,
+        prior_cbm_root=None,
+        prior_cbm_cov=None,
+        prior_cbm_prec=None,
+        prior_cbm_sd=prior_cbm_sd,
+        whitened_j_theta=j_h,
+    )
+    active_idx = jnp.asarray(onp.flatnonzero(active_mask), dtype=jnp.int32)
+    p_act = int(active_idx.shape[0])
+
+    sqrt_w = jnp.sqrt(jnp.maximum(_trapezoidal_weights(tau_arr), 0.0))
+    sqrt_w_all = jnp.tile(sqrt_w, (len(hem_tuple),))
+
+    if p_act > 0:
+        j_act = j_h[:, active_idx]
+        w_h = (sqrt_w_all[:, None] * j_act) @ l_pi
+        _, s_vals, vt = jnp.linalg.svd(w_h, full_matrices=False)
+        v_modes = vt.T
+        n_avail = int(s_vals.shape[0])
+        loadings_act = l_pi @ v_modes  # (p_act, n_avail)
+        all_loadings = (
+            jnp.zeros((p_full, n_avail), dtype=jnp.float64)
+            .at[active_idx, :]
+            .set(loadings_act)
+        )
+        all_dh_flat = j_act @ loadings_act  # (n_hem * n_lag, n_avail)
+        all_evals = s_vals**2
+    else:
+        n_avail = 0
+        s_vals = jnp.zeros((0,), dtype=jnp.float64)
+        all_evals = jnp.zeros((0,), dtype=jnp.float64)
+        all_loadings = jnp.zeros((p_full, 0), dtype=jnp.float64)
+        all_dh_flat = jnp.zeros((len(hem_tuple) * n_lag, 0), dtype=jnp.float64)
+
+    if modes is None:
+        mode_indices = tuple(range(n_avail))
+    else:
+        mode_indices = tuple(int(m) for m in modes)
+        for m in mode_indices:
+            if m < 0 or m >= n_avail:
+                raise IndexError(
+                    f"Mode index {m} out of range for impulse SVD with {n_avail} modes."
+                )
+
+    idx_arr = jnp.asarray(mode_indices, dtype=jnp.int32)
+    sel_svals = s_vals[idx_arr]
+    sel_evals = all_evals[idx_arr]
+    sel_loadings = all_loadings[:, idx_arr]
+    sel_dh = all_dh_flat[:, idx_arr].T.reshape((len(mode_indices), len(hem_tuple), n_lag))
+
+    baseline = {h: h0[i] for i, h in enumerate(hem_tuple)}
+    mode_contribs = {h: sel_dh[:, i, :] for i, h in enumerate(hem_tuple)}
+
+    return CBMModeImpulseResult(
+        t_lag=tau_arr,
+        hemispheres=hem_tuple,
+        baseline=baseline,
+        mode_contributions=mode_contribs,
+        mode_indices=mode_indices,
+        eigenvalues=sel_evals,
+        singular_values=sel_svals,
+        parameter_loadings=sel_loadings,
+        units=units,
+        source="impulse_svd",
     )

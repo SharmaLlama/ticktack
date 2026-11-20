@@ -45,6 +45,7 @@ from .solvers import (
     ExactLinearSolver,
     ModaxSolver,
     _cbm_has_nonautonomous_masses,
+    _delta_y_to_d14c,
 )
 
 __all__ = [
@@ -280,18 +281,45 @@ class RadiocarbonModel(zdx.Base):
             else:
                 delta_lab_flat = 0.0
 
-            pred_flat = self.solver.predict_d14c(
-                self.cbm,
-                self.production,
-                all_ts,
-                all_te,
-                sub_weights=all_w,
-                box_indices=box_indices_flat,
-                q_std=self.q_std,
-                alpha_unit=self.alpha_unit,
-                delta_global=delta_global,
-                delta_lab=delta_lab_flat,
-            )
+            uniq_cache = getattr(dataset, "_uniq_subwindows", None)
+            if uniq_cache is not None:
+                uniq_a, uniq_b, inv_idx, m_c = uniq_cache
+                dy_uniq = self.solver.solve_delta_binned(
+                    self.cbm,
+                    self.production,
+                    jnp.asarray(uniq_a, dtype=jnp.float64),
+                    jnp.asarray(uniq_b, dtype=jnp.float64),
+                    q_std=self.q_std,
+                    alpha_unit=self.alpha_unit,
+                )
+                n_tot = all_w.shape[0]
+                w_norm = all_w / jnp.sum(all_w, axis=-1, keepdims=True)
+                dy_sub = dy_uniq[jnp.asarray(inv_idx, dtype=jnp.int32)].reshape(
+                    n_tot, m_c, -1
+                )
+                dy_binned = jnp.sum(w_norm[:, :, None] * dy_sub, axis=1)
+                pred_flat = _delta_y_to_d14c(
+                    self.cbm,
+                    dy_binned,
+                    box_indices=box_indices_flat,
+                    q_std=self.q_std,
+                    alpha_unit=self.alpha_unit,
+                    delta_global=delta_global,
+                    delta_lab=delta_lab_flat,
+                )
+            else:
+                pred_flat = self.solver.predict_d14c(
+                    self.cbm,
+                    self.production,
+                    all_ts,
+                    all_te,
+                    sub_weights=all_w,
+                    box_indices=box_indices_flat,
+                    q_std=self.q_std,
+                    alpha_unit=self.alpha_unit,
+                    delta_global=delta_global,
+                    delta_lab=delta_lab_flat,
+                )
             if concat:
                 return pred_flat
             slices: list[jax.Array] = []

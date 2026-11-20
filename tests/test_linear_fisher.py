@@ -1636,3 +1636,257 @@ def test_kalman_gp_marginal_brehm21_22box_rts_and_grad():
     assert jnp.all(jnp.isfinite(g))
 
 
+def test_jacfwd_chunked_bit_identity_and_subspace_cbm_from_fisher():
+    """Verify chunked JVP bit-identity and ``SubspaceCBM.from_fisher`` mass balance & eigenspectrum."""
+    import ticktack as tt
+    from ticktack.fisher import _jacfwd_chunked
+
+    # 1) _jacfwd_chunked exact match against jax.jacfwd for p > chunk_size and p <= chunk_size
+    rng = np.random.default_rng(101)
+    a_mat = jnp.asarray(rng.standard_normal((15, 29)), dtype=jnp.float64)
+    x_big = jnp.asarray(rng.standard_normal((29,)), dtype=jnp.float64)
+
+    def fn_nl(z: jax.Array) -> jax.Array:
+        return jnp.sin(a_mat @ z) + 0.1 * jnp.square(a_mat @ z)
+
+    j_ref = jax.jacfwd(fn_nl)(x_big)
+    j_chk = _jacfwd_chunked(fn_nl, x_big, chunk_size=12)
+    np.testing.assert_allclose(j_chk, j_ref, rtol=0.0, atol=1e-14)
+    # Also verify tracer path inside jax.grad for p > chunk_size
+    g_ref = jax.grad(lambda z: jnp.sum(jax.jacfwd(fn_nl)(z) ** 2))(x_big)
+    g_chk = jax.grad(lambda z: jnp.sum(_jacfwd_chunked(fn_nl, z, chunk_size=12) ** 2))(x_big)
+    np.testing.assert_allclose(g_chk, g_ref, rtol=1e-12, atol=1e-12)
+
+    # 2) SubspaceCBM / FisherSubspaceCBM from Guttler15 Fisher spectrum
+    assert tt.FisherSubspaceCBM is tt.SubspaceCBM
+    cbm_g15 = tt.load_preset("Guttler15", kind="balanced")
+    years = jnp.arange(770.0, 784.0, 1.0)
+    t_s = years + 4.0 / 12.0
+    t_e = years + 8.0 / 12.0
+    sigma = jnp.full(years.shape, 1.2, dtype=jnp.float64)
+    solver = tt.ExactLinearSolver()
+    trop_idx = cbm_g15.box_index("Troposphere")
+
+    def fwd(cbm_v, psi):
+        return solver.predict_d14c(
+            cbm_v,
+            tt.SteadyProduction() + tt.MiyakeSpike(t_start=774.3, duration=0.5, fluence=psi[0], profile="boxcar"),
+            t_s,
+            t_e,
+            box_indices=trop_idx,
+            delta_global=psi[1],
+        )
+
+    psi0 = jnp.array([6.5, 0.0], dtype=jnp.float64)
+    spec_g15 = cbm_fisher_spectrum(
+        fwd,
+        cbm_g15,
+        sigma,
+        psi_nuisance=psi0,
+        prior_cbm_sd=0.35,
+        prior_psi_sd=jnp.array([2.0, 50.0]),
+        mass_fn=lambda m: m.reservoir_masses(),
+    )
+
+    sub4 = tt.SubspaceCBM.from_fisher(cbm_g15, spec_g15, n_modes=4)
+    assert sub4.n_modes == 4
+    # alpha = 0 reproduces base_cbm identically
+    np.testing.assert_allclose(sub4.rate_matrix_K(), cbm_g15.rate_matrix_K(), rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(sub4.reservoir_masses(), cbm_g15.reservoir_masses(), rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(sub4.steady_state_c14(), cbm_g15.steady_state_c14(), rtol=1e-13, atol=1e-13)
+
+    # Nonzero alpha maintains exact Perron–Frobenius Kirchhoff mass balance & matches to_balanced_cbm()
+    sub4_p = sub4.set("alpha", jnp.array([0.6, -0.4, 0.25, -0.15], dtype=jnp.float64))
+    assert float(jnp.max(jnp.abs(sub4_p.kirchhoff_residual()))) < 1e-10
+    bal_eq = sub4_p.to_balanced_cbm()
+    np.testing.assert_allclose(sub4_p.rate_matrix_K(), bal_eq.rate_matrix_K(), rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(sub4_p.reservoir_masses(), bal_eq.reservoir_masses(), rtol=1e-14, atol=1e-14)
+
+    # Fisher spectrum of SubspaceCBM(n_modes=4) with unit prior on alpha recovers exact top-4 eigenvalues!
+    spec_sub4 = cbm_fisher_spectrum(
+        fwd,
+        sub4,
+        sigma,
+        psi_nuisance=psi0,
+        prior_cbm_sd=1.0,
+        prior_psi_sd=jnp.array([2.0, 50.0]),
+    )
+    assert spec_sub4.eigenvalues.shape == (4,)
+    np.testing.assert_allclose(spec_sub4.eigenvalues, spec_g15.eigenvalues[:4], rtol=1e-9, atol=1e-9)
+
+    # Validation checks
+    with pytest.raises(ValueError, match="n_modes"):
+        tt.SubspaceCBM.from_fisher(cbm_g15, spec_g15, n_modes=0)
+    with pytest.raises(ValueError, match="n_modes"):
+        tt.SubspaceCBM.from_fisher(cbm_g15, spec_g15, n_modes=999)
+    with pytest.raises(TypeError, match="BalancedCBM"):
+        tt.SubspaceCBM.from_fisher(tt.EffectiveCBM(K=3), spec_g15, n_modes=2)  # type: ignore[arg-type]
+
+
+def test_plot_cbm_tikz_modes_layouts_and_statelessness():
+    """Verify ``plot_cbm_tikz_modes`` across 22-box, 11-box, 4-box, and custom topologies with zero stderr."""
+    import io
+    from contextlib import redirect_stderr
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import ticktack as tt
+
+    from ticktack.plotting import _tikz_node_layout
+
+    rc_before = {k: (v.copy() if hasattr(v, "copy") else v) for k, v in plt.rcParams.items()}
+    rng = np.random.default_rng(2026)
+
+    for preset_name in ("Brehm21", "Guttler15", "Miyake17"):
+        cbm = tt.load_preset(preset_name)
+        if preset_name == "Brehm21":
+            coords_b21, _, kind_b21 = _tikz_node_layout(cbm.topology)
+            assert kind_b21 == "two_hemisphere_22"
+            assert coords_b21[11:, 1].mean() > coords_b21[:11, 1].mean()
+        loadings = rng.standard_normal((cbm.n_boxes, 4))
+        evals = np.array([25.0, 8.0, 1.5, 2.3e-4])
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            fig, axes = tt.plot_cbm_tikz_modes(
+                cbm, loadings, modes=(0, 1, 3), eigenvalues=evals, ncols=3
+            )
+        assert buf.getvalue() == "", f"stderr leaked for {preset_name}: {buf.getvalue()!r}"
+        assert axes.shape == (3,)
+        assert len(fig.axes) >= 4  # 3 mode panels + shared colourbar
+        plt.close(fig)
+
+    # Generic fallback on EffectiveCBM(K=3)
+    eff = tt.EffectiveCBM(K=3)
+    fig_eff, axes_eff = tt.plot_cbm_tikz_modes(
+        eff, rng.standard_normal((eff.n_boxes, 2)), modes=(0, 1), ncols=2
+    )
+    assert axes_eff.shape == (2,)
+    plt.close(fig_eff)
+
+    rc_after = dict(plt.rcParams)
+    assert all(rc_before[k] == rc_after[k] for k in rc_before), "plot_cbm_tikz_modes mutated plt.rcParams"
+
+
+def test_cbm_mode_impulse_responses_and_plot():
+    """Verify ``cbm_mode_impulse_responses`` (Fisher JVP + direct SVD) and ``plot_cbm_mode_impulse_responses``."""
+    import io
+    from contextlib import redirect_stderr
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import ticktack as tt
+    from ticktack.fisher import _partition_inexact
+
+    cbm_b21 = tt.load_preset("Brehm21", kind="balanced")
+    t_lag = jnp.linspace(0.0, 20.0, 41)
+
+    # 1) Direct continuous impulse-response Jacobian SVD (spectrum=None)
+    svd_res = tt.cbm_mode_impulse_responses(
+        cbm_b21,
+        t_lag,
+        None,
+        modes=(0, 1, 2, 3),
+        prior_cbm_sd=0.35,
+    )
+    assert svd_res.source == "impulse_svd"
+    assert svd_res.units == "permil_per_q0_yr"
+    assert svd_res.mode_indices == (0, 1, 2, 3)
+    assert svd_res.baseline["north"].shape == (41,)
+    assert svd_res.baseline["south"].shape == (41,)
+    assert svd_res.mode_contributions["north"].shape == (4, 41)
+    assert svd_res.mode_contributions["south"].shape == (4, 41)
+    assert jnp.all(jnp.diff(svd_res.singular_values) <= 1e-12)
+    np.testing.assert_allclose(svd_res.eigenvalues, svd_res.singular_values**2, rtol=1e-13)
+
+    # Verify quadrature-weighted L2(d tau) orthogonality of SVD modes:
+    dt = np.diff(np.asarray(t_lag))
+    w_trap = np.zeros(41, dtype=np.float64)
+    w_trap[0] = 0.5 * dt[0]
+    w_trap[-1] = 0.5 * dt[-1]
+    w_trap[1:-1] = 0.5 * (dt[:-1] + dt[1:])
+    stacked_dh = np.concatenate(
+        [
+            np.asarray(svd_res.mode_contributions["north"]),
+            np.asarray(svd_res.mode_contributions["south"]),
+        ],
+        axis=1,
+    )
+    w_both = np.concatenate([w_trap, w_trap])
+    gram = (stacked_dh * w_both[None, :]) @ stacked_dh.T
+    np.testing.assert_allclose(
+        gram, np.diag(np.asarray(svd_res.eigenvalues)), rtol=1e-10, atol=1e-10
+    )
+
+    # Verify exact finite-difference parity along SVD mode 0 (and non-uniform lag path)
+    flat_th, unravel_th = _partition_inexact(cbm_b21)
+    w0 = svd_res.parameter_loadings[:, 0]
+    eps = 1e-6
+    h_plus = tt.cbm_mode_impulse_responses(unravel_th(flat_th + eps * w0), t_lag, None, modes=(0,)).baseline
+    h_minus = tt.cbm_mode_impulse_responses(unravel_th(flat_th - eps * w0), t_lag, None, modes=(0,)).baseline
+    fd_nh = (h_plus["north"] - h_minus["north"]) / (2.0 * eps)
+    fd_sh = (h_plus["south"] - h_minus["south"]) / (2.0 * eps)
+    np.testing.assert_allclose(svd_res.mode_contributions["north"][0], fd_nh, rtol=1e-6, atol=1e-7)
+    np.testing.assert_allclose(svd_res.mode_contributions["south"][0], fd_sh, rtol=1e-6, atol=1e-7)
+
+    # 2) Fisher-mode pushforward on Guttler15 (single hemisphere + non-uniform t_lag + units)
+    cbm_g15 = tt.load_preset("Guttler15", kind="balanced")
+    years = jnp.arange(770.0, 782.0, 1.0)
+    solver = tt.ExactLinearSolver()
+    trop_idx = cbm_g15.box_index("Troposphere")
+
+    def fwd_g15(cbm_v, psi):
+        return solver.predict_d14c(
+            cbm_v,
+            tt.SteadyProduction() + tt.MiyakeSpike(t_start=774.3, duration=0.5, fluence=psi[0], profile="boxcar"),
+            years + 0.3,
+            years + 0.7,
+            box_indices=trop_idx,
+            delta_global=psi[1],
+        )
+
+    spec_g15 = cbm_fisher_spectrum(
+        fwd_g15,
+        cbm_g15,
+        jnp.full(years.shape, 1.2),
+        psi_nuisance=jnp.array([6.5, 0.0]),
+        prior_cbm_sd=0.35,
+        prior_psi_sd=jnp.array([2.0, 50.0]),
+    )
+    t_nonunif = jnp.array([0.0, 0.5, 1.2, 2.5, 5.0, 10.0, 20.0], dtype=jnp.float64)
+    fish_res = tt.cbm_mode_impulse_responses(
+        cbm_g15, t_nonunif, spec_g15, modes=(0, 1, 2), units="permil_per_fluence"
+    )
+    assert fish_res.source == "fisher"
+    assert fish_res.units == "permil_per_fluence"
+    np.testing.assert_allclose(fish_res.eigenvalues, spec_g15.eigenvalues[:3], rtol=1e-13)
+    flat_g15, unravel_g15 = _partition_inexact(cbm_g15)
+    wg0 = spec_g15.parameter_loadings[:, 0]
+    gp = tt.cbm_mode_impulse_responses(
+        unravel_g15(flat_g15 + eps * wg0), t_nonunif, spec_g15, modes=(0,), units="permil_per_fluence"
+    ).baseline["north"]
+    gm = tt.cbm_mode_impulse_responses(
+        unravel_g15(flat_g15 - eps * wg0), t_nonunif, spec_g15, modes=(0,), units="permil_per_fluence"
+    ).baseline["north"]
+    np.testing.assert_allclose(
+        fish_res.mode_contributions["north"][0], (gp - gm) / (2.0 * eps), rtol=1e-6, atol=1e-7
+    )
+
+    # 3) Plotting statelessness & zero stderr (both precomputed SVD result and Fisher pair)
+    rc_before = {k: (v.copy() if hasattr(v, "copy") else v) for k, v in plt.rcParams.items()}
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        fig1, axes1 = tt.plot_cbm_mode_impulse_responses(svd_res, modes=(0, 1, 2), ncols=3)
+        fig2, axes2 = tt.plot_cbm_mode_impulse_responses(
+            cbm_g15, spec_g15, t_lag=t_nonunif, modes=(0, 1), ncols=2, show_baseline=False
+        )
+    assert buf.getvalue() == "", f"stderr leaked: {buf.getvalue()!r}"
+    assert axes1.shape == (4,)  # 1 baseline + 3 mode panels
+    assert axes2.shape == (1, 2)
+    plt.close(fig1)
+    plt.close(fig2)
+    rc_after = dict(plt.rcParams)
+    assert all(rc_before[k] == rc_after[k] for k in rc_before), "plot_cbm_mode_impulse_responses mutated plt.rcParams"
+
+
+
+
