@@ -45,8 +45,14 @@ Contrasts exact linear Wiener-filter Gaussian-process inversion against positivi
 Adapts [`virgil`](https://github.com/benjaminpope/virgil)'s Information Field Theory and MacKay empirical-Bayes framework (`ticktack.fields`) to 1D cosmic-ray production reconstruction and solar-cycle analysis:
 
 - Demonstrates reflecting-boundary (orthonormal DCT-II) non-centred `GaussianField` synthesis across rough (`MaternSpectrum(order=1)`), smooth (`MaternSpectrum(order=2)`), and composite solar-modulated (`MaternSpectrum + QuasiPeriodicSpectrum`) priors driven by identical standardized excitations $z \sim \mathcal{N}(0, I_N)$.
-- Evaluates 2D MacKay marginal log-evidence landscapes (`evidence_grid` + `plot_evidence_grid`) on a multi-decade `760–800 CE` 774 CE compilation ($\sim 3.5$ Schwabe cycles, combining `775CE` with the longer repository records) alongside a MAP-profiled spike, and ranks all eight canonical kernel families in `DEFAULT_CANDIDATE_KERNELS` via `select_gp_kernel` – demonstrating why $\ge 2$ Schwabe cycles are required to select `"sho_solar"` (`QuasiPeriodicSpectrum`) over short-baseline aperiodic `"matern12"` solutions.
+- Evaluates 2D MacKay marginal log-evidence landscapes (`evidence_grid` + `plot_evidence_grid`) on a multi-decade `760–800 CE` 774 CE compilation ($\sim 3.5$ Schwabe cycles, combining `775CE` with the longer repository records) alongside a spike profiled from a rough initial guess (`select_gp_kernel(..., optimize_spike=True)`), and ranks all eight canonical kernel families in `DEFAULT_CANDIDATE_KERNELS` – demonstrating why $\ge 2$ Schwabe cycles are required to select `"sho_solar"` (`QuasiPeriodicSpectrum`) over short-baseline aperiodic `"matern12"` solutions.
 - Applies MacKay's closed-form `error_scale` diagnostic (both global and `by_series=True`) to detect understated AMS measurement uncertainties and compares linear Wiener-filter `GaussianField` vs strictly positive Itô-corrected `LogGaussianField(..., ito_corrected=True)` reconstructions (`plot_field_draws`).
+
+---
+
+## Companion Docs-Example Walkthroughs (`notebooks/v2/docs_examples/`)
+
+Six focused companion examples under [`notebooks/v2/docs_examples/`](https://github.com/SharmaLlama/ticktack/tree/main/notebooks/v2/docs_examples) cover single-series and two-hemisphere 774 CE inference, calendar and Southern Hemisphere growth-season auditing, `LogGPProduction` SVI reconstruction, direct `EffectiveCBM(K=3)` joint sampling, and a **3-way background-marginalization SMC Bayes-factor comparison** (`05_flat_baseline_smc_evidence.ipynb`) contrasting `Flat Baseline + Spike`, `HarmonicSolar (11-yr) + Spike` (`marginalize_solar=True`), and `Marginalized GP + Spike` (`GaussianField` / `GPProduction` marginalized via `LinearMarginalConfig`) with a 3-chain `plot_corner` overlay.
 
 ---
 
