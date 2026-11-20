@@ -73,6 +73,13 @@ Given noise-whitened forward Jacobians $\widetilde{J}_\theta = \Sigma_n^{-1/2} \
 
 For relaxation-mode analysis in observable pole–residue coordinates $\{(r_k, \gamma_k)\}$ of the impulse response $g_{\text{trop}}(\tau) = \sum_k r_k e^{-\gamma_k \tau}$, `relaxation_fisher_modes` maps the data window directly onto the Laplace eigenmodes of $A$. To inspect which physical reservoirs participate in each Fisher direction, `plot_cbm_tikz_modes` renders the normalized signed reservoir loadings on the published [Zhang et al. (2022, arXiv:2210.13775)](https://arxiv.org/abs/2210.13775) TikZ box geometries using node `alpha` opacity weighting and a symmetric diverging `RdBu_r` colourbar.
 
+To connect reservoir loadings directly to observable time-domain signals, `cbm_mode_impulse_responses` computes the causal tropospheric $\Delta^{14}\text{C}$ impulse response $h_{\text{hem}}(\tau; \theta)$ (`permil_per_q0_yr`, `permil_per_fluence`, or `raw`) and each eigenmode's directional perturbation $\delta h_{\text{hem}, k}(\tau)$ for a $+1\sigma_{\text{prior}}$ step along mode $k$:
+
+- **Fisher-mode pushforward (`spectrum is not None`)**: Evaluates exact forward-mode `jax.jvp` directional derivatives along `spectrum.parameter_loadings[:, k]` across lag $\tau \ge 0$.
+- **Direct impulse-response Jacobian SVD (`spectrum is None`)**: Computes the $\sqrt{\Delta\tau}$ quadrature-weighted prior-whitened impulse-response Jacobian $J_h L_\Pi = U_h \operatorname{diag}(s_k) V_h^\top$ directly via singular-value decomposition (excluding `log_total_mass`), returning `singular_values`, `eigenvalues = s_k**2`, `parameter_loadings = L_Pi @ V_h`, and temporal mode contributions.
+
+Rendering these trajectories with `plot_cbm_mode_impulse_responses` across `0–30 yr` with the `0–6.5 yr` post-spike observation window shaded makes the rank structure visually transparent: Modes $1\text{--}3$ peak sharply inside `0–6.5 yr`, Modes $4\text{--}6$ straddle the `3–15 yr` boundary, and slow deep-water directions such as Mode $9$ live primarily in the `> 10 yr` tail.
+
 ### Small-Eigenvalue Fisher Modes ($10^{-9} < \mu_k < 1$) vs the Observation-Span Nullspace
 
 Evaluating `cbm_fisher_spectrum` for `Brehm21` (22 boxes, 56 directed free rates) on the 774 CE compilation (`775CE`) illustrates the separation between data-dominated modes, weakly informed physical modes, and the exact observation-span nullspace:
