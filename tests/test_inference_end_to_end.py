@@ -1087,3 +1087,145 @@ def test_notebook_structure_and_execution(rel_path: str):
 def test_no_stray_png_files_in_notebooks_v2():
     pngs = list((ROOT / "notebooks" / "v2").glob("*.png"))
     assert pngs == [], f"Found stray .png files in notebooks/v2/: {pngs}"
+
+
+# ===========================================================================
+# 7. SubspaceCBM Inference, solar_coeffs Reconstruction, & Stateless plot_corner
+# ===========================================================================
+
+
+def test_plot_corner_inputs_statelessness_and_zero_stderr(simple_model, synthetic_dataset, spike_param_space):
+    """Verify ``plot_corner`` handles dicts, InferenceData, 2D arrays, multi-chain overlays,
+    truth markers, preserves ``plt.rcParams``, and emits zero ``stderr``.
+    """
+    import io
+    from contextlib import redirect_stderr
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rc_before = {k: (v.copy() if hasattr(v, "copy") else v) for k, v in plt.rcParams.items()}
+    rng = np.random.default_rng(77)
+
+    # 1) Single dict + truth markers
+    d1 = {"a": rng.normal(0.0, 1.0, 250), "b": rng.normal(2.0, 0.5, 250)}
+    buf = io.StringIO()
+    with redirect_stderr(buf):
+        fig1, ax1 = tt.plot_corner(d1, truth={"a": 0.1, "b": 2.0})
+    assert buf.getvalue() == "", f"plot_corner leaked stderr: {buf.getvalue()!r}"
+    assert ax1.size >= 4
+    plt.close(fig1)
+
+    # 2) Multi-chain mapping overlay + weighted 2D array
+    d2 = {"a": rng.normal(0.2, 0.8, 250), "b": rng.normal(1.9, 0.6, 250)}
+    buf2 = io.StringIO()
+    with redirect_stderr(buf2):
+        fig2, ax2 = tt.plot_corner({"Model A": d1, "Model B": d2}, truth=[0.0, 2.0])
+    assert buf2.getvalue() == ""
+    assert ax2.size >= 4
+    plt.close(fig2)
+
+    arr2d = rng.normal(0.0, 1.0, (200, 3))
+    w_arr = np.linspace(0.5, 1.5, 200)
+    fig3, ax3 = tt.plot_corner(arr2d, param_names=["p0", "p1", "p2"], weights=w_arr)
+    assert ax3.size >= 9
+    plt.close(fig3)
+
+    # 3) InferenceData with solar_coeffs reconstruction + indexed variable selection
+    prod_sol = tt.ProductionSum(
+        steady=tt.SteadyProduction(),
+        solar=tt.HarmonicSolar.from_polar(amplitudes=0.0, phases=0.0),
+        spike=tt.MiyakeSpike(t_start=774.4, duration=0.4, fluence=7.0, profile="boxcar"),
+    )
+    m_sol = tt.RadiocarbonModel(simple_model.cbm, prod_sol)
+    ps_sol = tt.ParameterSpace(
+        m_sol,
+        [
+            tt.ParamSpec("production.spike.t_start", "identity", 774.4, 0.5),
+            tt.ParamSpec("production.spike.fluence", "exp", math.log(7.0), 0.5),
+        ],
+    )
+    cfg_sol = tt.LinearMarginalConfig(offset_mode="hierarchical", marginalize_solar=True, solar_prior_sd=0.3)
+    idata_sol = tt.sample_nuts(
+        m_sol,
+        synthetic_dataset,
+        ps_sol,
+        cfg_sol,
+        num_warmup=40,
+        num_samples=50,
+        num_chains=2,
+        reconstruct_linear=True,
+        progress_bar=False,
+        rng_key=jax.random.PRNGKey(13),
+    )
+    assert "solar_coeffs" in idata_sol.posterior.data_vars
+    assert idata_sol.posterior["solar_coeffs"].shape == (2, 50, 2)
+
+    buf4 = io.StringIO()
+    with redirect_stderr(buf4):
+        fig4, ax4 = tt.plot_corner(
+            idata_sol,
+            param_names={
+                "production__spike__t_start": r"$t_{\mathrm{start}}$",
+                "production__spike__fluence": r"$F$",
+                "solar_coeffs[0]": r"$c_{\cos}$",
+            },
+        )
+    assert buf4.getvalue() == ""
+    assert ax4.size >= 9
+    plt.close(fig4)
+
+    rc_after = dict(plt.rcParams)
+    assert all(rc_before[k] == rc_after[k] for k in rc_before), "plot_corner mutated plt.rcParams"
+
+
+def test_subspace_cbm_map_and_nuts_end_to_end():
+    """Verify ``SubspaceCBM.from_fisher`` works end to end with ``fit_map`` and ``sample_nuts``."""
+    cbm_g15 = tt.load_preset("Guttler15", kind="balanced")
+    rng = np.random.default_rng(55)
+    years = np.arange(771.0, 779.0, 1.0)
+    spike_true = tt.MiyakeSpike(t_start=774.4, duration=0.4, fluence=6.8, profile="boxcar")
+    m_true = tt.RadiocarbonModel(cbm_g15, tt.SteadyProduction() + spike_true)
+    s0 = _make_series(years, np.zeros_like(years), sigma=1.4, hemisphere="north", name="g15_nh")
+    y_obs = np.asarray(m_true.predict_d14c(s0)) + rng.normal(0.0, 1.4, size=len(years))
+    ds = tt.Dataset([_make_series(years, y_obs, sigma=1.4, hemisphere="north", name="g15_nh")])
+
+    psi0 = {"spike": spike_true, "offsets": jnp.zeros(1)}
+    spec = tt.cbm_fisher_spectrum(
+        lambda c, p: tt.RadiocarbonModel(c, tt.SteadyProduction() + p["spike"]).predict_d14c(ds, offsets=p["offsets"]),
+        cbm_g15,
+        ds.sigma_flat,
+        psi_nuisance=psi0,
+        prior_cbm_sd=0.35,
+    )
+    sub2 = tt.SubspaceCBM.from_fisher(cbm_g15, spec, n_modes=2)
+    m_sub = tt.RadiocarbonModel(sub2, tt.ProductionSum(steady=tt.SteadyProduction(), spike=spike_true))
+    ps_sub = tt.ParameterSpace(
+        m_sub,
+        [
+            tt.ParamSpec("cbm.alpha", "identity", prior_mean=0.0, prior_sd=1.0),
+            tt.ParamSpec("production.spike.fluence", "exp", prior_mean=math.log(6.5), prior_sd=0.5),
+        ],
+    )
+    cfg = tt.LinearMarginalConfig(offset_mode="shared")
+    res_map = tt.fit_map(m_sub, ds, ps_sub, cfg, method="BFGS", max_steps=60)
+    assert res_map.converged
+    assert res_map.theta_map["cbm.alpha"].shape == (2,)
+    assert float(jnp.max(jnp.abs(res_map.fitted_model.cbm.kirchhoff_residual()))) < 1e-10
+
+    idata = tt.sample_nuts(
+        res_map.fitted_model,
+        ds,
+        ps_sub,
+        cfg,
+        num_warmup=30,
+        num_samples=40,
+        num_chains=2,
+        init_map=False,
+        reconstruct_linear=False,
+        progress_bar=False,
+        rng_key=jax.random.PRNGKey(31),
+    )
+    assert "cbm__alpha" in idata.posterior.data_vars
+    assert idata.posterior["cbm__alpha"].shape == (2, 40, 2)
+

@@ -8,13 +8,21 @@ Every plotting function in this module is strictly stateless:
 
 from __future__ import annotations
 
+import logging
+import math
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
+from chainconsumer import Chain, ChainConsumer, PlotConfig, Truth
 from matplotlib.axes import Axes
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
+from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch
 
 from .data import Dataset, TreeRingSeries
 
@@ -1101,10 +1109,1135 @@ def plot_residual_map(
     return fig, target_ax
 
 
+# ---------------------------------------------------------------------------
+# Parametric Cornerplots via ChainConsumer >= 1.0 (stateless, silent logging)
+# ---------------------------------------------------------------------------
+
+_INDEXED_VAR_RE = re.compile(r"^(.+)\[(\d+)\]$")
+
+
+def _extract_idata_df(
+    idata: Any,
+    param_names: Sequence[str] | Mapping[str, str] | None,
+) -> pd.DataFrame:
+    post = idata.posterior
+    cols: dict[str, np.ndarray] = {}
+
+    if isinstance(param_names, Mapping):
+        for var_key, label in param_names.items():
+            m = _INDEXED_VAR_RE.match(str(var_key))
+            if var_key in post.data_vars:
+                arr = np.asarray(post[var_key], dtype=np.float64)
+                if arr.ndim <= 2:
+                    cols[str(label)] = arr.reshape(-1)
+                else:
+                    flat = arr.reshape(-1, int(np.prod(arr.shape[2:])))
+                    if flat.shape[1] == 1:
+                        cols[str(label)] = flat[:, 0]
+                    else:
+                        for j in range(flat.shape[1]):
+                            cols[f"{label}[{j}]"] = flat[:, j]
+            elif m is not None and m.group(1) in post.data_vars:
+                base, idx = m.group(1), int(m.group(2))
+                arr = np.asarray(post[base], dtype=np.float64)
+                flat = arr.reshape(-1, int(np.prod(arr.shape[2:])))
+                cols[str(label)] = flat[:, idx]
+            else:
+                raise KeyError(
+                    f"Posterior variable {var_key!r} not found in InferenceData.posterior "
+                    f"(available: {list(post.data_vars)})."
+                )
+        return pd.DataFrame(cols)
+
+    # Sequence or None: extract variables from posterior
+    var_keys: list[str]
+    rename_seq: list[str] | None = None
+    if param_names is not None:
+        seq = [str(x) for x in param_names]
+        if all((k in post.data_vars) or (_INDEXED_VAR_RE.match(k) and _INDEXED_VAR_RE.match(k).group(1) in post.data_vars) for k in seq):  # type: ignore[union-attr]
+            var_keys = seq
+        else:
+            var_keys = [str(k) for k in post.data_vars]
+            rename_seq = seq
+    else:
+        var_keys = [str(k) for k in post.data_vars]
+
+    for var_key in var_keys:
+        m = _INDEXED_VAR_RE.match(var_key)
+        if var_key in post.data_vars:
+            arr = np.asarray(post[var_key], dtype=np.float64)
+            if arr.ndim <= 2:
+                cols[var_key] = arr.reshape(-1)
+            else:
+                flat = arr.reshape(-1, int(np.prod(arr.shape[2:])))
+                if flat.shape[1] == 1:
+                    cols[var_key] = flat[:, 0]
+                else:
+                    for j in range(flat.shape[1]):
+                        cols[f"{var_key}[{j}]"] = flat[:, j]
+        elif m is not None and m.group(1) in post.data_vars:
+            base, idx = m.group(1), int(m.group(2))
+            arr = np.asarray(post[base], dtype=np.float64)
+            flat = arr.reshape(-1, int(np.prod(arr.shape[2:])))
+            cols[var_key] = flat[:, idx]
+
+    df = pd.DataFrame(cols)
+    if rename_seq is not None:
+        if len(rename_seq) != df.shape[1]:
+            raise ValueError(
+                f"param_names length ({len(rename_seq)}) does not match "
+                f"posterior column count ({df.shape[1]})."
+            )
+        df.columns = rename_seq
+    return df
+
+
+def _to_chain_df_and_weights(
+    obj: Any,
+    *,
+    param_names: Sequence[str] | Mapping[str, str] | None,
+    weights: Any | None,
+) -> tuple[pd.DataFrame, np.ndarray | None]:
+    w_arr = (
+        None if weights is None else np.asarray(weights, dtype=np.float64).reshape(-1)
+    )
+
+    if isinstance(obj, pd.DataFrame):
+        df = obj.copy()
+        if isinstance(param_names, Mapping):
+            keep = [k for k in param_names if k in df.columns]
+            if keep:
+                df = df[keep].rename(columns={k: str(param_names[k]) for k in keep})
+        elif param_names is not None:
+            seq = [str(x) for x in param_names]
+            if all(k in df.columns for k in seq):
+                df = df[seq]
+            elif len(seq) == df.shape[1]:
+                df.columns = seq
+            else:
+                raise ValueError(
+                    f"param_names length ({len(seq)}) incompatible with DataFrame columns ({list(df.columns)})."
+                )
+        return df, w_arr
+
+    # SMCResult: prefer resampled constrained draws in idata.posterior
+    if hasattr(obj, "idata") and hasattr(obj, "particles") and hasattr(obj, "weights"):
+        if getattr(obj, "idata", None) is not None and hasattr(obj.idata, "posterior"):
+            df = _extract_idata_df(obj.idata, param_names)
+            return df, w_arr
+        arr = np.asarray(obj.particles, dtype=np.float64)
+        w_smc = np.asarray(obj.weights, dtype=np.float64).reshape(-1) if w_arr is None else w_arr
+        if isinstance(param_names, Mapping):
+            names = [str(v) for v in param_names.values()]
+        elif param_names is not None:
+            names = [str(v) for v in param_names]
+        else:
+            names = [f"p{i}" for i in range(arr.shape[1])]
+        return pd.DataFrame(arr, columns=names), w_smc
+
+    # arviz.InferenceData
+    if hasattr(obj, "posterior"):
+        return _extract_idata_df(obj, param_names), w_arr
+
+    # Mapping of 1D arrays {label: samples}
+    if isinstance(obj, Mapping):
+        if isinstance(param_names, Mapping):
+            cols = {
+                str(lbl): np.asarray(obj[k], dtype=np.float64).reshape(-1)
+                for k, lbl in param_names.items()
+                if k in obj
+            }
+            if not cols:
+                cols = {
+                    str(k): np.asarray(v, dtype=np.float64).reshape(-1)
+                    for k, v in obj.items()
+                }
+        else:
+            cols = {
+                str(k): np.asarray(v, dtype=np.float64).reshape(-1)
+                for k, v in obj.items()
+            }
+            if param_names is not None:
+                seq = [str(x) for x in param_names]
+                if all(k in cols for k in seq):
+                    cols = {k: cols[k] for k in seq}
+                elif len(seq) == len(cols):
+                    cols = dict(zip(seq, cols.values()))
+                else:
+                    raise ValueError(
+                        f"param_names length ({len(seq)}) incompatible with mapping keys ({list(cols)})."
+                    )
+        return pd.DataFrame(cols), w_arr
+
+    # 2D numeric array (n_samples, n_params)
+    arr = np.asarray(obj, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[1] == 0:
+        raise ValueError(
+            f"Expected 2D sample array (n_samples, n_params), got shape {arr.shape}."
+        )
+    if isinstance(param_names, Mapping):
+        names = [str(v) for v in param_names.values()]
+    elif param_names is not None:
+        names = [str(v) for v in param_names]
+    else:
+        names = [f"p{i}" for i in range(arr.shape[1])]
+    if len(names) != arr.shape[1]:
+        raise ValueError(
+            f"param_names length ({len(names)}) must match sample dimension ({arr.shape[1]})."
+        )
+    return pd.DataFrame(arr, columns=names), w_arr
+
+
+def _is_chain_entry(val: Any) -> bool:
+    if isinstance(val, (Mapping, pd.DataFrame)):
+        return True
+    if hasattr(val, "posterior") or (hasattr(val, "particles") and hasattr(val, "weights")):
+        return True
+    if isinstance(val, tuple) and len(val) in (2, 3) and not np.isscalar(val[0]):
+        return True
+    if hasattr(val, "ndim") and getattr(val, "ndim") == 2:
+        return True
+    return False
+
+
+def _normalize_chainconsumer_math_label(label: str) -> str:
+    """Convert mixed ``'$math$ suffix'`` into a single outer ``'$...$'`` for ChainConsumer summaries."""
+    s = str(label).strip()
+    if "$" not in s:
+        return s
+    if s.startswith("$") and s.endswith("$") and s.count("$") == 2:
+        return s
+    # Split on $...$ math segments and wrap plain text segments in \mathrm{...}
+    parts = re.split(r"(\$[^$]*\$)", s)
+    inner_parts: list[str] = []
+    for p in parts:
+        if not p:
+            continue
+        if p.startswith("$") and p.endswith("$"):
+            inner_parts.append(p[1:-1])
+        else:
+            escaped = p.replace(" ", r"\;")
+            inner_parts.append(rf"\mathrm{{{escaped}}}")
+    return "$" + "".join(inner_parts) + "$"
+
+
+def plot_corner(
+    chains_or_samples: Any,
+    *,
+    param_names: Sequence[str] | Mapping[str, str] | None = None,
+    weights: Any | None = None,
+    name: str = "Posterior",
+    truth: Mapping[str, float] | Sequence[float] | None = None,
+    truth_name: str = "MAP",
+    colors: Sequence[str] | None = None,
+    figsize: tuple[float, float] | None = None,
+    summarize: bool = False,
+    plot_kwargs: Mapping[str, Any] | None = None,
+) -> tuple[Figure, np.ndarray]:
+    """Render a stateless parametric cornerplot via ``ChainConsumer >= 1.0``.
+
+    Accepts a single posterior chain (``Mapping[str, array]``, ``DataFrame``,
+    ``arviz.InferenceData``, ``SMCResult``, or 2D array ``(N, D)``) or multiple
+    chains (``Mapping[chain_label, chain_input]`` or ``Sequence`` of chain
+    inputs / ``(samples, weights, label)`` tuples).
+
+    Strictly preserves global ``matplotlib.rcParams`` via ``plt.rc_context()``
+    and silences ``chainconsumer`` / ``matplotlib.font_manager`` warnings so
+    zero ``stderr`` text leaks into Jupyter notebooks.
+    """
+    chain_specs: list[tuple[str, pd.DataFrame, np.ndarray | None]] = []
+
+    if (
+        isinstance(chains_or_samples, pd.DataFrame)
+        or hasattr(chains_or_samples, "posterior")
+        or (
+            hasattr(chains_or_samples, "particles")
+            and hasattr(chains_or_samples, "weights")
+        )
+    ):
+        df_c, w_c = _to_chain_df_and_weights(
+            chains_or_samples, param_names=param_names, weights=weights
+        )
+        chain_specs.append((str(name), df_c, w_c))
+    elif isinstance(chains_or_samples, Mapping) and chains_or_samples:
+        first_val = next(iter(chains_or_samples.values()))
+        if _is_chain_entry(first_val):
+            for ch_label, entry in chains_or_samples.items():
+                if isinstance(entry, tuple) and len(entry) == 2 and not np.isscalar(entry[0]):
+                    df_c, w_c = _to_chain_df_and_weights(
+                        entry[0], param_names=param_names, weights=entry[1]
+                    )
+                else:
+                    df_c, w_c = _to_chain_df_and_weights(
+                        entry, param_names=param_names, weights=None
+                    )
+                chain_specs.append((str(ch_label), df_c, w_c))
+        else:
+            df_c, w_c = _to_chain_df_and_weights(
+                chains_or_samples, param_names=param_names, weights=weights
+            )
+            chain_specs.append((str(name), df_c, w_c))
+    elif (
+        isinstance(chains_or_samples, (list, tuple))
+        and len(chains_or_samples) > 0
+        and _is_chain_entry(chains_or_samples[0])
+    ):
+        for idx, entry in enumerate(chains_or_samples):
+            if isinstance(entry, tuple) and len(entry) == 3:
+                raw_s, raw_w, raw_lbl = entry
+                df_c, w_c = _to_chain_df_and_weights(
+                    raw_s, param_names=param_names, weights=raw_w
+                )
+                chain_specs.append((str(raw_lbl), df_c, w_c))
+            elif isinstance(entry, tuple) and len(entry) == 2:
+                raw_s, second = entry
+                if isinstance(second, str):
+                    df_c, w_c = _to_chain_df_and_weights(
+                        raw_s, param_names=param_names, weights=None
+                    )
+                    chain_specs.append((second, df_c, w_c))
+                else:
+                    df_c, w_c = _to_chain_df_and_weights(
+                        raw_s, param_names=param_names, weights=second
+                    )
+                    chain_specs.append((f"Chain {idx + 1}", df_c, w_c))
+            else:
+                df_c, w_c = _to_chain_df_and_weights(
+                    entry, param_names=param_names, weights=None
+                )
+                chain_specs.append((f"Chain {idx + 1}", df_c, w_c))
+    else:
+        df_c, w_c = _to_chain_df_and_weights(
+            chains_or_samples, param_names=param_names, weights=weights
+        )
+        chain_specs.append((str(name), df_c, w_c))
+
+    if not chain_specs or chain_specs[0][1].shape[1] == 0:
+        raise ValueError("plot_corner requires at least one non-empty parameter column.")
+
+    palette = list(_PALETTE) if colors is None else list(colors)
+    consumer = ChainConsumer()
+
+    eff_summarize = bool(
+        (plot_kwargs or {}).get(
+            "summarise", (plot_kwargs or {}).get("summarize", summarize)
+        )
+    )
+    raw_cols = list(chain_specs[0][1].columns)
+    col_map = (
+        {c: _normalize_chainconsumer_math_label(c) for c in raw_cols}
+        if eff_summarize
+        else {c: c for c in raw_cols}
+    )
+    param_cols = [col_map[c] for c in raw_cols]
+    for idx, (ch_label, df_c, w_c) in enumerate(chain_specs):
+        df_use = df_c.rename(columns=col_map).copy()
+        if w_c is not None:
+            if w_c.shape[0] != len(df_use):
+                raise ValueError(
+                    f"weights length ({w_c.shape[0]}) must match sample count ({len(df_use)})."
+                )
+            df_use["weight"] = w_c
+        consumer.add_chain(
+            Chain(
+                samples=df_use,
+                name=ch_label,
+                color=palette[idx % len(palette)],
+                shade=True,
+                shade_alpha=0.45 if len(chain_specs) > 1 else 0.55,
+                smooth=3,
+            )
+        )
+
+    if truth is not None:
+        truth_loc: dict[str, float] = {}
+        if isinstance(truth, Mapping):
+            for k, v in truth.items():
+                mapped_k = (
+                    str(param_names[k])
+                    if isinstance(param_names, Mapping) and k in param_names
+                    else str(k)
+                )
+                norm_k = col_map.get(mapped_k, mapped_k)
+                if norm_k in param_cols:
+                    truth_loc[norm_k] = float(v)
+        else:
+            t_arr = np.asarray(truth, dtype=np.float64).reshape(-1)
+            if t_arr.size != len(param_cols):
+                raise ValueError(
+                    f"truth sequence length ({t_arr.size}) must match parameter count ({len(param_cols)})."
+                )
+            truth_loc = {col: float(val) for col, val in zip(param_cols, t_arr)}
+        if truth_loc:
+            consumer.add_truth(
+                Truth(
+                    location=truth_loc,
+                    name=truth_name,
+                    color="#333333",
+                    line_style="--",
+                    line_width=1.2,
+                )
+            )
+
+    cfg_dict: dict[str, Any] = {
+        "usetex": False,
+        "diagonal_tick_labels": False,
+        "spacing": 0.0,
+        "max_ticks": 4,
+        "summarise": eff_summarize,
+        "show_legend": len(chain_specs) > 1 or truth is not None,
+    }
+    if plot_kwargs:
+        extra_kw = dict(plot_kwargs)
+        if "summarize" in extra_kw:
+            extra_kw["summarise"] = bool(extra_kw.pop("summarize"))
+        cfg_dict.update(extra_kw)
+    consumer.set_plot_config(PlotConfig(**cfg_dict))
+
+    cc_logger = logging.getLogger("chainconsumer")
+    fm_logger = logging.getLogger("matplotlib.font_manager")
+    prev_cc_level = cc_logger.level
+    prev_fm_level = fm_logger.level
+    cc_logger.setLevel(logging.ERROR)
+    fm_logger.setLevel(logging.ERROR)
+    try:
+        with plt.rc_context():
+            if figsize is not None:
+                fig = consumer.plotter.plot(columns=param_cols, figsize=figsize)
+            else:
+                fig = consumer.plotter.plot(columns=param_cols)
+    finally:
+        cc_logger.setLevel(prev_cc_level)
+        fm_logger.setLevel(prev_fm_level)
+
+    return fig, np.asarray(fig.axes, dtype=object)
+
+
+# ---------------------------------------------------------------------------
+# arXiv:2210.13775 TikZ Carbon-Box Geometry & Reservoir-Node Alpha Modes
+# ---------------------------------------------------------------------------
+
+_TIKZ_SHORT_LABELS: dict[str, str] = {
+    "stratosphere": "S",
+    "troposphere": "T",
+    "biosphere": "B",
+    "short-lived biota": "SLB",
+    "short lived biota": "SLB",
+    "long-lived biota": "LLB",
+    "long lived biota": "LLB",
+    "litter": "L",
+    "soil": "So",
+    "peat": "P",
+    "marine surface": "MS",
+    "surface water": "SW",
+    "surface biota": "SB",
+    "intermediate & deep water": "I&DW",
+    "intermediate and deep water": "I&DW",
+    "sedimentary sink": "SS",
+}
+
+
+def _tikz_short_label(box_name: str) -> str:
+    key = box_name.strip().lower()
+    if key in _TIKZ_SHORT_LABELS:
+        return _TIKZ_SHORT_LABELS[key]
+    if key.startswith("sink_") or key.startswith("sink "):
+        suffix = key.replace("sink_", "").replace("sink ", "").strip()
+        return f"Sk{suffix}"
+    words = [w for w in re.split(r"[\s_\-]+", box_name.strip()) if w]
+    if len(words) == 1:
+        return words[0][:3]
+    return "".join(w[0].upper() for w in words[:4])
+
+
+def _tikz_node_layout(
+    topology: Any,
+) -> tuple[np.ndarray, list[str], str]:
+    """Compute exact arXiv:2210.13775 TikZ reservoir coordinates ``(n_boxes, 2)``."""
+    n_boxes = int(topology.n_boxes)
+    names = list(topology.box_names)
+    labels = [_tikz_short_label(nm) for nm in names]
+    radius = 0.8
+
+    def _pol(deg: float, cy: float = 0.0) -> tuple[float, float]:
+        rad = math.radians(deg)
+        return (radius * math.cos(rad), cy + radius * math.sin(rad))
+
+    # 22-box two-hemisphere (Brehm21 / Buntgen18): NH on TOP (0, 0), SH on BOTTOM (0, -2.15),
+    # mirrored across the equator so S, T, SW, SB, and I&DW face each other directly.
+    if n_boxes == 22 and getattr(topology, "is_hemispheric", False):
+        coords = np.zeros((22, 2), dtype=np.float64)
+        # Northern Hemisphere (boxes 11..21, j = 1..11) in top ring centred at (0, 0)
+        for j in (1, 2):
+            coords[10 + j] = _pol((j + 8) * 360.0 / 11.0, 0.0)
+        for j in (3, 4, 5):
+            coords[10 + j] = _pol((j + 3) * 360.0 / 11.0, 0.0)
+        for j in range(6, 11):
+            coords[10 + j] = _pol(((j + 6) % 11) * 360.0 / 11.0, 0.0)
+        coords[21] = _pol(0.0, 0.0)
+        # Southern Hemisphere (boxes 0..10, i = 1..11) vertically mirrored at (0, -2.15)
+        cy_sh = -2.15
+        for i in range(1, 12):
+            coords[i - 1] = (coords[10 + i, 0], cy_sh - coords[10 + i, 1])
+        return coords, labels, "two_hemisphere_22"
+
+    # 11-box global (Guttler15)
+    if n_boxes == 11 and labels[:3] == ["S", "T", "SW"]:
+        coords = np.zeros((11, 2), dtype=np.float64)
+        for i in (1, 2):
+            coords[i - 1] = _pol((i + 8) * 360.0 / 11.0, 0.0)
+        for i in (3, 4, 5):
+            coords[i - 1] = _pol((i + 3) * 360.0 / 11.0, 0.0)
+        for i in range(6, 11):
+            coords[i - 1] = _pol(((i + 6) % 11) * 360.0 / 11.0, 0.0)
+        coords[10] = _pol(0.0, 0.0)
+        return coords, labels, "global_11"
+
+    # 4-box (Miyake17)
+    if n_boxes == 4 and labels == ["S", "T", "MS", "B"]:
+        coords = np.array([_pol(i * 90.0, 0.0) for i in range(1, 5)], dtype=np.float64)
+        return coords, labels, "miyake_4"
+
+    # Generic circular fallback
+    coords = np.array(
+        [_pol(k * 360.0 / max(n_boxes, 1), 0.0) for k in range(n_boxes)],
+        dtype=np.float64,
+    )
+    return coords, labels, "generic"
+
+
+def plot_cbm_tikz_modes(
+    cbm_or_topology: Any,
+    spectrum_or_loadings: Any,
+    *,
+    modes: Sequence[int] = (0, 1, 2, 3, 4, 5),
+    loading: Literal["auto", "mass", "net_rate", "incident_rate"] = "auto",
+    eigenvalues: Any | None = None,
+    ncols: int = 3,
+    title: str | None = None,
+    figsize: tuple[float, float] | None = None,
+    axes: Axes | Sequence[Axes] | None = None,
+) -> tuple[Figure, np.ndarray]:
+    """Render Fisher eigenmodes as alpha-weighted reservoir nodes on the ``arXiv:2210.13775`` TikZ layout.
+
+    Uses the exact reservoir node coordinates and abbreviations of Zhang et al.
+    (2022, ``arXiv:2210.13775``) for 11-box (``Guttler15``), 22-box two-hemisphere
+    (``Brehm21``, ``Buntgen18``), and 4-box (``Miyake17``) carbon-box models, with
+    a circular fallback for custom topologies such as ``EffectiveCBM``.
+
+    Each mode's signed reservoir loading ``u_b = w_b / max(|w_b|)`` in ``[-1, 1]``
+    controls both symmetric diverging ``RdBu_r`` node colour (red positive, blue
+    negative) and node fill opacity ``alpha = 0.12 + 0.88 * |u_b|``, while directed
+    edges fade by ``alpha = 0.06 + 0.70 * |d ln k_e| / max(|d ln k|)``.
+    """
+    topology = (
+        cbm_or_topology.topology
+        if hasattr(cbm_or_topology, "topology")
+        else cbm_or_topology
+    )
+    n_boxes = int(topology.n_boxes)
+    edges_src = tuple(int(s) for s in topology.edges_src)
+    edges_dst = tuple(int(d) for d in topology.edges_dst)
+    n_edges = len(edges_src)
+
+    mu_arr: np.ndarray | None = None
+    if eigenvalues is not None:
+        mu_arr = np.asarray(eigenvalues, dtype=np.float64).reshape(-1)
+    elif hasattr(spectrum_or_loadings, "eigenvalues"):
+        mu_arr = np.asarray(spectrum_or_loadings.eigenvalues, dtype=np.float64).reshape(-1)
+
+    edge_loadings: np.ndarray | None = None
+    if hasattr(spectrum_or_loadings, "parameter_loadings"):
+        p_load = np.asarray(spectrum_or_loadings.parameter_loadings, dtype=np.float64)
+        tie_rows = getattr(cbm_or_topology, "tie_matrix_rows", None)
+        if tie_rows is not None:
+            m_tie = np.asarray(tie_rows, dtype=np.float64)
+            p_free = m_tie.shape[1]
+            if p_load.shape[0] >= p_free:
+                edge_loadings = m_tie @ p_load[:p_free, :]
+        elif p_load.shape[0] >= n_edges and n_edges > 0:
+            edge_loadings = p_load[:n_edges, :]
+
+    if hasattr(spectrum_or_loadings, "parameter_loadings") or hasattr(
+        spectrum_or_loadings, "mass_loadings"
+    ):
+        mass_l = getattr(spectrum_or_loadings, "mass_loadings", None)
+        eff_loading = loading
+        if eff_loading == "auto":
+            eff_loading = "mass" if mass_l is not None else "net_rate"
+        if eff_loading == "mass":
+            if mass_l is None:
+                raise ValueError(
+                    "loading='mass' requested, but spectrum.mass_loadings is None; "
+                    "pass mass_fn=lambda m: m.reservoir_masses() to cbm_fisher_spectrum "
+                    "or use loading='net_rate'."
+                )
+            w_mat = np.asarray(mass_l, dtype=np.float64)
+        elif eff_loading in ("net_rate", "incident_rate"):
+            if edge_loadings is None:
+                raise ValueError(
+                    f"loading={eff_loading!r} requires edge rate loadings compatible with topology."
+                )
+            w_mat = np.zeros((n_boxes, edge_loadings.shape[1]), dtype=np.float64)
+            for e_idx, (src, dst) in enumerate(zip(edges_src, edges_dst)):
+                w_mat[dst, :] += edge_loadings[e_idx, :]
+                if eff_loading == "net_rate":
+                    w_mat[src, :] -= edge_loadings[e_idx, :]
+                else:
+                    w_mat[src, :] += edge_loadings[e_idx, :]
+        else:
+            raise ValueError(
+                f"loading must be 'auto', 'mass', 'net_rate', or 'incident_rate'; got {loading!r}."
+            )
+    else:
+        w_mat = np.asarray(spectrum_or_loadings, dtype=np.float64)
+        if w_mat.ndim == 1:
+            w_mat = w_mat[:, None]
+        if w_mat.ndim != 2 or w_mat.shape[0] != n_boxes:
+            raise ValueError(
+                f"Explicit node loadings must have shape ({n_boxes}, n_modes), got {w_mat.shape}."
+            )
+
+    n_avail = int(w_mat.shape[1])
+    modes_list = [int(k) for k in modes]
+    if not modes_list:
+        raise ValueError("modes must contain at least one mode index.")
+    for k in modes_list:
+        if k < 0 or k >= n_avail:
+            raise ValueError(
+                f"Mode index {k} out of range for {n_avail} available modes."
+            )
+
+    coords, labels, layout_kind = _tikz_node_layout(topology)
+    is_two_hem = layout_kind == "two_hemisphere_22"
+    n_panels = len(modes_list)
+    eff_ncols = max(1, min(int(ncols), n_panels))
+    nrows = int(math.ceil(n_panels / eff_ncols))
+
+    if axes is None:
+        if figsize is None:
+            if is_two_hem:
+                eff_size = (3.3 * eff_ncols + 0.85, 4.9 * nrows + 0.55)
+            else:
+                eff_size = (3.4 * eff_ncols + 0.85, 3.4 * nrows + 0.55)
+        else:
+            eff_size = figsize
+        fig, ax_grid = plt.subplots(nrows, eff_ncols, figsize=eff_size, squeeze=False)
+        flat_axes = list(ax_grid.ravel())
+        for extra_ax in flat_axes[n_panels:]:
+            extra_ax.set_visible(False)
+        active_axes = flat_axes[:n_panels]
+        out_axes = np.asarray(active_axes, dtype=object)
+    else:
+        if isinstance(axes, Axes):
+            active_axes = [axes]
+        else:
+            active_axes = list(np.asarray(axes, dtype=object).ravel())
+        if len(active_axes) < n_panels:
+            raise ValueError(
+                f"Provided {len(active_axes)} Axes for {n_panels} requested modes."
+            )
+        active_axes = active_axes[:n_panels]
+        fig = active_axes[0].figure
+        out_axes = np.asarray(active_axes, dtype=object)
+
+    cmap = plt.get_cmap("RdBu_r")
+    norm = Normalize(vmin=-1.0, vmax=1.0)
+    node_r = 0.145 if n_boxes >= 11 else 0.185
+    font_sz = 6.8 if n_boxes >= 11 else 8.5
+
+    for ax, mode_k in zip(active_axes, modes_list):
+        if is_two_hem:
+            nh_patch = FancyBboxPatch(
+                (-1.05, -1.02),
+                2.10,
+                2.04,
+                boxstyle="round,pad=0.04,rounding_size=0.08",
+                facecolor="#ffe0b2",
+                edgecolor="#e0a96d",
+                linewidth=0.7,
+                alpha=0.28,
+                zorder=0,
+            )
+            sh_patch = FancyBboxPatch(
+                (-1.05, -3.17),
+                2.10,
+                2.04,
+                boxstyle="round,pad=0.04,rounding_size=0.08",
+                facecolor="#cceeff",
+                edgecolor="#7fb3d5",
+                linewidth=0.7,
+                alpha=0.28,
+                zorder=0,
+            )
+            ax.add_patch(nh_patch)
+            ax.add_patch(sh_patch)
+            ax.text(
+                -0.98,
+                0.95,
+                "NH",
+                fontsize=8.5,
+                fontweight="bold",
+                color="#8c4b00",
+                ha="left",
+                va="top",
+                zorder=1,
+            )
+            ax.text(
+                -0.98,
+                -3.10,
+                "SH",
+                fontsize=8.5,
+                fontweight="bold",
+                color="#1f5c7a",
+                ha="left",
+                va="bottom",
+                zorder=1,
+            )
+
+        # Draw directed edges weighted by |d ln k_e|
+        dk_abs = (
+            np.abs(edge_loadings[:, mode_k])
+            if edge_loadings is not None and mode_k < edge_loadings.shape[1]
+            else None
+        )
+        dk_max = float(np.max(dk_abs)) if (dk_abs is not None and dk_abs.size > 0) else 0.0
+
+        for e_idx, (src, dst) in enumerate(zip(edges_src, edges_dst)):
+            p0 = coords[src]
+            p1 = coords[dst]
+            diff = p1 - p0
+            dist = float(np.hypot(diff[0], diff[1]))
+            if dist <= 2.0 * node_r:
+                continue
+            unit = diff / dist
+            start = p0 + unit * (node_r * 1.04)
+            end = p1 - unit * (node_r * 1.04)
+            if dk_abs is not None and dk_max > 0.0:
+                rel_e = float(dk_abs[e_idx]) / dk_max
+                e_alpha = 0.06 + 0.70 * rel_e
+                e_lw = 0.55 + 1.35 * rel_e
+            else:
+                e_alpha = 0.28
+                e_lw = 0.8
+            arrow = FancyArrowPatch(
+                posA=(float(start[0]), float(start[1])),
+                posB=(float(end[0]), float(end[1])),
+                connectionstyle="arc3,rad=0.14",
+                arrowstyle="-|>,head_length=3.2,head_width=1.8",
+                linewidth=e_lw,
+                color="#222222",
+                alpha=e_alpha,
+                zorder=2,
+            )
+            ax.add_patch(arrow)
+
+        # Normalize signed per-reservoir loading u_b in [-1, 1]
+        w_vec = w_mat[:, mode_k]
+        w_max = float(np.max(np.abs(w_vec)))
+        u_vec = w_vec / w_max if w_max > 0.0 else np.zeros_like(w_vec)
+
+        for b_idx in range(n_boxes):
+            x_b, y_b = float(coords[b_idx, 0]), float(coords[b_idx, 1])
+            u_val = float(u_vec[b_idx])
+            abs_u = abs(u_val)
+            rgba = cmap(norm(u_val))
+            fill_alpha = 0.12 + 0.88 * abs_u
+
+            # White backing circle prevents arrows crossing behind transparent nodes
+            ax.add_patch(
+                Circle(
+                    (x_b, y_b),
+                    radius=node_r,
+                    facecolor="white",
+                    edgecolor="none",
+                    zorder=3,
+                )
+            )
+            ax.add_patch(
+                Circle(
+                    (x_b, y_b),
+                    radius=node_r,
+                    facecolor=(rgba[0], rgba[1], rgba[2], fill_alpha),
+                    edgecolor="#222222",
+                    linewidth=0.75 + 0.85 * abs_u,
+                    zorder=4,
+                )
+            )
+            txt_color = "white" if abs_u > 0.72 else "#111111"
+            lbl_str = labels[b_idx]
+            eff_fs = font_sz * 0.82 if len(lbl_str) >= 4 else font_sz
+            ax.text(
+                x_b,
+                y_b,
+                lbl_str,
+                fontsize=eff_fs,
+                fontweight="bold" if abs_u > 0.35 else "normal",
+                color=txt_color,
+                ha="center",
+                va="center",
+                zorder=5,
+            )
+
+        if mu_arr is not None and mode_k < mu_arr.size:
+            mu_v = float(mu_arr[mode_k])
+            if 0.0 < mu_v < 1e-2:
+                exp_p = int(math.floor(math.log10(mu_v)))
+                mant = mu_v / (10.0**exp_p)
+                mu_tex = rf"{mant:.1f} \times 10^{{{exp_p}}}"
+            else:
+                mu_tex = f"{mu_v:.2g}"
+            ax.set_title(
+                rf"Mode {mode_k + 1} ($\mu_{{{mode_k + 1}}} = {mu_tex}$)",
+                fontsize=9.5,
+                pad=4.0,
+            )
+        else:
+            ax.set_title(f"Mode {mode_k + 1}", fontsize=9.5, pad=4.0)
+
+        ax.set_aspect("equal")
+        ax.axis("off")
+        if is_two_hem:
+            ax.set_xlim(-1.14, 1.14)
+            ax.set_ylim(-3.26, 1.12)
+        else:
+            ax.set_xlim(-1.14, 1.14)
+            ax.set_ylim(-1.14, 1.14)
+
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    if axes is None:
+        fig.subplots_adjust(
+            left=0.02,
+            right=0.89,
+            bottom=0.03,
+            top=0.90 if title is not None else 0.94,
+            wspace=0.08,
+            hspace=0.14,
+        )
+        cbar_ax = fig.add_axes([0.915, 0.14, 0.022, 0.72])
+        cbar = fig.colorbar(sm, cax=cbar_ax)
+    else:
+        cbar = fig.colorbar(sm, ax=active_axes, fraction=0.03, pad=0.03)
+    cbar.set_label(
+        r"Normalized signed reservoir loading (opacity $\propto |\alpha|$)",
+        fontsize=9.0,
+    )
+
+    if title is not None:
+        fig.suptitle(title, fontsize=11.0, y=0.975)
+
+    return fig, out_axes
+
+
+def _format_mode_metric_tex(val: float) -> str:
+    """Format an eigenvalue or singular value cleanly for math-mode titles."""
+    if not math.isfinite(val):
+        return r"\mathrm{NaN}"
+    if val == 0.0:
+        return "0"
+    if 0.0 < abs(val) < 1e-2 or abs(val) >= 1e3:
+        exp_p = int(math.floor(math.log10(abs(val))))
+        mant = val / (10.0**exp_p)
+        return rf"{mant:.1f} \times 10^{{{exp_p}}}"
+    return f"{val:.2g}"
+
+
+def plot_cbm_mode_impulse_responses(
+    cbm_or_result: Any,
+    spectrum: Any | None = None,
+    *,
+    t_lag: Any | None = None,
+    modes: Sequence[int] = (0, 1, 2, 3, 5, 8),
+    obs_window_yr: tuple[float, float] | None = (0.0, 6.5),
+    ncols: int = 3,
+    show_baseline: bool = True,
+    title: str | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> tuple[Figure, np.ndarray]:
+    """Plot per-mode tropospheric impulse-response perturbations ``δh_k(τ)``.
+
+    Accepts either a precomputed :class:`~ticktack.fisher.CBMModeImpulseResult`
+    or a ``(cbm, spectrum)`` pair (calling
+    :func:`~ticktack.fisher.cbm_mode_impulse_responses` on ``t_lag``).
+    When ``spectrum is None`` and a CBM is passed directly, displays the
+    continuous impulse-response Jacobian SVD modes.
+
+    When ``show_baseline=True``, renders a compact full-width reference panel
+    across the top showing the nominal tropospheric impulse responses
+    ``h_{NH,0}(τ)`` and ``h_{SH,0}(τ)`` above the grid of signed ``+1 σ_prior``
+    mode perturbations ``δh_k(τ)`` so both fast stratospheric rollover,
+    observation-window sensitivity, and slow multi-decadal ventilation tails
+    are immediately legible.
+
+    Strictly stateless: wraps rendering in ``plt.rc_context()`` and never
+    mutates global ``matplotlib.rcParams``.
+    """
+    from .fisher import CBMModeImpulseResult, cbm_mode_impulse_responses
+
+    if isinstance(cbm_or_result, CBMModeImpulseResult):
+        res = cbm_or_result
+        avail_idx = list(res.mode_indices)
+        if modes is not None:
+            pos_list = [avail_idx.index(int(m)) for m in modes if int(m) in avail_idx]
+            if not pos_list:
+                pos_list = list(range(len(avail_idx)))
+        else:
+            pos_list = list(range(len(avail_idx)))
+    else:
+        lag_grid = (
+            np.linspace(0.0, 30.0, 301, dtype=np.float64)
+            if t_lag is None
+            else np.asarray(t_lag, dtype=np.float64).reshape(-1)
+        )
+        if spectrum is not None:
+            n_avail = int(np.asarray(spectrum.parameter_loadings).shape[1])
+            req_modes = tuple(int(m) for m in modes if 0 <= int(m) < n_avail)
+            if not req_modes:
+                req_modes = tuple(range(min(6, n_avail)))
+            res = cbm_mode_impulse_responses(
+                cbm_or_result, lag_grid, spectrum, modes=req_modes
+            )
+            pos_list = list(range(len(res.mode_indices)))
+        else:
+            res_all = cbm_mode_impulse_responses(cbm_or_result, lag_grid, None)
+            avail_idx = list(res_all.mode_indices)
+            pos_list = [avail_idx.index(int(m)) for m in modes if int(m) in avail_idx]
+            if not pos_list:
+                pos_list = list(range(min(6, len(avail_idx))))
+            res = res_all
+
+    n_modes = len(pos_list)
+    if n_modes == 0:
+        raise ValueError("plot_cbm_mode_impulse_responses requires at least one mode.")
+
+    tau = np.asarray(res.t_lag, dtype=np.float64)
+    hems = list(res.hemispheres)
+    evals = np.asarray(res.eigenvalues, dtype=np.float64)
+    svals = np.asarray(res.singular_values, dtype=np.float64)
+
+    has_nh = "north" in res.baseline
+    has_sh = "south" in res.baseline
+    # Collapse duplicate curves for single-hemisphere CBMs where NH == SH identically:
+    single_hemi = (
+        has_nh
+        and has_sh
+        and np.allclose(
+            np.asarray(res.baseline["north"], dtype=np.float64),
+            np.asarray(res.baseline["south"], dtype=np.float64),
+            rtol=1e-12,
+            atol=1e-14,
+        )
+    )
+
+    if res.units == "permil_per_q0_yr":
+        y_unit = r"$\text{‰}\,(q_0\,\mathrm{yr})^{-1}$"
+    elif res.units == "permil_per_fluence":
+        y_unit = r"$\text{‰}\,(\mathrm{atom\,cm^{-2}\,s^{-1}\,yr})^{-1}$"
+    else:
+        y_unit = r"$\mathrm{yr}^{-1}$"
+
+    ncols_eff = max(1, min(int(ncols), n_modes))
+    nrows_modes = int(math.ceil(n_modes / ncols_eff))
+
+    nh_color = "#c44e52"
+    sh_color = "#1f77b4"
+    win_color = "#f0e442"
+
+    with plt.rc_context():
+        if figsize is None:
+            base_h = 2.15 if show_baseline else 0.0
+            figsize = (3.45 * ncols_eff + 0.35, base_h + 2.55 * nrows_modes + 0.55)
+
+        fig = plt.figure(figsize=figsize)
+        if show_baseline:
+            gs = fig.add_gridspec(
+                nrows_modes + 1,
+                ncols_eff,
+                height_ratios=[0.78] + [1.0] * nrows_modes,
+                hspace=0.40,
+                wspace=0.28,
+            )
+            ax_base = fig.add_subplot(gs[0, :])
+            mode_axes = np.empty((nrows_modes, ncols_eff), dtype=object)
+            for r in range(nrows_modes):
+                for c in range(ncols_eff):
+                    mode_axes[r, c] = fig.add_subplot(gs[r + 1, c], sharex=ax_base)
+        else:
+            ax_base = None
+            gs = fig.add_gridspec(
+                nrows_modes,
+                ncols_eff,
+                hspace=0.38,
+                wspace=0.28,
+            )
+            mode_axes = np.empty((nrows_modes, ncols_eff), dtype=object)
+            for r in range(nrows_modes):
+                for c in range(ncols_eff):
+                    share = mode_axes[0, 0] if (r > 0 or c > 0) else None
+                    mode_axes[r, c] = fig.add_subplot(gs[r, c], sharex=share)
+
+        win_label = None
+        if obs_window_yr is not None:
+            w0, w1 = float(obs_window_yr[0]), float(obs_window_yr[1])
+            win_label = f"Post-spike window ({w0:g}–{w1:g} yr)"
+
+        if ax_base is not None:
+            if obs_window_yr is not None:
+                ax_base.axvspan(
+                    float(obs_window_yr[0]),
+                    float(obs_window_yr[1]),
+                    color=win_color,
+                    alpha=0.22,
+                    label=win_label,
+                    zorder=0,
+                )
+            if single_hemi or (has_nh and not has_sh):
+                h_n = np.asarray(res.baseline["north"], dtype=np.float64)
+                ax_base.plot(tau, h_n, color=nh_color, lw=2.0, label=r"Troposphere $h_0(\tau)$")
+            elif has_nh and has_sh:
+                h_n = np.asarray(res.baseline["north"], dtype=np.float64)
+                h_s = np.asarray(res.baseline["south"], dtype=np.float64)
+                ax_base.plot(tau, h_n, color=nh_color, lw=2.0, label=r"NH troposphere $h_{\mathrm{NH},0}(\tau)$")
+                ax_base.plot(tau, h_s, color=sh_color, lw=1.8, ls="--", label=r"SH troposphere $h_{\mathrm{SH},0}(\tau)$")
+            else:
+                for hi, h_key in enumerate(hems):
+                    ax_base.plot(
+                        tau,
+                        np.asarray(res.baseline[h_key], dtype=np.float64),
+                        color=_PALETTE[hi % len(_PALETTE)],
+                        lw=1.8,
+                        label=h_key.upper(),
+                    )
+            ax_base.axhline(0.0, color="#666666", lw=0.75, ls=":")
+            ax_base.set_xlim(float(tau[0]), float(tau[-1]))
+            ax_base.set_ylabel(rf"$h_0(\tau)$ ({y_unit})", fontsize=8.8)
+            ax_base.set_title(
+                r"Nominal tropospheric $\Delta^{14}\mathrm{C}$ impulse response $h_0(\tau)$",
+                fontsize=9.5,
+                fontweight="bold",
+                pad=4.0,
+            )
+            ax_base.grid(True, alpha=0.22, ls="--")
+            ax_base.legend(
+                loc="upper right",
+                ncol=3 if (has_nh and has_sh and not single_hemi) else 2,
+                frameon=True,
+                fontsize=8.0,
+            )
+            ax_base.tick_params(labelsize=8.2)
+
+        flat_mode_axes = mode_axes.ravel()
+        for slot, pos in enumerate(pos_list):
+            ax = flat_mode_axes[slot]
+            mode_k = int(res.mode_indices[pos])
+            if obs_window_yr is not None:
+                ax.axvspan(
+                    float(obs_window_yr[0]),
+                    float(obs_window_yr[1]),
+                    color=win_color,
+                    alpha=0.22,
+                    label=(win_label if (slot == 0 and ax_base is None) else None),
+                    zorder=0,
+                )
+            ax.axhline(0.0, color="#555555", lw=0.8, ls="--", zorder=1)
+
+            if single_hemi or (has_nh and not has_sh):
+                dh_n = np.asarray(res.mode_contributions["north"][pos], dtype=np.float64)
+                ax.plot(
+                    tau,
+                    dh_n,
+                    color=nh_color,
+                    lw=1.8,
+                    label=(r"$\delta h_k(\tau)$" if (slot == 0 and ax_base is None) else None),
+                    zorder=3,
+                )
+                ax.fill_between(tau, 0.0, dh_n, color=nh_color, alpha=0.10, zorder=2)
+            elif has_nh and has_sh:
+                dh_n = np.asarray(res.mode_contributions["north"][pos], dtype=np.float64)
+                dh_s = np.asarray(res.mode_contributions["south"][pos], dtype=np.float64)
+                ax.plot(
+                    tau,
+                    dh_n,
+                    color=nh_color,
+                    lw=1.8,
+                    label=(r"NH $\delta h_{\mathrm{NH},k}$" if (slot == 0 and ax_base is None) else None),
+                    zorder=3,
+                )
+                ax.plot(
+                    tau,
+                    dh_s,
+                    color=sh_color,
+                    lw=1.65,
+                    ls="--",
+                    label=(r"SH $\delta h_{\mathrm{SH},k}$" if (slot == 0 and ax_base is None) else None),
+                    zorder=3,
+                )
+                ax.fill_between(tau, 0.0, dh_n, color=nh_color, alpha=0.09, zorder=2)
+                ax.fill_between(tau, 0.0, dh_s, color=sh_color, alpha=0.08, zorder=2)
+            else:
+                for hi, h_key in enumerate(hems):
+                    dh_h = np.asarray(res.mode_contributions[h_key][pos], dtype=np.float64)
+                    ax.plot(
+                        tau,
+                        dh_h,
+                        color=_PALETTE[hi % len(_PALETTE)],
+                        lw=1.7,
+                        label=(h_key.upper() if (slot == 0 and ax_base is None) else None),
+                        zorder=3,
+                    )
+
+            if res.source == "impulse_svd":
+                sv_tex = _format_mode_metric_tex(float(svals[pos]))
+                ax.set_title(
+                    rf"SVD Mode {mode_k + 1} ($s_{{{mode_k + 1}}} = {sv_tex}$)",
+                    fontsize=9.2,
+                    pad=4.0,
+                )
+            else:
+                mu_tex = _format_mode_metric_tex(float(evals[pos]))
+                ax.set_title(
+                    rf"Mode {mode_k + 1} ($\mu_{{{mode_k + 1}}} = {mu_tex}$)",
+                    fontsize=9.2,
+                    pad=4.0,
+                )
+
+            ax.set_xlim(float(tau[0]), float(tau[-1]))
+            ax.grid(True, alpha=0.22, ls="--")
+            ax.tick_params(labelsize=8.2)
+            row_i, col_i = divmod(slot, ncols_eff)
+            if col_i == 0:
+                ax.set_ylabel(rf"$\delta h_k(\tau)$ ({y_unit})", fontsize=8.6)
+            if row_i == nrows_modes - 1 or slot + ncols_eff >= n_modes:
+                ax.set_xlabel(r"Lag $\tau$ (yr)", fontsize=8.8)
+            if slot == 0 and ax_base is None:
+                ax.legend(loc="best", frameon=True, fontsize=7.6)
+
+        for slot in range(n_modes, nrows_modes * ncols_eff):
+            flat_mode_axes[slot].set_visible(False)
+
+        if title is not None:
+            fig.suptitle(title, fontsize=11.0, fontweight="bold", y=0.985)
+            fig.subplots_adjust(top=0.90, bottom=0.08, left=0.09, right=0.98)
+        else:
+            fig.subplots_adjust(top=0.94, bottom=0.08, left=0.09, right=0.98)
+
+    if ax_base is not None:
+        out_axes = np.empty(1 + n_modes, dtype=object)
+        out_axes[0] = ax_base
+        for i in range(n_modes):
+            out_axes[i + 1] = flat_mode_axes[i]
+        return fig, out_axes
+    return fig, mode_axes
+
+
 from .fields import plot_evidence_grid, plot_field_draws  # noqa: E402
 
 __all__ = [
     "plot_cbm_eigenmodes",
+    "plot_cbm_mode_impulse_responses",
+    "plot_cbm_tikz_modes",
+    "plot_corner",
     "plot_d14c_fit",
     "plot_data_model_correlation",
     "plot_evidence_grid",
@@ -1113,4 +2246,3 @@ __all__ = [
     "plot_production_posterior",
     "plot_residual_map",
 ]
-

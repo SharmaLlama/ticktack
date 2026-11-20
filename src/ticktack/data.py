@@ -726,6 +726,7 @@ class Dataset(zdx.Base):
 
     series: tuple[TreeRingSeries, ...]
     name: str = eqx.field(static=True)
+    _uniq_subwindows: tuple[tuple[float, ...], tuple[float, ...], tuple[int, ...], int] | None = eqx.field(static=True)
 
     def __init__(
         self,
@@ -744,6 +745,34 @@ class Dataset(zdx.Base):
                 raise TypeError(f"Expected TreeRingSeries, got {type(s)!r}.")
         self.series = items
         self.name = str(name)
+        try:
+            m_max = max(int(s.sub_t_starts.shape[1]) for s in items)
+            ts_parts = []
+            te_parts = []
+            for s in items:
+                ts_np = np.asarray(s.sub_t_starts, dtype=np.float64)
+                te_np = np.asarray(s.sub_t_ends, dtype=np.float64)
+                if ts_np.shape[1] < m_max:
+                    pad_k = m_max - ts_np.shape[1]
+                    ts_np = np.concatenate([ts_np, np.repeat(ts_np[:, -1:], pad_k, axis=1)], axis=1)
+                    te_np = np.concatenate([te_np, np.repeat(te_np[:, -1:], pad_k, axis=1)], axis=1)
+                ts_parts.append(ts_np)
+                te_parts.append(te_np)
+            all_ts_np = np.concatenate(ts_parts, axis=0).reshape(-1)
+            all_te_np = np.concatenate(te_parts, axis=0).reshape(-1)
+            pairs = np.stack([all_ts_np, all_te_np], axis=1)
+            uniq_pairs, inv_idx = np.unique(pairs, axis=0, return_inverse=True)
+            if uniq_pairs.shape[0] < pairs.shape[0]:
+                self._uniq_subwindows = (
+                    tuple(float(v) for v in uniq_pairs[:, 0]),
+                    tuple(float(v) for v in uniq_pairs[:, 1]),
+                    tuple(int(i) for i in inv_idx),
+                    int(m_max),
+                )
+            else:
+                self._uniq_subwindows = None
+        except Exception:
+            self._uniq_subwindows = None
 
     @property
     def n_series(self) -> int:

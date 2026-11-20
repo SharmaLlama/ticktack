@@ -550,14 +550,17 @@ def _eval_boxcar_binned_van_loan(
             jnp.where((ts >= ar) & (ts < br), 1.0, 0.0),
             delta_in / safe_tau,
         )
-        _, _, g1_in = van_loan_foh_blocks(A * delta_in, b_scaled, 1.0)
+        _, psi1_in_b, g1_in = van_loan_foh_blocks(A * delta_in, b_scaled, 1.0)
         int_active = fluence * f_in * delta_in * g1_in
-        _, psi1_in_b = van_loan_psi1_vec(A * delta_in, b_scaled, 1.0)
         dy_t2 = fluence * f_in * psi1_in_b
         _, int_post = van_loan_psi1_vec(A, dy_t2, delta_post)
         return (int_pre + int_active + int_post) / width
 
-    return jax.vmap(_one_win)(a_r, b_r)
+    return jax.lax.map(
+        lambda ab: _one_win(ab[0], ab[1]),
+        (a_r, b_r),
+        batch_size=32,
+    )
 
 
 def _eval_boxcar_binned(
@@ -817,7 +820,11 @@ def _eval_smooth_spike_binned_van_loan(
         _, int_pre_total = van_loan_psi1_vec(A, dy_ar, width)
         return (int_pre_total + int_in) / width
 
-    return jax.vmap(_one_win)(a_r, b_r)
+    return jax.lax.map(
+        lambda ab: _one_win(ab[0], ab[1]),
+        (a_r, b_r),
+        batch_size=32,
+    )
 
 
 def _eval_smooth_spike_binned(
