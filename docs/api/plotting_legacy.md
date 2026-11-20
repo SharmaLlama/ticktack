@@ -12,7 +12,7 @@ Publication-ready diagnostic figures (`ticktack.plotting`) and explicit opt-in f
 
 ### Additional Diagnostic Helpers (`plot_cbm_tikz_modes` & `plot_corner`)
 
-- **`plot_cbm_tikz_modes(...)`**: Renders Fisher eigenmodes on the published [Zhang et al. (2022, arXiv:2210.13775)](https://arxiv.org/abs/2210.13775) TikZ reservoir geometries (`Brehm21` / `Buntgen18` 22-box two-hemisphere with Southern Hemisphere cyan `#cceeff` and mirrored Northern Hemisphere `#ffe0b2` backdrops, `Guttler15` 11-box global, `Miyake17` 4-box, and circular fallback for custom topologies) with standard short labels (`S`, `T`, `SW`, `SB`, `I&DW`, `SLB`, `LLB`, `L`, `So`, `P`, `SS`, `B`, `MS`). Normalized signed node weights $u_b \in [-1, 1]$ (`"mass"` or `"net_rate"` / `"incident_rate"` loadings) map fill colours through a symmetric diverging `RdBu_r` (`vmin = -1, vmax = +1`) colourbar and modulate node fill opacity via `alpha = 0.12 + 0.88 * |u_b|` alongside directed edge opacity.
+- **`plot_cbm_tikz_modes(...)`**: Renders Fisher eigenmodes on the published [Zhang et al. (2022, arXiv:2210.13775)](https://arxiv.org/abs/2210.13775) TikZ reservoir geometries (`Brehm21` / `Buntgen18` 22-box two-hemisphere with Northern Hemisphere `#ffe0b2` on top and Southern Hemisphere `#cceeff` on the bottom, mirrored across the equator so `S`, `T`, `SW`, and `I&DW` face directly across the equatorial interface; `Guttler15` 11-box global; `Miyake17` 4-box; and circular fallback for custom topologies) with standard short labels (`S`, `T`, `SW`, `SB`, `I&DW`, `SLB`, `LLB`, `L`, `So`, `P`, `SS`, `B`, `MS`). Normalized signed node weights $u_b \in [-1, 1]$ (`"mass"` or `"net_rate"` / `"incident_rate"` loadings) map fill colours through a symmetric diverging `RdBu_r` (`vmin = -1, vmax = +1`) colourbar and modulate node fill opacity via `alpha = 0.12 + 0.88 * |u_b|` alongside directed edge opacity.
 - **`plot_corner(...)`**: Wraps [`ChainConsumer`](https://samreay.github.io/ChainConsumer/) ($\ge 1.0$) to render full parametric cornerplots from sample mappings, ArviZ `InferenceData` NUTS posteriors, weighted `SMCResult` ensembles, 2D arrays, or multi-model chain comparisons (`Mapping` / `Sequence` of chains):
 
 ```python
@@ -26,6 +26,7 @@ def plot_corner(
     truth_name: str = "MAP",
     colors: Sequence[str] | None = None,
     figsize: tuple[float, float] | None = None,
+    summarize: bool = False,
     plot_kwargs: Mapping[str, Any] | None = None,
 ) -> tuple[Figure, np.ndarray]
 ```
