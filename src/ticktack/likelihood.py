@@ -852,25 +852,14 @@ def _nonlinear_residual(
     base_prod = _build_base_production(unmarginalized, model.q_std)
 
     if not isinstance(model.solver, ModaxSolver):
-        all_ts, all_te, all_w = _concat_padded_windows(dataset)
-        box_indices_flat = jnp.array(
-            [
-                model._box_index_for_series(s)
-                for s in dataset.series
-                for _ in range(s.n_obs)
-            ],
-            dtype=jnp.int32,
-        )
-        pred_flat = model.solver.predict_d14c(
+        base_model = RadiocarbonModel(
             model.cbm,
             base_prod,
-            all_ts,
-            all_te,
-            sub_weights=all_w,
-            box_indices=box_indices_flat,
+            solver=model.solver,
             q_std=model.q_std,
             alpha_unit=model.alpha_unit,
         )
+        pred_flat = base_model.predict_d14c(dataset, concat=True)
         return dataset.d14c_flat - pred_flat
 
     per_series_preds: list[jax.Array] = []

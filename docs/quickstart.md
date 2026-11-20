@@ -121,7 +121,7 @@ print(f"ln Z = {smc_res.log_evidence:.2f} +/- {smc_res.log_evidence_err:.2f}")
 
 ## 4. Non-Parametric IFT Reconstruction & Automatic GP Kernel Selection
 
-To reconstruct cosmic-ray production $Q(t)$ non-parametrically without assuming a parametric spike shape – or to select among all seven candidate GP spectral families (`"matern12"`, `"matern32"`, `"matern52"`, `"squared_exp"`, `"continuous_matern"`, `"matern32_plus_solar"`, `"correlated_field"`) by empirical Bayes – use `ticktack.fields`:
+To reconstruct cosmic-ray production $Q(t)$ non-parametrically without assuming a parametric spike shape – or to select among all eight candidate GP spectral families in `DEFAULT_CANDIDATE_KERNELS` (`"matern12"`, `"matern32"`, `"matern52"`, `"squared_exp"`, `"continuous_matern"`, `"sho_solar"`, `"matern32_plus_solar"`, `"correlated_field"`) by empirical Bayes – use `ticktack.fields`:
 
 ```python
 # Automatic empirical-Bayes GP kernel selection via Laplace hyper-evidence

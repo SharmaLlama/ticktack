@@ -18,13 +18,14 @@ MacKay 1992) to 1D cosmic-ray ``14C`` production histories in ``ticktack 2.0``:
   fixed-point :func:`error_scale` (global ``float`` and per-series ``dict[str, float]``).
 * **Automatic empirical-Bayes GP kernel optimization & model selection**:
   :func:`evidence_grid`, :func:`optimize_gp_kernel`, and :func:`select_gp_kernel`
-  across seven candidate spectral families with Laplace hyper-Occam penalties.
+  across eight candidate spectral families with Laplace hyper-Occam penalties.
 * **Stateless scientific diagnostic plotting**:
   :func:`plot_field_draws` and :func:`plot_evidence_grid`.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import math
@@ -70,7 +71,7 @@ from .production import (
     ProductionTerm,
     SteadyProduction,
 )
-from .solvers import ExactLinearSolver, _foh_cumulative_integral, _modal_decomposition
+from .solvers import ExactLinearSolver, _modal_decomposition, van_loan_foh_blocks
 
 __all__ = [
     "dct2",
@@ -1162,41 +1163,26 @@ def _pack_dataset_quadrature(
     return uniq_s, uniq_e, tuple(specs)
 
 
-def _foh_excursion_from_packed(
-    cbm: CarbonBoxModel,
-    q_std: ArrayLike,
-    alpha_unit: ArrayLike,
-    t0: jax.Array,
-    dt: jax.Array,
-    dq_grid: jax.Array,
-    dy0: jax.Array,
-    flat_starts: jax.Array,
-    flat_ends: jax.Array,
-    specs: tuple[tuple[jax.Array, int, int, jax.Array, int], ...],
-) -> jax.Array:
-    """Exact seasonal-binned ``Delta14C`` excursion (permil) for ``(dq_grid, dy0)``."""
-    A = cbm.matrix_A()
-    b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
-    trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
-    y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-    m_rel = cbm.relative_reservoir_masses()
-    y_trop = jnp.sum(y_ss[trop_idx])
+def _phi123_scalar(z: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Exact, smooth ``(phi_1(z), phi_2(z), phi_3(z))`` with Taylor guard near ``z = 0``."""
+    small = jnp.abs(z) < 1e-3
+    z_safe = jnp.where(small, 1.0, z)
+    p1_big = jnp.expm1(z_safe) / z_safe
+    p2_big = (p1_big - 1.0) / z_safe
+    p3_big = (p2_big - 0.5) / z_safe
 
-    m_tot = flat_starts.shape[0]
-    queries = jnp.concatenate([flat_starts, flat_ends], axis=0)
-    _, Y_all = _foh_cumulative_integral(A, b_scaled, t0, dt, dq_grid, dy0, queries)
-    Y_a = Y_all[:m_tot]
-    Y_b = Y_all[m_tot:]
-    widths = (flat_ends - flat_starts)[:, None]
-    dy_sub = (Y_b - Y_a) / widths  # (M_uniq, n_boxes)
+    z2 = z * z
+    z3 = z2 * z
+    z4 = z2 * z2
+    p1_sm = 1.0 + z / 2.0 + z2 / 6.0 + z3 / 24.0 + z4 / 120.0
+    p2_sm = 0.5 + z / 6.0 + z2 / 24.0 + z3 / 120.0 + z4 / 720.0
+    p3_sm = (1.0 / 6.0) + z / 24.0 + z2 / 120.0 + z3 / 720.0 + z4 / 5040.0
 
-    series_out: list[jax.Array] = []
-    for inv_slice, n_s, m_s, w_sub, box_idx in specs:
-        block = dy_sub[inv_slice, box_idx].reshape(n_s, m_s)
-        dy_ring = jnp.sum(block * w_sub[None, :], axis=1)
-        d14c_exc = 1000.0 * ((dy_ring / y_trop) / m_rel[box_idx])
-        series_out.append(d14c_exc)
-    return jnp.concatenate(series_out, axis=0)
+    return (
+        jnp.where(small, p1_sm, p1_big),
+        jnp.where(small, p2_sm, p2_big),
+        jnp.where(small, p3_sm, p3_big),
+    )
 
 
 @eqx.filter_jit
@@ -1214,22 +1200,14 @@ def _compute_dct_operator_jit(
     dataset_digest: str = "",
     template_digest: str = "none",
 ) -> DCTResponseOperator:
+    """Direct FOH DCT response operator (modal scalar path + low-RAM Van Loan fallback)."""
     dt_f = (t_end - t_start) / float(n_grid - 1)
     t0_arr = jnp.asarray(t_start, dtype=jnp.float64)
     dt_arr = jnp.asarray(dt_f, dtype=jnp.float64)
-    dq_zero = jnp.zeros((n_grid,), dtype=jnp.float64)
-    dy0_zero = jnp.zeros((cbm.n_boxes,), dtype=jnp.float64)
 
-    w_grid, init_basis = jax.jacfwd(
-        lambda dq, dy0: _foh_excursion_from_packed(
-            cbm, q_std, alpha_unit, t0_arr, dt_arr, dq, dy0, flat_starts, flat_ends, specs
-        ),
-        argnums=(0, 1),
-    )(dq_zero, dy0_zero)
-
-    w_eff = w_grid if template is None else w_grid * template[None, :]
-    w_dct = dct2(w_eff, axis=1)
-
+    A = cbm.matrix_A()
+    n = cbm.n_boxes
+    b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
     trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
     y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
     m_rel = cbm.relative_reservoir_masses()
@@ -1237,8 +1215,174 @@ def _compute_dct_operator_jit(
     r_ss_ratio = (y_ss / y_trop) / m_rel
     ss_all = 1000.0 * (r_ss_ratio - 1.0)
 
-    A = cbm.matrix_A()
-    b_scaled = alpha_unit * cbm.production_vector()
+    b_tot = n_grid + n
+    dq_mat = jnp.concatenate(
+        [jnp.eye(n_grid, dtype=jnp.float64), jnp.zeros((n_grid, n), dtype=jnp.float64)],
+        axis=1,
+    )
+    m_tot = flat_starts.shape[0]
+    queries = jnp.concatenate([flat_starts, flat_ends], axis=0)
+    n_cells = n_grid - 1
+    pos = (queries - t0_arr) / dt_arr
+    idx = jnp.clip(jnp.floor(pos).astype(jnp.int32), 0, n_cells - 1)
+    s_all = jnp.clip(queries - (t0_arr + idx * dt_arr), 0.0, dt_arr)
+
+    modal = _modal_decomposition(A, cbm=cbm)
+    if modal is not None:
+        lam, V, V_inv = modal
+        dtype_m = lam.dtype
+        b_tilde = V_inv @ b_scaled.astype(dtype_m)
+        dy0_tilde = jnp.concatenate(
+            [jnp.zeros((n, n_grid), dtype=dtype_m), V_inv],
+            axis=1,
+        )
+
+        z_dt = lam * dt_arr
+        phi0_dt = jnp.exp(z_dt)
+        p1_dt, p2_dt, p3_dt = _phi123_scalar(z_dt)
+        g0_dt = dt_arr * p1_dt * b_tilde
+        g1_dt = dt_arr * p2_dt * b_tilde
+        w0_dt = g0_dt - g1_dt
+        psi_dt = dt_arr * p1_dt
+        h0_dt = (dt_arr * dt_arr) * p2_dt * b_tilde
+        h1_dt = (dt_arr * dt_arr) * p3_dt * b_tilde
+        h0_m1_dt = h0_dt - h1_dt
+
+        def _modal_step(
+            dy_k: jax.Array, dq_pair: tuple[jax.Array, jax.Array]
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            dq_k, dq_k1 = dq_pair
+            dy_next = (
+                phi0_dt[:, None] * dy_k
+                + w0_dt[:, None] * dq_k[None, :]
+                + g1_dt[:, None] * dq_k1[None, :]
+            )
+            cell_int = (
+                psi_dt[:, None] * dy_k
+                + h0_m1_dt[:, None] * dq_k[None, :]
+                + h1_dt[:, None] * dq_k1[None, :]
+            )
+            return dy_next, (dy_k, cell_int)
+
+        _, (dy_prev, cell_ints) = jax.lax.scan(
+            _modal_step, dy0_tilde, (dq_mat[:-1], dq_mat[1:])
+        )
+        Y_grid = jnp.concatenate(
+            [
+                jnp.zeros((1, n, b_tot), dtype=dtype_m),
+                jnp.cumsum(cell_ints[:-1], axis=0),
+            ],
+            axis=0,
+        )
+
+        z_s = s_all[:, None] * lam[None, :]  # (2*m_tot, n)
+        p1_s, p2_s, p3_s = _phi123_scalar(z_s)
+        psi_s = s_all[:, None] * p1_s
+        s2 = (s_all * s_all)[:, None]
+        h0_s = s2 * p2_s * b_tilde[None, :]
+        h1_s = s2 * p3_s * b_tilde[None, :]
+
+        dq0 = dq_mat[idx]
+        dq1 = dq_mat[idx + 1]
+        dqs = dq0 + (s_all / dt_arr)[:, None] * (dq1 - dq0)
+        Y_tilde = (
+            Y_grid[idx]
+            + psi_s[:, :, None] * dy_prev[idx]
+            + (h0_s - h1_s)[:, :, None] * dq0[:, None, :]
+            + h1_s[:, :, None] * dqs[:, None, :]
+        )
+        widths = (flat_ends - flat_starts)[:, None, None]
+        dy_tilde_sub = (Y_tilde[m_tot:] - Y_tilde[:m_tot]) / widths  # (M_uniq, n, b_tot)
+
+        series_out: list[jax.Array] = []
+        for inv_slice, n_s, m_s, w_sub, box_idx in specs:
+            v_row = V[box_idx, :]  # (n,)
+            sub_box = jnp.einsum("m,qmb->qb", v_row, dy_tilde_sub[inv_slice]).real
+            block = sub_box.reshape(n_s, m_s, b_tot)
+            dy_ring = jnp.sum(block * w_sub[None, :, None], axis=1)
+            d14c_exc = 1000.0 * ((dy_ring / y_trop) / m_rel[box_idx])
+            series_out.append(d14c_exc)
+        full_mat = jnp.concatenate(series_out, axis=0)
+    else:
+        # Low-memory Van Loan fallback for traced non-symmetric CBMs (sequential lax.map)
+        A_aug = jnp.zeros((2 * n, 2 * n), dtype=jnp.float64)
+        A_aug = A_aug.at[:n, :n].set(A)
+        A_aug = A_aug.at[n:, :n].set(jnp.eye(n, dtype=jnp.float64))
+        b_aug = jnp.concatenate([b_scaled, jnp.zeros((n,), dtype=jnp.float64)])
+        Phi_aug, g0_aug, g1_aug = van_loan_foh_blocks(A_aug, b_aug, dt_arr)
+        Phi_dt = Phi_aug[:n, :n]
+        g0_dt = g0_aug[:n]
+        g1_dt = g1_aug[:n]
+        w0_dt = g0_dt - g1_dt
+        Psi_y = Phi_aug[n:, :n]
+        h0 = g0_aug[n:]
+        h1 = g1_aug[n:]
+        h0_m1 = h0 - h1
+
+        dy0_mat = jnp.concatenate(
+            [jnp.zeros((n, n_grid), dtype=jnp.float64), jnp.eye(n, dtype=jnp.float64)],
+            axis=1,
+        )
+
+        def _scan_step(
+            dy_k: jax.Array, dq_pair: tuple[jax.Array, jax.Array]
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            dq_k, dq_k1 = dq_pair
+            dy_next = (
+                Phi_dt @ dy_k
+                + w0_dt[:, None] * dq_k[None, :]
+                + g1_dt[:, None] * dq_k1[None, :]
+            )
+            cell_int = (
+                Psi_y @ dy_k
+                + h0_m1[:, None] * dq_k[None, :]
+                + h1[:, None] * dq_k1[None, :]
+            )
+            return dy_next, (dy_k, cell_int)
+
+        _, (dy_prev, cell_ints) = jax.lax.scan(
+            _scan_step, dy0_mat, (dq_mat[:-1], dq_mat[1:])
+        )
+        Y_grid = jnp.concatenate(
+            [
+                jnp.zeros((1, n, b_tot), dtype=jnp.float64),
+                jnp.cumsum(cell_ints[:-1], axis=0),
+            ],
+            axis=0,
+        )
+
+        @jax.checkpoint
+        def _eval_query_vl(pair: tuple[jax.Array, jax.Array]) -> jax.Array:
+            s_q, idx_q = pair
+            Phi_s, g0_s, g1_s = van_loan_foh_blocks(A_aug, b_aug, s_q)
+            dq0_q = dq_mat[idx_q]
+            dq1_q = dq_mat[idx_q + 1]
+            dqs_q = dq0_q + (s_q / dt_arr) * (dq1_q - dq0_q)
+            return (
+                Y_grid[idx_q]
+                + Phi_s[n:, :n] @ dy_prev[idx_q]
+                + (g0_s[n:] - g1_s[n:])[:, None] * dq0_q[None, :]
+                + g1_s[n:][:, None] * dqs_q[None, :]
+            )
+
+        Y_all = jax.lax.map(_eval_query_vl, (s_all, idx))
+        widths = (flat_ends - flat_starts)[:, None, None]
+        dy_sub = (Y_all[m_tot:] - Y_all[:m_tot]) / widths  # (M_uniq, n, b_tot)
+
+        series_out = []
+        for inv_slice, n_s, m_s, w_sub, box_idx in specs:
+            block = dy_sub[inv_slice, box_idx, :].reshape(n_s, m_s, b_tot)
+            dy_ring = jnp.sum(block * w_sub[None, :, None], axis=1)
+            d14c_exc = 1000.0 * ((dy_ring / y_trop) / m_rel[box_idx])
+            series_out.append(d14c_exc)
+        full_mat = jnp.concatenate(series_out, axis=0)
+
+    w_grid = full_mat[:, :n_grid]
+    init_basis = full_mat[:, n_grid:]
+
+    w_eff = w_grid if template is None else w_grid * template[None, :]
+    w_dct = dct2(w_eff, axis=1)
+
     v_unit = jnp.linalg.solve(-A, b_scaled)
     unit_d14c_boxes = 1000.0 * ((v_unit / y_trop) / m_rel)
 
@@ -1266,6 +1410,26 @@ def _compute_dct_operator_jit(
     )
 
 
+_DCT_OPERATOR_CACHE: OrderedDict[tuple[Any, ...], DCTResponseOperator] = OrderedDict()
+_DCT_OPERATOR_CACHE_MAXSIZE: int = 16
+
+
+def _compute_cbm_digest(cbm: CarbonBoxModel) -> str:
+    """Deterministic SHA-256 fingerprint of a concrete :class:`CarbonBoxModel` (empty if traced)."""
+    leaves, treedef = jax.tree_util.tree_flatten(cbm)
+    h = hashlib.sha256()
+    h.update(repr(treedef).encode("utf-8"))
+    for leaf in leaves:
+        if isinstance(leaf, jax.core.Tracer):
+            return ""
+        arr_np = _concrete_np(leaf)
+        if arr_np is None:
+            return ""
+        h.update(f";sh={arr_np.shape};dt={arr_np.dtype};".encode("utf-8"))
+        h.update(np.ascontiguousarray(arr_np).tobytes())
+    return h.hexdigest()
+
+
 def build_dct_response_operator(
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
@@ -1283,6 +1447,9 @@ def build_dct_response_operator(
     Once built for ``(cbm, dataset, t_start, t_end, n_grid)``, evaluating exact marginal
     log-evidence across any :class:`SpectralKernel` ``S_j(phi)`` requires only column
     rescaling ``w_dct * sqrt(S(phi))`` with zero additional matrix exponentials or ODE scans.
+    Concrete-leaf calls are cached in a bounded LRU cache (``maxsize=16``) so joint spike +
+    GP-hyperparameter ``fit_map`` / ``sample_nuts`` / ``sample_smc`` runs reuse ``w_dct``
+    at trace time without tracing ``n_grid`` matrix exponentials per step.
     """
     ds = _as_dataset(dataset)
     n_g = int(n_grid)
@@ -1298,12 +1465,69 @@ def build_dct_response_operator(
     if not (t1 > t0):
         raise ValueError(f"Expected t_end > t_start, got [{t0}, {t1}].")
 
-    tmpl_arr = None if template is None else jnp.asarray(template, dtype=jnp.float64)
-    if tmpl_arr is not None and tmpl_arr.shape != (n_g,):
-        raise ValueError(f"template shape {tmpl_arr.shape} must be ({n_g},).")
-
     ds_digest = _compute_dataset_digest(cbm, ds)
-    tmpl_digest = _compute_template_digest(tmpl_arr)
+    tmpl_digest = _compute_template_digest(template)
+    cbm_digest = _compute_cbm_digest(cbm)
+    q_np = None if isinstance(q_std, jax.core.Tracer) else _concrete_np(q_std)
+    a_np = None if isinstance(alpha_unit, jax.core.Tracer) else _concrete_np(alpha_unit)
+    tmpl_traced = template is not None and isinstance(template, jax.core.Tracer)
+    if template is not None:
+        tmpl_shape = np.shape(template)
+        if tmpl_shape != (n_g,):
+            raise ValueError(f"template shape {tmpl_shape} must be ({n_g},).")
+
+    cache_key: tuple[Any, ...] | None = None
+    if (
+        cbm_digest != ""
+        and ds_digest != ""
+        and tmpl_digest != ""
+        and not tmpl_traced
+        and q_np is not None
+        and a_np is not None
+    ):
+        q_val = float(q_np.reshape(()))
+        a_val = float(a_np.reshape(()))
+        cache_key = (
+            cbm_digest,
+            ds_digest,
+            tmpl_digest,
+            t0,
+            t1,
+            n_g,
+            q_val,
+            a_val,
+        )
+        cached = _DCT_OPERATOR_CACHE.get(cache_key)
+        if cached is not None:
+            _DCT_OPERATOR_CACHE.move_to_end(cache_key)
+            return cached
+
+        with jax.ensure_compile_time_eval():
+            tmpl_arr = None if template is None else jnp.asarray(template, dtype=jnp.float64)
+            flat_s, flat_e, specs = _pack_dataset_quadrature(cbm, ds)
+            op = _compute_dct_operator_jit(
+                cbm,
+                jnp.asarray(q_val, dtype=jnp.float64).reshape(()),
+                jnp.asarray(a_val, dtype=jnp.float64).reshape(()),
+                t0,
+                t1,
+                n_g,
+                flat_s,
+                flat_e,
+                specs,
+                tmpl_arr,
+                ds_digest,
+                tmpl_digest,
+            )
+        if not any(
+            isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(op)
+        ):
+            _DCT_OPERATOR_CACHE[cache_key] = op
+            if len(_DCT_OPERATOR_CACHE) > _DCT_OPERATOR_CACHE_MAXSIZE:
+                _DCT_OPERATOR_CACHE.popitem(last=False)
+        return op
+
+    tmpl_arr = None if template is None else jnp.asarray(template, dtype=jnp.float64)
     flat_s, flat_e, specs = _pack_dataset_quadrature(cbm, ds)
     return _compute_dct_operator_jit(
         cbm,
@@ -3350,6 +3574,7 @@ DEFAULT_CANDIDATE_KERNELS: tuple[str, ...] = (
     "matern52",
     "squared_exp",
     "continuous_matern",
+    "sho_solar",
     "matern32_plus_solar",
     "correlated_field",
 )
@@ -3545,9 +3770,18 @@ def _preoptimize_extra_production(
     op: DCTResponseOperator,
     offset_mode: Literal["hierarchical", "none"],
     q_std: float,
+    *,
+    optimize_spike: bool = False,
+    spike_priors: Mapping[str, Any] | None = None,
+    prehistory_root_y0: jax.Array | None = None,
 ) -> tuple[ProductionTerm, jax.Array, jax.Array | None, float]:
-    """Extract linear unit-fluence response for any ``MiyakeSpike`` in ``extra_production``."""
-    _ = offset_mode
+    """Extract linear unit-fluence response for any ``MiyakeSpike`` in ``extra_production``.
+
+    When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
+    first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
+    :class:`GaussianField` via Golub–Pereyra variable projection (:func:`fit_ift_field`)
+    so the returned ``updated_extra`` carries the profiled spike onset and duration.
+    """
     solver = ExactLinearSolver()
     probe_model = RadiocarbonModel(
         cbm,
@@ -3577,6 +3811,18 @@ def _preoptimize_extra_production(
             op.steady_unit_response,
         )
         return extra_production, exc, None, 0.0
+
+    if optimize_spike:
+        fit_ref = fit_ift_field(
+            probe_model,
+            ds,
+            offset_mode=offset_mode,
+            optimize_spike=True,
+            spike_priors=spike_priors,
+            operator=op,
+            prehistory_root_y0=prehistory_root_y0,
+        )
+        _, _, extras_init = _extract_field_and_extras(fit_ref.model.production)
 
     non_spike_terms: list[tuple[str, ProductionTerm]] = []
     spike_term: MiyakeSpike | None = None
@@ -4206,6 +4452,8 @@ def optimize_gp_kernel(
     *,
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
+    optimize_spike: bool = False,
+    spike_priors: Mapping[str, Any] | None = None,
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
     prehistory_kernel: Any | None = None,
@@ -4220,6 +4468,10 @@ def optimize_gp_kernel(
 
     Maximizes ``ln Z(d | phi) + ln p(phi)`` using a precomputed :class:`DCTResponseOperator`
     and dataset-independent :class:`SpectralKernel` hyperpriors (overridable via ``hyperprior``).
+    When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
+    first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
+    :class:`GaussianField` using ``spike_priors`` before profiling ``fluence`` jointly with
+    each kernel's spectral hyperparameters.
 
     .. math::
 
@@ -4240,9 +4492,26 @@ def optimize_gp_kernel(
     root_y0 = _resolve_prehistory_root_y0(
         cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
+    eff_fluence_prior = spike_log_fluence_prior
+    if (
+        spike_priors is not None
+        and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
+        and ("fluence" in spike_priors or "log_fluence" in spike_priors)
+    ):
+        sp_m, sp_s = _parse_spike_priors(spike_priors, op.t_start, op.t_end)
+        eff_fluence_prior = (float(sp_m[2]), float(sp_s[2]))
+
     if extra_production is not None:
         upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
-            cbm, ds, extra_production, op, offset_mode, q_std
+            cbm,
+            ds,
+            extra_production,
+            op,
+            offset_mode,
+            q_std,
+            optimize_spike=optimize_spike,
+            spike_priors=spike_priors,
+            prehistory_root_y0=root_y0,
         )
     else:
         upd_extra = None
@@ -4306,7 +4575,7 @@ def optimize_gp_kernel(
         root_nuis=root_nuis,
         u_nuis=u_nuis,
         spike_fluence_init=sp_fl,
-        spike_log_fluence_prior=spike_log_fluence_prior,
+        spike_log_fluence_prior=eff_fluence_prior,
         updated_extra=upd_extra,
         log_norm_d=log_norm_d,
         half_logdet_nuis=half_logdet_nuis,
@@ -4385,6 +4654,8 @@ def select_gp_kernel(
     *,
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
+    optimize_spike: bool = False,
+    spike_priors: Mapping[str, Any] | None = None,
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None = None,
     spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
@@ -4399,10 +4670,13 @@ def select_gp_kernel(
 ) -> KernelSelectionResult:
     """Optimize and rank candidate GP spectral families via Bayesian model evidence.
 
-    By default compares all seven canonical IFT / GP spectral families:
+    By default compares all eight canonical IFT / GP spectral families:
     ``("matern12", "matern32", "matern52", "squared_exp", "continuous_matern",
-    "matern32_plus_solar", "correlated_field")``, sharing a single precomputed
-    :class:`DCTResponseOperator` so all seven models optimize in well under ``1 s``.
+    "sho_solar", "matern32_plus_solar", "correlated_field")``, sharing a single precomputed
+    :class:`DCTResponseOperator` so all eight models optimize in well under ``1 s``.
+    When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
+    first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
+    :class:`GaussianField` using ``spike_priors`` before ranking all candidate kernels.
     """
     ds = _as_dataset(dataset)
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
@@ -4427,9 +4701,26 @@ def select_gp_kernel(
     root_y0 = _resolve_prehistory_root_y0(
         cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
+    eff_fluence_prior = spike_log_fluence_prior
+    if (
+        spike_priors is not None
+        and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
+        and ("fluence" in spike_priors or "log_fluence" in spike_priors)
+    ):
+        sp_m, sp_s = _parse_spike_priors(spike_priors, op.t_start, op.t_end)
+        eff_fluence_prior = (float(sp_m[2]), float(sp_s[2]))
+
     if extra_production is not None:
         upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
-            cbm, ds, extra_production, op, offset_mode, q_std
+            cbm,
+            ds,
+            extra_production,
+            op,
+            offset_mode,
+            q_std,
+            optimize_spike=optimize_spike,
+            spike_priors=spike_priors,
+            prehistory_root_y0=root_y0,
         )
     else:
         upd_extra = None
@@ -4512,7 +4803,7 @@ def select_gp_kernel(
             root_nuis=root_nuis,
             u_nuis=u_nuis,
             spike_fluence_init=sp_fl,
-            spike_log_fluence_prior=spike_log_fluence_prior,
+            spike_log_fluence_prior=eff_fluence_prior,
             updated_extra=upd_extra,
             log_norm_d=log_norm_d,
             half_logdet_nuis=half_logdet_nuis,

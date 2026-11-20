@@ -12,7 +12,7 @@ Every `CarbonBoxModel` holds a static `Topology` PyTree defining the directed re
 
 ### Constrained Rate Parametrizations
 
-Rather than exposing raw matrix entries that can violate mass conservation or positivity during gradient steps, `ticktack 2.0` provides five immutable `CarbonBoxModel` classes:
+Rather than exposing raw matrix entries that can violate mass conservation or positivity during gradient steps, `ticktack 2.0` provides six immutable `CarbonBoxModel` classes:
 
 | Class | Free Parameters | Physical Constraint Enforced | Typical Use Case |
 | :--- | :--- | :--- | :--- |
@@ -21,6 +21,7 @@ Rather than exposing raw matrix entries that can violate mass conservation or po
 | `ReversibleCBM` | $(n - 1)$ log mass ratios + $|\mathcal{E}_{\text{undir}}|$ symmetric log fluxes (`log_sym_fluxes`) + $\ln M_{\text{tot}}$ | Detailed balance $M_i k_{i \to j} = M_j k_{j \to i}$, guaranteeing real negative eigenvalues of $A$ ($M^{1/2}$ similarity to a negative-definite symmetric matrix) | Non-oscillatory reversible carbon-exchange priors |
 | `OpenCBM` | Directed log rates + non-negative sink vector $\mathbf{s} \ge 0$ | Irreversible sediment burial / carbonate weathering sinks on top of closed transport | Million-year / glacial–interglacial open-system experiments |
 | `EffectiveCBM(K)` | $2K - 2$ unconstrained log rates | Minimal star-graph topology with zero similarity-gauge redundancy; see [Fisher Information & EffectiveCBMs](fisher_and_effective_cbm.md) | Joint carbon-cycle + production inference & Bayesian model comparison |
+| `SubspaceCBM` (`FisherSubspaceCBM`) | $m$ unconstrained mode amplitudes `alpha` | Exact Perron–Frobenius mass balance restricted to the top $m$ Schur-marginalized Fisher log-rate eigenmodes (`SubspaceCBM.from_fisher`) | Joint full-topology uncertainty propagation without sampling nullspace directions |
 
 In `BalancedCBM`, unconstrained coordinates `log_rates_free` parametrize the directed first-order transfer rates $k_{i \to j} > 0$ (optionally tied across symmetric hemispheric edges via `tie_matrix`) on any strongly connected graph $\mathcal{G}$; solving for the unique positive [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) right null-vector of the conservative rate matrix yields the stationary reservoir $^{12}\text{C}$ fractions $M_i / M_{\text{tot}}$ automatically so Kirchhoff inflow equals outflow at every node without constrained optimization.
 

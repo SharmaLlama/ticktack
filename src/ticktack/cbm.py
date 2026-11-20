@@ -55,6 +55,8 @@ __all__ = [
     "CarbonBoxModel",
     "FixedCBM",
     "BalancedCBM",
+    "SubspaceCBM",
+    "FisherSubspaceCBM",
     "ReversibleCBM",
     "OpenCBM",
     "EffectiveCBM",
@@ -893,6 +895,204 @@ class BalancedCBM(CarbonBoxModel):
             symmetric_edge_groups=groups,
             decay_rate=decay_rate,
         )
+
+
+class SubspaceCBM(CarbonBoxModel):
+    """Flow-balanced Perron–Frobenius CBM restricted to a linear log-rate subspace.
+
+    Parameterizes equilibrium-balanced carbon-cycle perturbations along an
+    ``m``-dimensional subspace of free log transfer rates:
+
+    .. math::
+
+        \\ln \\mathbf{k}_{\\mathrm{free}}(\\boldsymbol{\\alpha})
+        = \\ln \\mathbf{k}_{\\mathrm{free}, 0} + B\\,\\boldsymbol{\\alpha},
+        \\qquad \\boldsymbol{\\alpha} \\in \\mathbb{R}^m.
+
+    All reference log-rates, basis columns ``B``, and ``base_log_total_mass`` are
+    stored as static PyTree metadata so ``alpha`` is the sole dynamic JAX leaf
+    (with zero gauge nullspace). When constructed via :meth:`from_fisher` from a
+    prior-whitened :class:`~ticktack.fisher.FisherSpectrumResult`, placing a
+    standard normal prior ``alpha ~ N(0, I_m)`` restricts the Gaussian prior of
+    ``base_cbm`` to its top ``m`` Schur-marginalized Fisher eigenmodes while
+    preserving exact Perron–Frobenius Kirchhoff mass balance everywhere.
+    """
+
+    alpha: jax.Array
+    prod_weights: tuple[float, ...] = eqx.field(static=True)
+    tie_matrix_rows: tuple[tuple[float, ...], ...] | None = eqx.field(static=True)
+    base_log_rates_free: tuple[float, ...] = eqx.field(static=True)
+    basis_rows: tuple[tuple[float, ...], ...] = eqx.field(static=True)
+    base_log_total_mass: float = eqx.field(static=True)
+
+    def __init__(
+        self,
+        topology: Topology,
+        base_log_rates_free: Sequence[float] | ArrayLike,
+        basis: ArrayLike,
+        base_log_total_mass: float,
+        *,
+        alpha: ArrayLike | None = None,
+        prod_weights: Sequence[float] | ArrayLike | None = None,
+        prod_fractions: Sequence[float] | ArrayLike | None = None,
+        tie_matrix: ArrayLike | None = None,
+        symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
+        decay_rate: float = DECAY_CAMBRIDGE,
+    ):
+        topology.check_strongly_connected()
+        self.topology = topology
+        self.decay_rate = float(decay_rate)
+
+        self.tie_matrix_rows = _build_tie_matrix(
+            topology.n_edges,
+            tie_matrix=tie_matrix,
+            symmetric_edge_groups=symmetric_edge_groups,
+        )
+        expected_p = (
+            topology.n_edges
+            if self.tie_matrix_rows is None
+            else len(self.tie_matrix_rows[0])
+        )
+
+        base_arr = np.asarray(base_log_rates_free, dtype=np.float64).reshape(-1)
+        if base_arr.shape != (expected_p,):
+            raise ValueError(
+                f"base_log_rates_free must have shape ({expected_p},), got {base_arr.shape}."
+            )
+
+        basis_arr = np.asarray(basis, dtype=np.float64)
+        if basis_arr.ndim != 2 or basis_arr.shape[0] != expected_p:
+            raise ValueError(
+                f"basis must have shape ({expected_p}, n_modes), got {basis_arr.shape}."
+            )
+        m_modes = int(basis_arr.shape[1])
+
+        if alpha is None:
+            self.alpha = jnp.zeros((m_modes,), dtype=jnp.float64)
+        else:
+            alpha_arr = jnp.asarray(alpha, dtype=jnp.float64)
+            if alpha_arr.shape != (m_modes,):
+                raise ValueError(
+                    f"alpha must have shape ({m_modes},), got {alpha_arr.shape}."
+                )
+            self.alpha = alpha_arr
+
+        self.base_log_rates_free = tuple(float(v) for v in base_arr)
+        self.basis_rows = tuple(tuple(float(v) for v in row) for row in basis_arr)
+        self.base_log_total_mass = float(base_log_total_mass)
+        self.prod_weights = _resolve_prod_weights(topology, prod_weights, prod_fractions)
+
+    @property
+    def n_modes(self) -> int:
+        return int(self.alpha.shape[0])
+
+    def log_rates_free(self) -> jax.Array:
+        base = jnp.asarray(self.base_log_rates_free, dtype=jnp.float64)
+        if self.alpha.shape[0] == 0:
+            return base
+        basis_mat = jnp.asarray(self.basis_rows, dtype=jnp.float64)
+        return base + basis_mat @ self.alpha
+
+    def edge_log_rates(self) -> jax.Array:
+        lr = self.log_rates_free()
+        if self.tie_matrix_rows is None:
+            return lr
+        M_tie = jnp.asarray(self.tie_matrix_rows, dtype=jnp.float64)
+        return M_tie @ lr
+
+    def edge_rates(self) -> jax.Array:
+        return jnp.exp(self.edge_log_rates())
+
+    def rate_matrix_K(self) -> jax.Array:
+        return _assemble_rate_matrix(
+            self.n_boxes,
+            self.topology.edges_src,
+            self.topology.edges_dst,
+            self.edge_rates(),
+        )
+
+    def _perron_simplex(self) -> jax.Array:
+        k_edges = self.edge_rates()
+        K = _assemble_rate_matrix(
+            self.n_boxes, self.topology.edges_src, self.topology.edges_dst, k_edges
+        )
+        return _perron_frobenius_simplex(K, self.topology.edges_src, k_edges)
+
+    def reservoir_masses(self) -> jax.Array:
+        return jnp.exp(
+            jnp.asarray(self.base_log_total_mass, dtype=jnp.float64)
+        ) * self._perron_simplex()
+
+    def relative_reservoir_masses(self) -> jax.Array:
+        trop_idx = jnp.asarray(self.topology.trop_box_indices, dtype=jnp.int32)
+        pi = self._perron_simplex()
+        return pi / jnp.sum(pi[trop_idx])
+
+    def production_vector(self) -> jax.Array:
+        return _make_prod_vector(
+            self.n_boxes, self.topology.prod_box_indices, self.prod_weights
+        )
+
+    def to_balanced_cbm(self) -> BalancedCBM:
+        """Convert the current subspace point into an equivalent :class:`BalancedCBM`."""
+        return BalancedCBM(
+            topology=self.topology,
+            log_rates_free=self.log_rates_free(),
+            log_total_mass=self.base_log_total_mass,
+            prod_weights=self.prod_weights,
+            tie_matrix=self.tie_matrix_rows,
+            decay_rate=self.decay_rate,
+        )
+
+    @classmethod
+    def from_fisher(
+        cls,
+        base_cbm: BalancedCBM,
+        spectrum: Any,
+        n_modes: int,
+    ) -> SubspaceCBM:
+        """Construct a ``SubspaceCBM`` spanned by the leading ``n_modes`` Fisher loadings.
+
+        Parameters
+        ----------
+        base_cbm : BalancedCBM
+            Reference flow-balanced carbon-box model at ``alpha = 0``.
+        spectrum : FisherSpectrumResult
+            Prior-whitened Fisher spectrum computed at ``base_cbm``.
+        n_modes : int
+            Number of leading eigenmodes ``m`` to retain
+            (``1 <= n_modes <= spectrum.parameter_loadings.shape[1]``).
+        """
+        if not isinstance(base_cbm, BalancedCBM):
+            raise TypeError(
+                f"SubspaceCBM.from_fisher expects a BalancedCBM, got {type(base_cbm).__name__}."
+            )
+        p_free = int(base_cbm.log_rates_free.shape[0])
+        loadings = np.asarray(spectrum.parameter_loadings, dtype=np.float64)
+        if loadings.ndim != 2 or loadings.shape[0] < p_free:
+            raise ValueError(
+                f"spectrum.parameter_loadings shape {loadings.shape} is incompatible with "
+                f"base_cbm.log_rates_free length {p_free}."
+            )
+        max_modes = int(loadings.shape[1])
+        m = int(n_modes)
+        if not (1 <= m <= max_modes):
+            raise ValueError(
+                f"n_modes must satisfy 1 <= n_modes <= {max_modes}, got {m}."
+            )
+        return cls(
+            topology=base_cbm.topology,
+            base_log_rates_free=np.asarray(base_cbm.log_rates_free, dtype=np.float64),
+            basis=loadings[:p_free, :m],
+            base_log_total_mass=float(base_cbm.log_total_mass),
+            alpha=jnp.zeros((m,), dtype=jnp.float64),
+            prod_weights=base_cbm.prod_weights,
+            tie_matrix=base_cbm.tie_matrix_rows,
+            decay_rate=base_cbm.decay_rate,
+        )
+
+
+FisherSubspaceCBM = SubspaceCBM
 
 
 class ReversibleCBM(CarbonBoxModel):
