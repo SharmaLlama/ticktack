@@ -732,7 +732,9 @@ def test_real_775ce_bundled_kernel_selection_accuracy() -> None:
         rng_key=jax.random.PRNGKey(42),
     )
 
-    assert len(sel.rankings) == 7
+    assert len(sel.rankings) == 8
+    assert "sho_solar" in sel.names
+    assert sel.get_candidate("sho_solar").name == "sho_solar"
     np.testing.assert_allclose(jnp.sum(sel.model_weights), 1.0, rtol=1e-12, atol=1e-12)
     assert jnp.all(jnp.isfinite(sel.log_hyper_evidences))
     best = sel.best_result

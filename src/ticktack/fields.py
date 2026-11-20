@@ -18,7 +18,7 @@ MacKay 1992) to 1D cosmic-ray ``14C`` production histories in ``ticktack 2.0``:
   fixed-point :func:`error_scale` (global ``float`` and per-series ``dict[str, float]``).
 * **Automatic empirical-Bayes GP kernel optimization & model selection**:
   :func:`evidence_grid`, :func:`optimize_gp_kernel`, and :func:`select_gp_kernel`
-  across seven candidate spectral families with Laplace hyper-Occam penalties.
+  across eight candidate spectral families with Laplace hyper-Occam penalties.
 * **Stateless scientific diagnostic plotting**:
   :func:`plot_field_draws` and :func:`plot_evidence_grid`.
 """
@@ -3350,6 +3350,7 @@ DEFAULT_CANDIDATE_KERNELS: tuple[str, ...] = (
     "matern52",
     "squared_exp",
     "continuous_matern",
+    "sho_solar",
     "matern32_plus_solar",
     "correlated_field",
 )
@@ -4399,10 +4400,10 @@ def select_gp_kernel(
 ) -> KernelSelectionResult:
     """Optimize and rank candidate GP spectral families via Bayesian model evidence.
 
-    By default compares all seven canonical IFT / GP spectral families:
+    By default compares all eight canonical IFT / GP spectral families:
     ``("matern12", "matern32", "matern52", "squared_exp", "continuous_matern",
-    "matern32_plus_solar", "correlated_field")``, sharing a single precomputed
-    :class:`DCTResponseOperator` so all seven models optimize in well under ``1 s``.
+    "sho_solar", "matern32_plus_solar", "correlated_field")``, sharing a single precomputed
+    :class:`DCTResponseOperator` so all eight models optimize in well under ``1 s``.
     """
     ds = _as_dataset(dataset)
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
