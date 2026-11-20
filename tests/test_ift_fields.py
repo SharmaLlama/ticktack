@@ -22,6 +22,7 @@ from ticktack.cbm import CarbonBoxModel
 from ticktack.constants import DEFAULT_Q_STD
 from ticktack.data import Dataset, TreeRingSeries, load_bundled_event, load_bundled_series
 from ticktack.fields import (
+    _DCT_OPERATOR_CACHE,
     CorrelatedFieldSpectrum,
     GaussianField,
     LogGaussianField,
@@ -61,7 +62,8 @@ from ticktack.linear import (
 )
 from ticktack.model import RadiocarbonModel
 from ticktack.presets import load_preset
-from ticktack.production import GriddedProduction, MiyakeSpike
+from ticktack.production import GPProduction, GriddedProduction, MiyakeSpike, SteadyProduction
+from ticktack.sampling import sample_nuts
 from ticktack.solvers import ExactLinearSolver
 
 
@@ -1261,6 +1263,185 @@ def test_likelihood_and_fit_map_ift_integration_and_edge_cases() -> None:
     ds_dup = Dataset((s_dup1, s_dup2))
     sel_dup = select_gp_kernel(cbm, ds_dup, candidates=("matern12", "matern32"), n_grid=28, multi_start=1)
     assert "MacKay s_error" in sel_dup.format_table()
+
+
+def test_spike_on_marginalized_gp_fit_nuts_and_select_kernel() -> None:
+    """Spike on marginalized GP: select_gp_kernel(optimize_spike=True), cache reuse, fit_map, sample_nuts, linear_posterior."""
+    cbm = load_preset("Miyake17")
+    t_start_g, t_end_g, n_grid = 745.0, 801.0, 40
+    years = np.arange(755.0, 800.0, 1.0)
+    sig_obs = 0.7
+
+    s_proto = TreeRingSeries(
+        years, np.zeros_like(years), np.full_like(years, sig_obs), hemisphere="north", name="SynthSpikeGP"
+    )
+    true_spike = MiyakeSpike(t_start=774.2, duration=0.8, fluence=6.2, profile="boxcar")
+    true_field = GaussianField(
+        jax.random.normal(jax.random.PRNGKey(51), (n_grid,), dtype=jnp.float64),
+        t_start_g,
+        t_end_g,
+        kernel=QuasiPeriodicSpectrum(sigma=0.35, period_yr=11.0, quality=6.0),
+    )
+    true_model = RadiocarbonModel(cbm, SteadyProduction() + true_field + true_spike, ExactLinearSolver())
+    d_clean = np.asarray(true_model.predict_d14c(s_proto))
+    rng = np.random.default_rng(52)
+    series = TreeRingSeries(
+        years,
+        d_clean + 1.8 + rng.normal(0.0, sig_obs, size=years.size),
+        np.full_like(years, sig_obs),
+        hemisphere="north",
+        name="SynthSpikeGP",
+    )
+    ds = Dataset((series,), name="synth_spike_gp")
+
+    # 1. select_gp_kernel(..., optimize_spike=True, spike_priors=...) recovers spike & sho_solar
+    rough_spike = MiyakeSpike(t_start=774.5, duration=0.4, fluence=5.0, profile="boxcar")
+    sp_priors = {
+        "t_start": (774.3, 1.5),
+        "duration": dist.LogNormal(math.log(0.7), 0.8),
+        "fluence": dist.LogNormal(math.log(6.0), 0.8),
+    }
+    sel = select_gp_kernel(
+        cbm,
+        ds,
+        candidates=("matern32", "sho_solar"),
+        extra_production=rough_spike,
+        optimize_spike=True,
+        spike_priors=sp_priors,
+        n_grid=n_grid,
+        pad_years=10.0,
+        multi_start=1,
+        rng_key=jax.random.PRNGKey(11),
+    )
+    assert sel.best_name == "sho_solar"
+    rec_t = float(sel.best_model.get("production.spike.t_start"))
+    rec_d = float(sel.best_model.get("production.spike.duration"))
+    rec_f = float(sel.best_model.get("production.spike.fluence"))
+    assert abs(rec_t - 774.2) < 0.35, f"Expected t_start ~ 774.2, got {rec_t:.3f}"
+    assert 0.30 <= rec_d <= 1.50, f"Expected duration ~ 0.8, got {rec_d:.3f}"
+    assert 4.8 <= rec_f <= 7.8, f"Expected fluence ~ 6.2, got {rec_f:.3f}"
+
+    opt_sp = optimize_gp_kernel(
+        cbm,
+        ds,
+        kernel="sho_solar",
+        extra_production=rough_spike,
+        optimize_spike=True,
+        spike_priors=sp_priors,
+        n_grid=n_grid,
+        pad_years=10.0,
+        multi_start=1,
+        rng_key=jax.random.PRNGKey(13),
+    )
+    assert opt_sp.converged
+    assert abs(float(opt_sp.fit.model.get("production.spike.t_start")) - 774.2) < 0.35
+    jax.clear_caches()
+
+    # 2. SteadyProduction + GaussianField + MiyakeSpike (marginalize_field=True):
+    #    both fixed-kernel and joint spike + GP-hyperparameter inference + operator cache reuse
+    gf_init = GaussianField(jnp.zeros((n_grid,), dtype=jnp.float64), t_start_g, t_end_g, sigma=0.28, length_yr=5.0)
+    m_gf = RadiocarbonModel(cbm, SteadyProduction() + gf_init + rough_spike, ExactLinearSolver())
+    cfg_gf = LinearMarginalConfig(marginalize_field=True, offset_mode="hierarchical")
+    spike_specs = [
+        ParamSpec("production.spike.t_start", prior_mean=774.4, prior_sd=1.0),
+        ParamSpec("production.spike.duration", bijector="exp", prior_mean=math.log(0.6), prior_sd=0.8),
+        ParamSpec("production.spike.fluence", bijector="exp", prior_mean=math.log(6.0), prior_sd=0.8),
+    ]
+    ps_fixed = ParameterSpace(m_gf, spike_specs)
+    map_fixed = fit_map(m_gf, ds, ps_fixed, cfg=cfg_gf, method="BFGS")
+    assert map_fixed.converged
+    assert abs(float(map_fixed.theta_map["production.spike.t_start"]) - 774.2) < 0.40
+    assert 4.5 <= float(map_fixed.theta_map["production.spike.fluence"]) <= 8.0
+
+    idata_fixed = sample_nuts(
+        map_fixed.model,
+        ds,
+        ps_fixed,
+        cfg=cfg_gf,
+        init_map=False,
+        num_warmup=25,
+        num_samples=25,
+        num_chains=1,
+        max_tree_depth=6,
+        rng_key=jax.random.PRNGKey(21),
+        progress_bar=False,
+    )
+    assert jnp.all(jnp.isfinite(jnp.asarray(idata_fixed.posterior["production__spike__fluence"])))
+
+    ps_joint = ParameterSpace(
+        map_fixed.model,
+        spike_specs
+        + [
+            ParamSpec("production.field.sigma", bijector="exp", prior_mean=math.log(0.28), prior_sd=0.8),
+            ParamSpec("production.field.length_yr", bijector="exp", prior_mean=math.log(5.0), prior_sd=0.8),
+        ],
+    )
+    _DCT_OPERATOR_CACHE.clear()
+    map_joint = fit_map(map_fixed.model, ds, ps_joint, cfg=cfg_gf, method="BFGS", compute_laplace=False)
+    assert map_joint.converged
+    idata_joint = sample_nuts(
+        map_joint.model,
+        ds,
+        ps_joint,
+        cfg=cfg_gf,
+        init_map=False,
+        num_warmup=25,
+        num_samples=25,
+        num_chains=1,
+        max_tree_depth=6,
+        rng_key=jax.random.PRNGKey(22),
+        progress_bar=False,
+    )
+    # Concrete-leaf operator cache must be populated and reused inside sample_nuts!
+    assert len(_DCT_OPERATOR_CACHE) >= 1
+    for var_name in (
+        "production__spike__t_start",
+        "production__spike__duration",
+        "production__spike__fluence",
+        "production__field__sigma",
+        "production__field__length_yr",
+    ):
+        arr = np.asarray(idata_joint.posterior[var_name])
+        assert np.all(np.isfinite(arr))
+
+    t_fine = jnp.linspace(756.0, 799.0, 300, dtype=jnp.float64)
+    lp_gf = linear_posterior(
+        map_joint.model, ds, cfg_gf, rng_key=jax.random.PRNGKey(23), n_draws=16, t_fine=t_fine
+    )
+    assert lp_gf.q_fine_mean is not None and lp_gf.q_fine_std is not None
+    assert jnp.all(jnp.isfinite(lp_gf.q_fine_mean)) and jnp.all(lp_gf.q_fine_std > 0.0)
+    assert float(jnp.max(lp_gf.q_fine_mean)) > DEFAULT_Q_STD + 2.5
+    jax.clear_caches()
+
+    # 3. SteadyProduction + GPProduction + MiyakeSpike (marginalize_gp=True)
+    gp_term = GPProduction(tk.quasisep.Matern32(scale=5.0, sigma=0.28), n_modes=40, pad_years=10.0)
+    m_gp = RadiocarbonModel(cbm, SteadyProduction() + gp_term + rough_spike, ExactLinearSolver())
+    cfg_gp = LinearMarginalConfig(marginalize_gp=True, offset_mode="hierarchical")
+    ps_gp = ParameterSpace(m_gp, spike_specs)
+    map_gp = fit_map(m_gp, ds, ps_gp, cfg=cfg_gp, method="BFGS")
+    assert map_gp.converged
+    assert abs(float(map_gp.theta_map["production.spike.t_start"]) - 774.2) < 0.40
+    idata_gp = sample_nuts(
+        map_gp.model,
+        ds,
+        ps_gp,
+        cfg=cfg_gp,
+        init_map=False,
+        num_warmup=25,
+        num_samples=25,
+        num_chains=1,
+        max_tree_depth=6,
+        rng_key=jax.random.PRNGKey(24),
+        progress_bar=False,
+    )
+    assert jnp.all(jnp.isfinite(jnp.asarray(idata_gp.posterior["production__spike__fluence"])))
+    lp_gp = linear_posterior(
+        map_gp.model, ds, cfg_gp, rng_key=jax.random.PRNGKey(25), n_draws=16, t_fine=t_fine
+    )
+    assert lp_gp.q_fine_mean is not None and lp_gp.q_fine_std is not None
+    assert jnp.all(jnp.isfinite(lp_gp.q_fine_mean)) and jnp.all(lp_gp.q_fine_std > 0.0)
+    assert float(jnp.max(lp_gp.q_fine_mean)) > DEFAULT_Q_STD + 2.5
+
 
 
 
