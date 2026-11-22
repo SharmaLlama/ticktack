@@ -2565,9 +2565,32 @@ def fit_ift_field(
         except Exception:
             n_steps = max_steps
 
-        h_sp = jax.hessian(
-            lambda u_in: 0.5 * jnp.sum(jnp.square(_varpro_spike_residual(u_in, None)))
-        )(u_sp_opt)
+        def _varpro_spike_loss(u_in: jax.Array) -> jax.Array:
+            r_tot = _varpro_spike_residual(u_in, None)
+            return 0.5 * (r_tot @ r_tot)
+
+        _vg_sp = jax.jit(jax.value_and_grad(_varpro_spike_loss))
+        _hess_sp = jax.jit(jax.hessian(_varpro_spike_loss))
+        for _ in range(2):
+            v_cur, g_cur = _vg_sp(u_sp_opt)
+            h_cur = _hess_sp(u_sp_opt)
+            h_cur = 0.5 * (h_cur + h_cur.T)
+            evals_cur = jnp.linalg.eigvalsh(h_cur)
+            if bool(jnp.all(jnp.isfinite(evals_cur)) and jnp.min(evals_cur) > 1e-12):
+                u_cand = u_sp_opt - jnp.linalg.solve(h_cur, g_cur)
+                if bool(jnp.all(jnp.isfinite(u_cand))):
+                    v_cand, g_cand = _vg_sp(u_cand)
+                    v_tol = 1e-12 * max(abs(float(v_cur)), 1.0)
+                    if bool(jnp.isfinite(v_cand) and jnp.all(jnp.isfinite(g_cand))) and (
+                        float(v_cand) < float(v_cur)
+                        or (
+                            float(v_cand) <= float(v_cur) + v_tol
+                            and float(g_cand @ g_cand) < float(g_cur @ g_cur)
+                        )
+                    ):
+                        u_sp_opt = u_cand
+
+        h_sp = _hess_sp(u_sp_opt)
         h_sp = 0.5 * (h_sp + h_sp.T)
         lp_sp = jnp.sum(_normal_logpdf(u_sp_opt, sp_prior_means, sp_prior_sds))
         sign_sp, logdet_sp = jnp.linalg.slogdet(h_sp)

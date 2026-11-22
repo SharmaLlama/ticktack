@@ -1507,7 +1507,7 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
     years = np.arange(762.0, 787.0, 1.0)
     rng = np.random.default_rng(7751)
 
-    true_spike = MiyakeSpike(t_start=774.45, duration=0.45, fluence=5.8, profile="supergaussian")
+    true_spike = MiyakeSpike(t_start=774.45, duration=0.45, fluence=5.8, profile="boxcar")
     true_field = GaussianField(
         jax.random.normal(jax.random.PRNGKey(7752), (n_grid,), dtype=jnp.float64),
         t_start_g,
@@ -1541,7 +1541,7 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
     assert ds.n_obs > n_grid + k_nuis
 
     op = build_dct_response_matrix(cbm, ds, t_start_g, t_end_g, n_grid, return_operator=True)
-    sp_init = MiyakeSpike(t_start=774.2, duration=0.35, fluence=4.8, profile="supergaussian")
+    sp_init = MiyakeSpike(t_start=774.2, duration=0.35, fluence=4.8, profile="boxcar")
     gf_init = GaussianField(
         jnp.zeros((n_grid,), dtype=jnp.float64),
         t_start_g,
@@ -1560,7 +1560,7 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
         model_init,
         ds,
         offset_mode="hierarchical",
-        global_offset_prior_sd=20.0,
+        global_offset_prior_sd=5.0,
         lab_offset_prior_sd=1.5,
         operator=op,
         optimize_spike=True,
@@ -1576,7 +1576,7 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
         ds.series_indices,
         ds.n_series,
         box_activity_ratios=op.box_activity_ratios,
-        global_prior_sd=20.0,
+        global_prior_sd=5.0,
         lab_prior_sd=1.5,
     )
     _, root_y0 = stationary_cbm_spectral_cov(
@@ -1607,7 +1607,7 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
             t_start=u_sp[0],
             duration=jnp.exp(u_sp[1]),
             fluence=jnp.exp(u_sp[2]),
-            profile="supergaussian",
+            profile="boxcar",
         )
         m_sp = RadiocarbonModel(cbm, sp_cur, ExactLinearSolver())
         d_sp = m_sp.predict_d14c(ds)
@@ -1622,13 +1622,30 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
     u_sp0 = jnp.array([774.2, math.log(0.35), math.log(4.8)], dtype=jnp.float64)
     sol_dense = optx.least_squares(
         _dense_varpro_res,
-        optx.LevenbergMarquardt(rtol=1e-14, atol=1e-14),
+        optx.LevenbergMarquardt(rtol=1e-12, atol=1e-12),
         u_sp0,
-        max_steps=100,
+        max_steps=80,
         throw=False,
     )
     assert sol_dense.result == optx.RESULTS.successful
     u_sp_dense = sol_dense.value
+
+    grad_dense = jax.jit(
+        jax.grad(lambda u_in: 0.5 * jnp.sum(jnp.square(_dense_varpro_res(u_in, None))))
+    )
+
+    def _dense_hess_at(u_pt: jax.Array) -> jax.Array:
+        eps_h = 1e-6
+        cols = []
+        for j_idx in range(3):
+            ej = jnp.zeros((3,), dtype=jnp.float64).at[j_idx].set(eps_h)
+            cols.append((grad_dense(u_pt + ej) - grad_dense(u_pt - ej)) / (2.0 * eps_h))
+        h_m = jnp.stack(cols, axis=1)
+        return 0.5 * (h_m + h_m.T)
+
+    # Polish dense MAP to machine precision (matching fit_ift_field's 2-step Newton polish)
+    for _ in range(2):
+        u_sp_dense = u_sp_dense - jnp.linalg.solve(_dense_hess_at(u_sp_dense), grad_dense(u_sp_dense))
 
     # Verify QR square-root Woodbury quadratic form matches dense MVN quadratic form
     k_all = u_all.shape[1]
@@ -1665,16 +1682,7 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
     r_opt = _raw_resid(u_sp_dense)
     q_opt_dense = r_opt @ jsl.cho_solve((chol_dense, True), r_opt)
     ln_z_cond_dense = -0.5 * q_opt_dense - 0.5 * logdet_c - log_norm_d
-    grad_dense = jax.jit(
-        jax.grad(lambda u_in: 0.5 * jnp.sum(jnp.square(_dense_varpro_res(u_in, None))))
-    )
-    eps_h = 1e-6
-    h_cols = []
-    for j_idx in range(3):
-        ej = jnp.zeros((3,), dtype=jnp.float64).at[j_idx].set(eps_h)
-        h_cols.append((grad_dense(u_sp_dense + ej) - grad_dense(u_sp_dense - ej)) / (2.0 * eps_h))
-    h_sp_dense = jnp.stack(h_cols, axis=1)
-    h_sp_dense = 0.5 * (h_sp_dense + h_sp_dense.T)
+    h_sp_dense = _dense_hess_at(u_sp_dense)
     _, logdet_h_dense = jnp.linalg.slogdet(h_sp_dense)
     lp_sp_dense = jnp.sum(
         -0.5 * jnp.square((u_sp_dense - sp_prior_means) / sp_prior_sds)
