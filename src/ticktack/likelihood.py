@@ -47,6 +47,10 @@ from .fields import (
     GaussianField,
     LinearizedDCTOperator,
     LogGaussianField,
+    _compute_cbm_digest,
+    _compute_dataset_digest,
+    _compute_subspace_basis_digest,
+    _compute_template_digest,
     _safe_sqrt,
     build_dct_response_operator,
     idct2,
@@ -832,6 +836,24 @@ def _build_marginal_design_with_projections(
                         f"does not match dataset/GaussianField "
                         f"(shape=({n_tot}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
                     )
+                if op_cfg.dataset_digest:
+                    ds_dig = _compute_dataset_digest(cbm, dataset)
+                    if ds_dig and ds_dig != op_cfg.dataset_digest:
+                        raise ValueError(
+                            "LinearizedDCTOperator dataset_digest does not match dataset."
+                        )
+                if op_cfg.template_digest:
+                    tmpl_dig = _compute_template_digest(gf.template)
+                    if tmpl_dig and tmpl_dig != op_cfg.template_digest:
+                        raise ValueError(
+                            "LinearizedDCTOperator template_digest does not match GaussianField.template."
+                        )
+                if op_cfg.subspace_basis_digest:
+                    basis_dig = _compute_subspace_basis_digest(cbm)
+                    if basis_dig != op_cfg.subspace_basis_digest:
+                        raise ValueError(
+                            "LinearizedDCTOperator subspace_basis_digest does not match model.cbm."
+                        )
                 w_dct_gf = op_cfg.evaluate_w_dct(cbm.alpha)
             elif isinstance(op_cfg, DCTResponseOperator):
                 if op_cfg.w_dct.shape != (n_tot, gf.n_grid) or (
@@ -844,7 +866,35 @@ def _build_marginal_design_with_projections(
                         f"does not match dataset/GaussianField "
                         f"(shape=({n_tot}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
                     )
-                w_dct_gf = op_cfg.w_dct
+                if op_cfg.dataset_digest:
+                    ds_dig = _compute_dataset_digest(cbm, dataset)
+                    if ds_dig and ds_dig != op_cfg.dataset_digest:
+                        raise ValueError(
+                            "DCTResponseOperator dataset_digest does not match dataset."
+                        )
+                if op_cfg.template_digest:
+                    tmpl_dig = _compute_template_digest(gf.template)
+                    if tmpl_dig and tmpl_dig != op_cfg.template_digest:
+                        raise ValueError(
+                            "DCTResponseOperator template_digest does not match GaussianField.template."
+                        )
+                cur_cbm_dig = _compute_cbm_digest(cbm)
+                if cur_cbm_dig == "" or (
+                    op_cfg.cbm_digest != "" and cur_cbm_dig != op_cfg.cbm_digest
+                ):
+                    op_gf = build_dct_response_operator(
+                        cbm,
+                        dataset,
+                        t_start=gf.t_start,
+                        t_end=gf.t_end,
+                        n_grid=gf.n_grid,
+                        q_std=model.q_std,
+                        alpha_unit=model.alpha_unit,
+                        template=gf.template,
+                    )
+                    w_dct_gf = op_gf.w_dct
+                else:
+                    w_dct_gf = op_cfg.w_dct
             else:
                 op_gf = build_dct_response_operator(
                     cbm,
