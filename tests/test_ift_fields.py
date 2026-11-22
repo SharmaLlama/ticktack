@@ -1565,8 +1565,8 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
         operator=op,
         optimize_spike=True,
         spike_priors=sp_priors,
-        max_steps=80,
-        tol=1e-12,
+        max_steps=100,
+        tol=1e-14,
     )
     assert fit_res.converged
 
@@ -1622,9 +1622,9 @@ def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
     u_sp0 = jnp.array([774.2, math.log(0.35), math.log(4.8)], dtype=jnp.float64)
     sol_dense = optx.least_squares(
         _dense_varpro_res,
-        optx.LevenbergMarquardt(rtol=1e-12, atol=1e-12),
+        optx.LevenbergMarquardt(rtol=1e-14, atol=1e-14),
         u_sp0,
-        max_steps=80,
+        max_steps=100,
         throw=False,
     )
     assert sol_dense.result == optx.RESULTS.successful
