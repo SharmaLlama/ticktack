@@ -1,34 +1,147 @@
 # ticktack
-A lightweight, open-source carbon box modelling library, adapted for modelling tree ring radiocarbon time series.
 
-## Contributors
+**Differentiable carbon box modelling, Information Field Theory production reconstruction, and Bayesian radiocarbon inference in JAX.**
 
-[Utkarsh Sharma](https://github.com/SharmaLlama), [Qingyuan Zhang](https://github.com/qingyuanzhang3), [Benjamin Pope](https://github.com/benjaminpope)
+[![JOSS](https://joss.theoj.org/papers/10.21105/joss.05084/status.svg)](https://doi.org/10.21105/joss.05084)
+[![arXiv](https://img.shields.io/badge/arXiv-2205.07512-b31b1b.svg)](https://arxiv.org/abs/2205.07512)
+[![License: MIT](https://img.shields.io/badge/License-MIT-indigo.svg)](https://github.com/SharmaLlama/ticktack/blob/main/LICENSE)
 
-## Overview
+`ticktack` models the transport of cosmogenic radiocarbon ($^{14}\text{C}$) through atmospheric, biospheric, and marine reservoirs and solves the Bayesian inverse problem of reconstructing cosmic-ray production histories $Q(t)$ from tree-ring $\Delta^{14}\text{C}$ time series. Originally developed to characterize rapid solar energetic particle excursions (Miyake events; [Zhang et al. 2022](https://doi.org/10.1098/rspa.2022.0497); [Sharma et al. 2023](https://doi.org/10.21105/joss.05084)), **`ticktack 2.0`** is a complete, ground-up architectural redesign built on [`zodiax`](https://github.com/LouisDesdoigts/zodiax) / [`equinox`](https://github.com/patrick-kidger/equinox) immutable PyTrees, exact linear-time-invariant (LTI) matrix-exponential solvers, analytical Gaussian marginalization, [`virgil`](https://github.com/benjaminpope/virgil)-style Information Field Theory (IFT), Fisher information geometry, and gradient-based Bayesian inference in [`NumPyro`](https://num.pyro.ai/) and [`BlackJAX`](https://blackjax-devs.github.io/blackjax/).
 
-Radiocarbon measurements from tree rings allow us to recover measurements of cosmic radiation from the distant past, and exquisitely calibrate carbon dating of archaeological sites. But in order to infer cosmic production rates from raw ΔC14 data, we need to model the entire global carbon cycle, from the production of radiocarbon in the stratosphere and troposphere to its uptake by the oceans and biosphere. Many such competing models exist, in which the Earth system is partitioned into 'boxes' with reservoirs of C12, C14, and coefficients of flow between them.
+---
 
-`ticktack` is the first open-source package for radiocarbon box modelling, allowing you to specify your own model or load a model with the same parameters as several leading closed-source models. Built in Python on [Google Jax](https://github.com/google/jax), it solves the carbon box ordinary differential equations using the Runge-Kutta method, on arbitrarily fine time grids and with arbitrary production rates. This forwards model is connected via a simple API to Bayesian inference using MCMC: currently we support only [emcee](https://emcee.readthedocs.io/), but implementations are in progress of HMC and nested sampling.  
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    subgraph Models["Immutable PyTree Models (zodiax)"]
+        CBM["CarbonBoxModel<br/>Balanced / Reversible / Open<br/>EffectiveCBM(K)"]
+        PROD["ProductionTerm<br/>Steady + MiyakeSpike + Solar<br/>GPProduction / LogGPProduction"]
+        IFT["IFT Signal Fields<br/>GaussianField / LogGaussianField<br/>Composable SpectralKernels"]
+    end
+
+    subgraph Forward["Differentiable Forward Solvers"]
+        EXACT["ExactLinearSolver<br/>Van Loan FOH + rfft<br/>Complex Solar Resolvent"]
+        ODE["DiffraxSolver & ModaxSolver<br/>Non-Autonomous M(t) Suess<br/>Custom-VJP Adjoint"]
+    end
+
+    subgraph Data["Audited Data"]
+        DS["TreeRingSeries & Dataset<br/>Mandatory Calendar &<br/>SH Growth-Season Audit"]
+    end
+
+    subgraph Inference["Marginalization, Evidence & Inference"]
+        LIN["Analytical LinearMarginal<br/>Hierarchical Offsets, Solar,<br/>Causal POD + Smith Cov"]
+        MACKAY["Empirical Bayes (MacKay)<br/>log_evidence, error_scale,<br/>select_gp_kernel"]
+        BAYES["Nonlinear Posteriors<br/>fit_map, sample_nuts, fit_svi,<br/>BlackJAX Tempered SMC, Fisher"]
+    end
+
+    CBM --> EXACT
+    CBM --> ODE
+    PROD --> EXACT
+    PROD --> ODE
+    IFT --> EXACT
+    EXACT --> LIN
+    ODE --> BAYES
+    DS --> LIN
+    DS --> MACKAY
+    LIN --> BAYES
+    EXACT --> MACKAY
+```
+
+### Key Capabilities in `ticktack 2.0`
+
+- **Composable `zodiax` PyTree carbon box models**: Flow-balanced (`BalancedCBM`), detailed-balance (`ReversibleCBM`), open sediment-burial (`OpenCBM`), fixed (`FixedCBM`), minimal canonical (`EffectiveCBM(K)`), and Fisher-subspace (`SubspaceCBM`) parametrizations, alongside audited literature presets (`Guttler15`, `Brehm21`, `Miyake17`, `Buntgen18`).
+- **Exact LTI & non-autonomous ODE solvers**: `ExactLinearSolver` propagates piecewise-linear forcing via $(n+2)\times(n+2)$ Van Loan first-order-hold (FOH) matrix exponentials with causal `rfft` convolution, exact sub-annual spike quadrature, and complex frequency-domain solar resolvents $(i\omega I_n - A)^{-1}\mathbf{b}$ – eliminating the 2000-year numerical burn-in required in `ticktack 1.x`. `DiffraxSolver` and `ModaxSolver` integrate time-varying carbon-cycle trajectories $M_c(t)$ (industrial Suess dilution and geomagnetic modulation).
+- **Analytical linear marginalization & causal POD**: `LinearMarginalConfig` marginalizes global Holocene offsets, per-laboratory calibration offsets, harmonic solar quadrature amplitudes, linear trends, and Solin–Särkkä Hilbert-space Gaussian-process modes (including stationary pre-history reservoir covariance via 24-step Smith doubling) in closed form, collapsing tens of linear nuisance dimensions out of MCMC.
+- **Information Field Theory & automatic GP kernel discovery**: `ticktack.fields` implements 1D reflecting-boundary (orthonormal DCT-II) `GaussianField` and `LogGaussianField` priors with composable spectral kernels (`MaternSpectrum`, `SquaredExpSpectrum`, `QuasiPeriodicSpectrum`, `SumSpectrum`, `CorrelatedFieldSpectrum`), MacKay marginal evidence (`log_evidence`), laboratory uncertainty auditing (`error_scale`), and empirical-Bayes kernel selection (`select_gp_kernel`).
+- **Fisher information geometry & Bayesian model comparison**: `cbm_fisher_spectrum` and `relaxation_fisher_modes` reveal the diffusive $\pi / \cosh(\pi\omega_{\ln})$ singular-value decay of carbon-cycle transfer rates (explaining why decadal $\Delta^{14}\text{C}$ records constrain at most $2$–$3$ collective reservoir timescales), paired with `BlackJAX` adaptive tempered Sequential Monte Carlo (`sample_smc`) yielding unbiased thermodynamic log-evidences $\ln \widehat{Z} \pm \widehat{\sigma}_{\ln Z}$.
+- **Audited calendar & hemispheric growth conventions**: Mandatory calendar tags (`astronomical_ce`, `cal_bp`, `historical_bce` with astronomical year-zero correction) and explicit Boreal vs Austral tree-ring growth bounds (`schulman_start`, `end_year`, `explicit_bounds`).
+
+---
+
+## Where to Start
+
+| Goal | Guide |
+| :--- | :--- |
+| Run forward simulations, MAP + NUTS/SMC Miyake fits, and IFT reconstructions | [Quickstart](quickstart.md) |
+| Walk through the executed five-cell MWE Jupyter notebooks | [Tutorials](tutorials.md) |
+| Understand governing LTI equations, decay constants, $R_{\text{ref}}$, and SH ring dating | [Physical & Calendar Conventions](conventions.md) |
+| Learn how Van Loan FOH propagation, solar resolvents, and Perron–Frobenius CBMs work | [Solvers & Carbon Box Models](solvers_and_cbms.md) |
+| Explore Laplace singular-value decay, `EffectiveCBM(K)`, and tempered SMC evidence | [Fisher Information & EffectiveCBMs](fisher_and_effective_cbm.md) |
+| Reconstruct non-parametric $Q(t)$ via causal POD or DCT-II IFT fields and MacKay evidence | [Gaussian Processes & Information Field Theory](gp_and_ift.md) |
+| Inspect bundled Miyake-event and IntCal20 datasets and provenance audits | [Bundled Datasets](data.md) |
+| Upgrade `ticktack 1.x` scripts (`SingleFitter`, `MultiFitter`, `Miyake17`) to `2.0` | [Migrating from v1 to v2](migration.md) |
+| Look up class signatures, parameters, and return types | [API Reference](api/index.md) |
+
+---
 
 ## Installation
 
-The easiest way to install is from PyPI: just use
+`ticktack 2.0` requires **Python $\ge 3.11$** and enables 64-bit JAX (`jax_enable_x64 = True`) automatically on import.
 
-`pip install ticktack`
+### Standard Installation (`pip` or `uv`)
 
-To install from source: clone [this git repo](https://github.com/SharmaLlama/ticktack), enter the directory, and run
+```bash
+pip install ticktack
+```
 
-`python setup.py install`
+For development from source (recommended with [`uv`](https://docs.astral.sh/uv/)):
 
-## Running the Tests
+```bash
+git clone https://github.com/SharmaLlama/ticktack.git
+cd ticktack
+uv venv --python 3.12
+uv pip install -e ".[dev]"
+```
 
-To run the tests just, install [pytest](https://docs.pytest.org/en/7.1.x/contents.html), navigate to the `tests/` directory, and type `pytest` at the command line. `pytest` will automatically detect the tests.
+### Optional Extras
 
-## License
+- **`ticktack[dev]`**: Installs `pytest`, `ruff`, and `jupyter` for running the test suite and notebooks.
+- **`ticktack[cuda]`**: Installs CUDA 12 JAX wheels (`jax[cuda12]`) on Linux GPU hosts.
+- **`ticktack[legacy]`**: Installs `astropy` when converting legacy unit quantities alongside `ticktack 1.x` workflows.
 
-We invite anyone interested to use and modify this code under a MIT license.
+### Running the Test Suite
 
-## Name
+```bash
+pytest
+ruff check src tests
+```
 
-The 'little boxes' in [Malvina Reynolds' famous song](https://www.youtube.com/watch?v=2_2lGkEU4Xs) are all made of ticky-tacky, and they all look just the same. Here we provide an open-source toolkit for reproducing and extending carbon box models for radiocarbon analysis, and we expect they will be as interchangeable as Malvina Reynolds' boxes!
+---
+
+## Contributors & Citation
+
+`ticktack` was created by **Utkarsh Sharma**, **Qingyuan Zhang**, **Jordan Dennis**, and **Benjamin Pope**.
+
+If you use `ticktack` in published research, please cite both the methodology paper and the JOSS software paper:
+
+- Zhang, Q., Sharma, U., Dennis, J. A., Scifo, A., Kuitems, M., Büntgen, U., Owens, M. J., Dee, M. W., & Pope, B. J. S. (2022). *Modelling cosmic radiation events in the tree-ring radiocarbon record*. Proceedings of the Royal Society A, 478(2266), 20220497. [doi:10.1098/rspa.2022.0497](https://doi.org/10.1098/rspa.2022.0497)
+- Sharma, U., Zhang, Q., Dennis, J. A., & Pope, B. J. S. (2023). *ticktack: A Python package for carbon box modelling*. Journal of Open Source Software, 8(84), 5084. [doi:10.21105/joss.05084](https://doi.org/10.21105/joss.05084)
+
+```bibtex
+@article{Zhang2022,
+  author  = {Zhang, Qingyuan and Sharma, Utkarsh and Dennis, Jordan A. and Scifo, Andrea and Kuitems, Margot and B{\"u}ntgen, Ulf and Owens, Mathew J. and Dee, Michael W. and Pope, Benjamin J. S.},
+  title   = {Modelling cosmic radiation events in the tree-ring radiocarbon record},
+  journal = {Proceedings of the Royal Society A},
+  volume  = {478},
+  number  = {2266},
+  pages   = {20220497},
+  year    = {2022},
+  doi     = {10.1098/rspa.2022.0497}
+}
+
+@article{Sharma2023,
+  author  = {Sharma, Utkarsh and Zhang, Qingyuan and Dennis, Jordan A. and Pope, Benjamin J. S.},
+  title   = {ticktack: A Python package for carbon box modelling},
+  journal = {Journal of Open Source Software},
+  volume  = {8},
+  number  = {84},
+  pages   = {5084},
+  year    = {2023},
+  doi     = {10.21105/joss.05084}
+}
+```
+
+## Licence & Name
+
+`ticktack` is free software released under the [MIT Licence](https://github.com/SharmaLlama/ticktack/blob/main/LICENSE). Its name is a play on the Malvina Reynolds song [*Little Boxes*](https://www.youtube.com/watch?v=XUwUp-D_VV0) (*"little boxes made of ticky-tacky"*) and the steady ticking of the tree-ring radiocarbon clock.

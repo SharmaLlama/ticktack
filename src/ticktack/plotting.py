@@ -751,6 +751,364 @@ def plot_cbm_eigenmodes(
     return fig, target_ax
 
 
+def _unpack_ring_predictions(
+    series_list: Sequence[TreeRingSeries],
+    ring_pred: Any,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Normalize flat or per-series ring predictions against ``series_list``."""
+    n_tot = sum(s.n_obs for s in series_list)
+    if (
+        isinstance(ring_pred, (list, tuple))
+        and len(ring_pred) == len(series_list)
+        and (len(ring_pred) == 0 or np.ndim(ring_pred[0]) > 0)
+    ):
+        parts = [np.asarray(rp, dtype=np.float64).reshape(-1) for rp in ring_pred]
+        for s, p in zip(series_list, parts):
+            if p.size != s.n_obs:
+                raise ValueError(
+                    f"Series {s.name!r} has {s.n_obs} rings, got {p.size} predictions."
+                )
+        flat = np.concatenate(parts, axis=0) if parts else np.zeros((0,), dtype=np.float64)
+        return parts, flat
+
+    flat = np.asarray(ring_pred, dtype=np.float64).reshape(-1)
+    if flat.size != n_tot:
+        raise ValueError(
+            f"ring_pred length {flat.size} does not match total observations {n_tot}."
+        )
+    parts = []
+    cursor = 0
+    for s in series_list:
+        parts.append(flat[cursor : cursor + s.n_obs])
+        cursor += s.n_obs
+    return parts, flat
+
+
+def plot_data_model_correlation(
+    dataset_or_obs: Dataset | TreeRingSeries | Sequence[TreeRingSeries] | Any,
+    ring_pred: Any,
+    *,
+    sigma_obs: Any | None = None,
+    title: str | None = None,
+    figsize: tuple[float, float] = (5.2, 4.6),
+    ax: Axes | None = None,
+) -> tuple[Figure, Axes]:
+    r"""Plot 1-to-1 observed versus model-predicted ``Delta14C`` (‰) correlation.
+
+    Renders ``1-sigma`` observation error bars (colour-coded by series or hemisphere
+    when given a :class:`~ticktack.data.Dataset` or :class:`~ticktack.data.TreeRingSeries`),
+    the dashed ``1:1`` identity line, matched square axis limits, and a compact
+    goodness-of-fit summary (reduced ``chi^2 / N_obs`` and WRMS pull).
+
+    Parameters
+    ----------
+    dataset_or_obs : Dataset, TreeRingSeries, sequence of TreeRingSeries, or array-like
+        Structured tree-ring dataset/series or 1D observed ``Delta14C`` array (‰).
+    ring_pred : array-like or sequence of array-like
+        Model-predicted seasonal-binned ``Delta14C`` (‰) at each observation.
+    sigma_obs : array-like, optional
+        Observation ``1-sigma`` uncertainties (‰). Extracted automatically from
+        ``dataset_or_obs`` when omitted for structured inputs.
+    title : str, optional
+        Optional axes title.
+    figsize : tuple[float, float], default (5.2, 4.6)
+        Figure size when ``ax`` is ``None``.
+    ax : Axes, optional
+        Existing Matplotlib ``Axes`` to draw into.
+
+    Returns
+    -------
+    tuple[Figure, Axes]
+        The ``(fig, ax)`` pair.
+    """
+    if ax is None:
+        fig, target_ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        target_ax = ax
+        fig = target_ax.figure
+
+    is_structured = isinstance(dataset_or_obs, (Dataset, TreeRingSeries)) or (
+        isinstance(dataset_or_obs, Sequence)
+        and len(dataset_or_obs) > 0
+        and isinstance(dataset_or_obs[0], TreeRingSeries)
+    )
+
+    if is_structured:
+        series_list = _extract_series_list(dataset_or_obs)
+        if not series_list:
+            raise ValueError("dataset_or_obs contains no TreeRingSeries.")
+        per_pred, pred_all = _unpack_ring_predictions(series_list, ring_pred)
+        obs_all = np.concatenate([np.asarray(s.d14c, dtype=np.float64) for s in series_list])
+        if sigma_obs is None:
+            sig_all = np.concatenate(
+                [np.asarray(s.sigma_d14c, dtype=np.float64) for s in series_list]
+            )
+            per_sig = [np.asarray(s.sigma_d14c, dtype=np.float64) for s in series_list]
+        else:
+            sig_all = np.broadcast_to(
+                np.asarray(sigma_obs, dtype=np.float64), obs_all.shape
+            ).reshape(-1)
+            per_sig = []
+            cur = 0
+            for s in series_list:
+                per_sig.append(sig_all[cur : cur + s.n_obs])
+                cur += s.n_obs
+
+        if len(series_list) <= 6:
+            for idx, (s, p_s, sig_s) in enumerate(zip(series_list, per_pred, per_sig)):
+                col = (
+                    _PALETTE[0]
+                    if s.hemisphere == "north" and len(series_list) <= 2
+                    else (
+                        _PALETTE[1]
+                        if s.hemisphere == "south" and len(series_list) <= 2
+                        else _PALETTE[idx % len(_PALETTE)]
+                    )
+                )
+                marker = "o" if s.hemisphere == "north" else "s"
+                hem_lbl = "NH" if s.hemisphere == "north" else "SH"
+                target_ax.errorbar(
+                    p_s,
+                    np.asarray(s.d14c, dtype=np.float64),
+                    yerr=sig_s,
+                    fmt=marker,
+                    color=col,
+                    markersize=4.5,
+                    elinewidth=1.0,
+                    capsize=1.8,
+                    alpha=0.85,
+                    label=f"{s.name} ({hem_lbl})",
+                )
+        else:
+            for hem, col, marker, tag in (
+                ("north", _PALETTE[0], "o", "NH"),
+                ("south", _PALETTE[1], "s", "SH"),
+            ):
+                idxs = [i for i, s in enumerate(series_list) if s.hemisphere == hem]
+                if not idxs:
+                    continue
+                p_h = np.concatenate([per_pred[i] for i in idxs])
+                o_h = np.concatenate(
+                    [np.asarray(series_list[i].d14c, dtype=np.float64) for i in idxs]
+                )
+                s_h = np.concatenate([per_sig[i] for i in idxs])
+                target_ax.errorbar(
+                    p_h,
+                    o_h,
+                    yerr=s_h,
+                    fmt=marker,
+                    color=col,
+                    markersize=4.2,
+                    elinewidth=0.95,
+                    capsize=1.6,
+                    alpha=0.8,
+                    label=f"{tag} ({len(idxs)} series)",
+                )
+    else:
+        obs_all = np.asarray(dataset_or_obs, dtype=np.float64).reshape(-1)
+        pred_all = np.asarray(ring_pred, dtype=np.float64).reshape(-1)
+        if obs_all.size == 0 or obs_all.size != pred_all.size:
+            raise ValueError(
+                f"Observed ({obs_all.size}) and predicted ({pred_all.size}) must be non-empty 1D arrays of equal length."
+            )
+        sig_all = (
+            None
+            if sigma_obs is None
+            else np.broadcast_to(
+                np.asarray(sigma_obs, dtype=np.float64), obs_all.shape
+            ).reshape(-1)
+        )
+        target_ax.errorbar(
+            pred_all,
+            obs_all,
+            yerr=sig_all,
+            fmt="o",
+            color=_PALETTE[0],
+            markersize=4.5,
+            elinewidth=1.0,
+            capsize=1.8,
+            alpha=0.85,
+            label=r"Observed $\Delta^{14}\mathrm{C}$",
+        )
+
+    obs_lo = obs_all if sig_all is None else (obs_all - sig_all)
+    obs_hi = obs_all if sig_all is None else (obs_all + sig_all)
+    val_min = float(min(np.min(pred_all), np.min(obs_lo)))
+    val_max = float(max(np.max(pred_all), np.max(obs_hi)))
+    span = val_max - val_min
+    pad = 0.06 * span if span > 0.0 else 1.0
+    lim_lo, lim_hi = val_min - pad, val_max + pad
+
+    target_ax.plot(
+        [lim_lo, lim_hi],
+        [lim_lo, lim_hi],
+        ls="--",
+        lw=1.15,
+        color="#333333",
+        zorder=1,
+        label="1:1 identity",
+    )
+    target_ax.set_xlim(lim_lo, lim_hi)
+    target_ax.set_ylim(lim_lo, lim_hi)
+    target_ax.set_aspect("equal", adjustable="box")
+
+    resid = obs_all - pred_all
+    if sig_all is not None:
+        pulls = resid / sig_all
+        chi2_red = float(np.mean(pulls**2))
+        wrms_pull = float(np.sqrt(chi2_red))
+        inv_var = 1.0 / (sig_all**2)
+        wrms_permil = float(np.sqrt(np.sum(inv_var * (resid**2)) / np.sum(inv_var)))
+        stat_txt = (
+            rf"$\chi^2 / N_{{\mathrm{{obs}}}} = {chi2_red:.2f}$"
+            "\n"
+            rf"WRMS pull $= {wrms_pull:.2f}\sigma$ ({wrms_permil:.2f}‰)"
+        )
+    else:
+        rms_permil = float(np.sqrt(np.mean(resid**2)))
+        stat_txt = f"N = {obs_all.size}\nRMS = {rms_permil:.2f}‰"
+
+    target_ax.text(
+        0.04,
+        0.96,
+        stat_txt,
+        transform=target_ax.transAxes,
+        va="top",
+        ha="left",
+        fontsize=8.2,
+        bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": "#CCCCCC", "alpha": 0.9},
+    )
+    target_ax.set_xlabel(r"Predicted $\Delta^{14}\mathrm{C}$ (‰)")
+    target_ax.set_ylabel(r"Observed $\Delta^{14}\mathrm{C}$ (‰)")
+    target_ax.grid(True, alpha=0.25, linestyle="--")
+    target_ax.legend(loc="lower right", frameon=True, fontsize=8.0)
+    if title is not None:
+        target_ax.set_title(title)
+
+    return fig, target_ax
+
+
+def plot_residual_map(
+    dataset: Dataset | TreeRingSeries | Sequence[TreeRingSeries],
+    ring_pred: Any,
+    *,
+    zscore: bool = True,
+    cmap: str = "RdBu_r",
+    vmax: float | None = None,
+    title: str | None = None,
+    figsize: tuple[float, float] = (9.5, 4.8),
+    ax: Axes | None = None,
+) -> tuple[Figure, Axes]:
+    r"""Plot a 2D ``series × calendar year`` radiocarbon residual heatmap.
+
+    Unobserved series-year cells remain ``NaN`` and are rendered in neutral grey so
+    data gaps are immediately distinguishable from near-zero residuals. Uses a
+    symmetric diverging colour scale ``vmin = -vmax`` with a labelled colourbar.
+
+    Parameters
+    ----------
+    dataset : Dataset, TreeRingSeries, or sequence of TreeRingSeries
+        Observed tree-ring series with audited calendar windows.
+    ring_pred : array-like or sequence of array-like
+        Model-predicted seasonal-binned ``Delta14C`` (‰) at each observation.
+    zscore : bool, default True
+        When ``True``, plot standardized pulls ``(d - m) / sigma``; when ``False``,
+        plot raw residuals ``d - m`` (‰).
+    cmap : str, default "RdBu_r"
+        Diverging Matplotlib colourmap name.
+    vmax : float, optional
+        Positive colour-scale bound (``vmin = -vmax``). Defaults to
+        ``max(3.0, np.nanpercentile(np.abs(grid), 98))`` when ``zscore=True``.
+    title : str, optional
+        Optional axes title.
+    figsize : tuple[float, float], default (9.5, 4.8)
+        Figure size when ``ax`` is ``None``.
+    ax : Axes, optional
+        Existing Matplotlib ``Axes`` to draw into.
+
+    Returns
+    -------
+    tuple[Figure, Axes]
+        The ``(fig, ax)`` pair.
+    """
+    series_list = _extract_series_list(dataset)
+    if not series_list:
+        raise ValueError("dataset must contain at least one TreeRingSeries.")
+
+    per_pred, _ = _unpack_ring_predictions(series_list, ring_pred)
+    series_years = [
+        np.floor(np.asarray(s.t_starts, dtype=np.float64) + 1e-9).astype(np.int64)
+        for s in series_list
+    ]
+    year_min = int(min(int(np.min(yrs)) for yrs in series_years))
+    year_max = int(max(int(np.max(yrs)) for yrs in series_years))
+    n_series = len(series_list)
+    n_years = year_max - year_min + 1
+
+    num_acc = np.zeros((n_series, n_years), dtype=np.float64)
+    w_acc = np.zeros((n_series, n_years), dtype=np.float64)
+    counts = np.zeros((n_series, n_years), dtype=np.int64)
+
+    for row_idx, (s, pred_s, yrs) in enumerate(zip(series_list, per_pred, series_years)):
+        obs_s = np.asarray(s.d14c, dtype=np.float64)
+        sig_s = np.asarray(s.sigma_d14c, dtype=np.float64)
+        inv_var_s = 1.0 / (sig_s**2)
+        res_s = obs_s - pred_s
+        cols = yrs - year_min
+        np.add.at(num_acc[row_idx], cols, inv_var_s * res_s)
+        np.add.at(w_acc[row_idx], cols, inv_var_s)
+        np.add.at(counts[row_idx], cols, 1)
+
+    grid = np.full((n_series, n_years), np.nan, dtype=np.float64)
+    mask_obs = counts > 0
+    if zscore:
+        grid[mask_obs] = num_acc[mask_obs] / np.sqrt(w_acc[mask_obs])
+    else:
+        grid[mask_obs] = num_acc[mask_obs] / w_acc[mask_obs]
+
+    if vmax is not None:
+        eff_vmax = float(vmax)
+        if not (np.isfinite(eff_vmax) and eff_vmax > 0.0):
+            raise ValueError(f"vmax must be finite and positive, got {vmax!r}.")
+    elif np.any(mask_obs):
+        p98 = float(np.nanpercentile(np.abs(grid), 98.0))
+        eff_vmax = max(3.0, p98) if zscore else (p98 if p98 > 0.0 else 1.0)
+    else:
+        eff_vmax = 3.0 if zscore else 1.0
+
+    if ax is None:
+        fig, target_ax = plt.subplots(1, 1, figsize=figsize)
+    else:
+        target_ax = ax
+        fig = target_ax.figure
+
+    cmap_obj = plt.get_cmap(cmap).with_extremes(bad="#E6E6E6")
+
+    im = target_ax.imshow(
+        grid,
+        aspect="auto",
+        interpolation="nearest",
+        cmap=cmap_obj,
+        vmin=-eff_vmax,
+        vmax=eff_vmax,
+        extent=(year_min - 0.5, year_max + 0.5, n_series - 0.5, -0.5),
+    )
+    target_ax.set_yticks(np.arange(n_series))
+    target_ax.set_yticklabels(
+        [f"{s.name} ({'NH' if s.hemisphere == 'north' else 'SH'})" for s in series_list],
+        fontsize=8.2,
+    )
+    target_ax.set_xlabel("Calendar Year (Astronomical CE)")
+    cbar_label = (
+        r"Standardized pull $(d - m) / \sigma$" if zscore else r"Residual $d - m$ (‰)"
+    )
+    fig.colorbar(im, ax=target_ax, pad=0.02, label=cbar_label)
+    if title is not None:
+        target_ax.set_title(title)
+
+    return fig, target_ax
+
+
 # ---------------------------------------------------------------------------
 # Parametric Cornerplots via ChainConsumer >= 1.0 (stateless, silent logging)
 # ---------------------------------------------------------------------------
@@ -1881,8 +2239,10 @@ __all__ = [
     "plot_cbm_tikz_modes",
     "plot_corner",
     "plot_d14c_fit",
+    "plot_data_model_correlation",
     "plot_evidence_grid",
     "plot_field_draws",
     "plot_fisher_spectrum",
     "plot_production_posterior",
+    "plot_residual_map",
 ]

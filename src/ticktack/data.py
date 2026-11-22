@@ -553,7 +553,12 @@ class TreeRingSeries(zdx.Base):
         box_name: str = "Troposphere",
         sort_by_time: bool = True,
     ) -> TreeRingSeries:
-        """Load a :class:`TreeRingSeries` from CSV using stdlib :mod:`csv` only.
+        """Load a :class:`TreeRingSeries` from CSV or whitespace-delimited text.
+
+        Uses stdlib :mod:`csv` when the header row contains a comma ``,``, and falls
+        back automatically to whitespace-delimited token splitting when the header
+        contains no comma (e.g. legacy ``year d14c sig_d14c`` tables such as
+        ``miyake12.csv``).
 
         Recognized columns (case-insensitive, stripped):
         - ``year`` (required)
@@ -573,44 +578,78 @@ class TreeRingSeries(zdx.Base):
         csv_season: str | None = None
 
         with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-            reader = csv.DictReader(f)
-            if reader.fieldnames is None:
-                raise ValueError(f"CSV file {csv_path} has no header row.")
-            norm_map = {h.strip().lower(): h for h in reader.fieldnames if h is not None}
+            raw_lines = f.readlines()
 
-            year_col = norm_map.get("year")
-            d14c_col = norm_map.get("d14c")
-            sig_col = (
-                norm_map.get("sig_d14c")
-                or norm_map.get("sigma_d14c")
-                or norm_map.get("d14c_err")
-            )
-            season_col = norm_map.get("growth_season")
-            ts_col = norm_map.get("t_start")
-            te_col = norm_map.get("t_end")
+        header_idx: int | None = None
+        for idx_line, ln in enumerate(raw_lines):
+            if ln.strip():
+                header_idx = idx_line
+                break
+        if header_idx is None:
+            raise ValueError(f"CSV file {csv_path} has no header row.")
 
-            if year_col is None or d14c_col is None or sig_col is None:
-                raise ValueError(
-                    f"CSV {csv_path} must contain 'year', 'd14c', and 'sig_d14c' columns; "
-                    f"found {list(norm_map.keys())}."
+        header_line = raw_lines[header_idx]
+        if "," in header_line:
+            dict_reader = csv.DictReader(raw_lines[header_idx:])
+            fieldnames = list(dict_reader.fieldnames or [])
+            rows_iter: list[dict[str, str | None]] = list(dict_reader)
+        else:
+            fieldnames = header_line.split()
+            rows_iter = []
+            for ln in raw_lines[header_idx + 1 :]:
+                stripped = ln.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                tokens = stripped.split()
+                rows_iter.append(
+                    {
+                        col: (tokens[i] if i < len(tokens) else "")
+                        for i, col in enumerate(fieldnames)
+                    }
                 )
 
-            for row in reader:
-                if not row or all((v is None or not v.strip()) for v in row.values()):
-                    continue
-                years_list.append(float(row[year_col].strip()))
-                d14c_list.append(float(row[d14c_col].strip()))
-                sig_list.append(float(row[sig_col].strip()))
-                if season_col is not None and csv_season is None:
-                    raw_s = row.get(season_col)
-                    if raw_s is not None and raw_s.strip():
-                        csv_season = raw_s.strip()
-                if ts_col is not None and te_col is not None:
-                    raw_ts = row.get(ts_col, "")
-                    raw_te = row.get(te_col, "")
-                    if raw_ts and raw_te and raw_ts.strip() and raw_te.strip():
-                        t_start_list.append(float(raw_ts.strip()))
-                        t_end_list.append(float(raw_te.strip()))
+        if not fieldnames:
+            raise ValueError(f"CSV file {csv_path} has no header row.")
+        norm_map = {h.strip().lower(): h for h in fieldnames if h is not None}
+
+        year_col = norm_map.get("year")
+        d14c_col = norm_map.get("d14c")
+        sig_col = (
+            norm_map.get("sig_d14c")
+            or norm_map.get("sigma_d14c")
+            or norm_map.get("d14c_err")
+        )
+        season_col = norm_map.get("growth_season")
+        ts_col = norm_map.get("t_start")
+        te_col = norm_map.get("t_end")
+
+        if year_col is None or d14c_col is None or sig_col is None:
+            raise ValueError(
+                f"CSV {csv_path} must contain 'year', 'd14c', and 'sig_d14c' columns; "
+                f"found {list(norm_map.keys())}."
+            )
+
+        for row in rows_iter:
+            if not row or all((v is None or not v.strip()) for v in row.values()):
+                continue
+            raw_y = row.get(year_col)
+            raw_d = row.get(d14c_col)
+            raw_sig = row.get(sig_col)
+            if not raw_y or not raw_d or not raw_sig:
+                raise ValueError(f"Incomplete data row in {csv_path}: {row!r}.")
+            years_list.append(float(raw_y.strip()))
+            d14c_list.append(float(raw_d.strip()))
+            sig_list.append(float(raw_sig.strip()))
+            if season_col is not None and csv_season is None:
+                raw_s = row.get(season_col)
+                if raw_s is not None and raw_s.strip():
+                    csv_season = raw_s.strip()
+            if ts_col is not None and te_col is not None:
+                raw_ts = row.get(ts_col, "")
+                raw_te = row.get(te_col, "")
+                if raw_ts and raw_te and raw_ts.strip() and raw_te.strip():
+                    t_start_list.append(float(raw_ts.strip()))
+                    t_end_list.append(float(raw_te.strip()))
 
         eff_season = growth_season if growth_season is not None else csv_season
         if year_convention is None:

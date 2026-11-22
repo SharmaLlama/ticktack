@@ -178,10 +178,12 @@ from .plotting import (  # noqa: E402
     plot_cbm_tikz_modes,
     plot_corner,
     plot_d14c_fit,
+    plot_data_model_correlation,
     plot_evidence_grid,
     plot_field_draws,
     plot_fisher_spectrum,
     plot_production_posterior,
+    plot_residual_map,
 )
 
 # Information Field Theory (IFT) fields, MacKay evidence, and GP kernel selection
@@ -321,10 +323,12 @@ __all__ = [
     "plot_cbm_tikz_modes",
     "plot_corner",
     "plot_d14c_fit",
+    "plot_data_model_correlation",
     "plot_evidence_grid",
     "plot_field_draws",
     "plot_fisher_spectrum",
     "plot_production_posterior",
+    "plot_residual_map",
     # fields (IFT)
     "CorrelatedFieldSpectrum",
     "DCTResponseOperator",
