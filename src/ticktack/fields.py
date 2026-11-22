@@ -58,6 +58,10 @@ from .cbm import CarbonBoxModel
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 from .data import Dataset, TreeRingSeries
 from .linear import (
+    _GLEG128_W,
+    _GLEG128_X,
+    _safe_psd_root,
+    _solve_complex_resolvents,
     hierarchical_offset_design,
     posterior as _linear_posterior_std,
     stationary_cbm_gp_cov,
@@ -79,6 +83,7 @@ __all__ = [
     "dct_laplacian_eigenvalues",
     "dct_knot_variance",
     "field_spectrum",
+    "stationary_cbm_spectral_cov",
     "SpectralKernel",
     "MaternSpectrum",
     "SquaredExpSpectrum",
@@ -892,8 +897,10 @@ class LogGaussianField(ProductionTerm):
         Q(t_g) = q_{\mathrm{mean}}\,\tilde{\mu}_g\,\exp\!\left(\eta_g - \tfrac{1}{2} c_{\mathrm{Ito}}\,\sigma_{\eta,g}^2\right) > 0,
 
     where ``eta = IDCT_II(sqrt(S) * z)`` with standardized excitations ``z ~ N(0, I_N)``.
-    When ``ito_corrected=True``, the exact per-knot variance correction
-    ``-0.5 * dct_knot_variance(S)`` ensures ``E_{z ~ N(0, I)}[Q(t_g)] == q_mean * tilde_mu_g``.
+    By default (``ito_corrected=True``), the exact per-knot variance correction
+    ``-0.5 * dct_knot_variance(S)`` ensures ``E_{z ~ N(0, I)}[Q(t_g)] == q_mean * tilde_mu_g``
+    across both interior and reflecting-boundary knots (pass ``ito_corrected=False`` for
+    median-anchored ``median[Q(t_g)] == q_mean * tilde_mu_g``).
     """
 
     latent: jax.Array
@@ -923,7 +930,7 @@ class LogGaussianField(ProductionTerm):
         template: ArrayLike | None = None,
         mean_floor: float = 1e-3,
         zero_mode: bool = True,
-        ito_corrected: bool = False,
+        ito_corrected: bool = True,
     ) -> None:
         z = jnp.asarray(latent, dtype=jnp.float64)
         if z.ndim != 1 or z.shape[0] < 2:
@@ -1844,6 +1851,217 @@ def predict_field_d14c(
     return pred
 
 
+def _spectral_part_char_scale(part: SpectralKernel) -> jax.Array:
+    """Characteristic correlation timescale ``ell_char`` (yr) for spectral quadrature."""
+    if isinstance(part, MaternSpectrum):
+        return jnp.asarray(part.length_yr, dtype=jnp.float64).reshape(())
+    if isinstance(part, SquaredExpSpectrum):
+        return jnp.asarray(part.length_yr, dtype=jnp.float64).reshape(())
+    if isinstance(part, QuasiPeriodicSpectrum):
+        return jnp.asarray(part.period_yr, dtype=jnp.float64).reshape(()) / (2.0 * math.pi)
+    if isinstance(part, CorrelatedFieldSpectrum):
+        return jnp.asarray(1.0, dtype=jnp.float64)
+    raise TypeError(f"Unsupported SpectralKernel part {type(part).__name__!r} for stationary_cbm_spectral_cov.")
+
+
+def _spectral_quad_grid(
+    ell_char: ArrayLike,
+    *,
+    n_quad: int = 128,
+) -> tuple[jax.Array, jax.Array]:
+    """Three-zone composite Gauss–Legendre frequency grid matching ``stationary_cbm_gp_cov``."""
+    if n_quad == 128:
+        gl_x, gl_w = _GLEG128_X, _GLEG128_W
+    else:
+        gl_x, gl_w = np.polynomial.legendre.leggauss(n_quad)
+    xi = 0.5 * (jnp.asarray(gl_x, dtype=jnp.float64) + 1.0)
+    w_xi = 0.5 * jnp.asarray(gl_w, dtype=jnp.float64)
+
+    ell = jnp.asarray(ell_char, dtype=jnp.float64).reshape(())
+    w_max = jnp.hypot(1000.0, 40.0 / jnp.hypot(ell, 1e-3))
+
+    # Zone 1: [0, 0.05] via sinh map resolving slow radiocarbon decay λ_14 ≈ 1.21e-4 yr⁻¹
+    c0_lo = 1e-6
+    w_z1_hi = 0.05
+    alpha_lo = math.asinh(w_z1_hi / c0_lo)
+    om_z1 = c0_lo * jnp.sinh(alpha_lo * xi)
+    dw_z1 = w_xi * (c0_lo * alpha_lo * jnp.cosh(alpha_lo * xi))
+
+    # Zone 2: [0.05, 4.0] linear GL resolving solar-cycle harmonics (11 yr, 5.5 yr, ...)
+    w_z2_hi = 4.0
+    om_z2 = w_z1_hi + (w_z2_hi - w_z1_hi) * xi
+    dw_z2 = w_xi * (w_z2_hi - w_z1_hi)
+
+    # Zone 3: [4.0, w_max] via shifted sinh map resolving high-frequency tails ω >> 1/ℓ
+    c0_hi = 0.2
+    alpha_hi = jnp.arcsinh((w_max - w_z2_hi) / c0_hi)
+    om_z3 = w_z2_hi + c0_hi * jnp.sinh(alpha_hi * xi)
+    dw_z3 = w_xi * (c0_hi * alpha_hi * jnp.cosh(alpha_hi * xi))
+
+    omegas = jnp.concatenate([om_z1, om_z2, om_z3])
+    dw_total = jnp.concatenate([dw_z1, dw_z2, dw_z3])
+    return omegas, dw_total
+
+
+def _spectral_part_log_raw(part: SpectralKernel, omegas: jax.Array) -> jax.Array:
+    """Continuous unnormalized log-power shape ``ln P_tilde(omega^2)`` on ``omegas``."""
+    lam = jnp.square(omegas)
+    if isinstance(part, MaternSpectrum):
+        ord_np = _concrete_np(part.order)
+        if ord_np is not None and bool(np.isposinf(ord_np)):
+            return -0.5 * jnp.square(part.length_yr) * lam
+        return -part.order * jnp.log1p(jnp.square(part.length_yr) * lam)
+    if isinstance(part, SquaredExpSpectrum):
+        return -0.5 * jnp.square(part.length_yr) * lam
+    if isinstance(part, QuasiPeriodicSpectrum):
+        w0_sq = jnp.square(2.0 * math.pi / part.period_yr)
+        denom = jnp.square(lam - w0_sq) + (w0_sq * lam) / jnp.square(part.quality)
+        return -jnp.log(jnp.maximum(denom, 1e-300))
+    if isinstance(part, CorrelatedFieldSpectrum):
+        # Smooth infrared cutoff ω_min = 0.02 rad/yr (~314 yr) so power-law spectra
+        # remain integrable near ω = 0 while preserving high-ω decay.
+        w_min = 0.02
+        ln_w_min = math.log(w_min)
+        ln_w_ref_max = math.log(4.0)
+        log_w = 0.5 * jnp.log(lam + w_min * w_min)
+        centred = log_w - 0.5 * (ln_w_min + ln_w_ref_max)
+        u = jnp.clip((log_w - ln_w_min) / (ln_w_ref_max - ln_w_min), 0.0, 1.0)
+        m_idx = jnp.arange(1, part.log_deviations.shape[0] + 1, dtype=jnp.float64)
+        basis = (math.sqrt(2.0) / m_idx[:, None]) * jnp.cos(
+            math.pi * m_idx[:, None] * u[None, :]
+        )
+        return part.slope * centred + part.flexibility * (part.log_deviations @ basis)
+    raise TypeError(
+        f"Unsupported SpectralKernel part {type(part).__name__!r} for stationary_cbm_spectral_cov."
+    )
+
+
+def _spectral_kernel_quad_weights(
+    spectral_kernel: SpectralKernel,
+    omegas: jax.Array,
+    dw_total: jax.Array,
+    *,
+    variance_scale: ArrayLike = 1.0,
+) -> jax.Array:
+    """Normalized quadrature weights ``w_q`` summing to ``variance_scale * sum_p sigma_p^2``."""
+    parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
+    v_scale = jnp.asarray(variance_scale, dtype=jnp.float64).reshape(())
+    total_weights = jnp.zeros_like(omegas, dtype=jnp.float64)
+    for part in parts:
+        log_raw = _spectral_part_log_raw(part, omegas)
+        shift = jnp.max(log_raw)
+        raw = jnp.exp(log_raw - shift)
+        dw_raw = dw_total * raw
+        denom = jnp.sum(dw_raw)
+        sig = jnp.asarray(part.sigma, dtype=jnp.float64).reshape(())
+        part_w = jnp.where(
+            (denom > 0.0) & (sig > 0.0),
+            v_scale * jnp.square(sig) * dw_raw / jnp.where(denom > 0.0, denom, 1.0),
+            0.0,
+        )
+        total_weights = total_weights + part_w
+    return total_weights
+
+
+def stationary_cbm_spectral_cov(
+    A: ArrayLike,
+    b: ArrayLike,
+    spectral_kernel: SpectralKernel,
+    *,
+    alpha_unit: ArrayLike = 1.0,
+    variance_scale: ArrayLike = 1.0,
+    n_quad: int = 128,
+    jitter: float = 1e-13,
+) -> tuple[jax.Array, jax.Array]:
+    r"""Stationary pre-history CBM covariance ``(Sigma_{y,0}, root_y0)`` from a :class:`SpectralKernel`.
+
+    Evaluates the continuous Wiener–Khinchin frequency integral
+
+    .. math::
+
+        \Sigma_{y,0} = \int_0^\infty \operatorname{Re}\!\left[
+            (i\omega I - A)^{-1} b_{\mathrm{eff}} b_{\mathrm{eff}}^\top (-i\omega I - A^\top)^{-1}
+        \right] \frac{S(\omega)}{\pi}\,d\omega
+
+    on the same three-zone composite Gauss–Legendre grid as :func:`stationary_cbm_gp_cov`,
+    normalizing each elementary spectral component directly on the quadrature grid so that
+    its integrated stationary variance equals ``variance_scale * sigma^2`` identically.
+    """
+    if not isinstance(spectral_kernel, SpectralKernel):
+        raise TypeError(
+            f"Expected SpectralKernel, got {type(spectral_kernel).__name__!r}."
+        )
+    a_mat = jnp.asarray(A, dtype=jnp.float64)
+    b_eff = jnp.asarray(alpha_unit, dtype=jnp.float64) * jnp.asarray(
+        b, dtype=jnp.float64
+    ).reshape(-1)
+    parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
+    ell_char = jnp.min(jnp.stack([_spectral_part_char_scale(p) for p in parts]))
+    omegas, dw_total = _spectral_quad_grid(ell_char, n_quad=n_quad)
+    u_mat, v_mat = _solve_complex_resolvents(a_mat, b_eff, omegas)
+    quad_weights = _spectral_kernel_quad_weights(
+        spectral_kernel, omegas, dw_total, variance_scale=variance_scale
+    )
+    sigma_y0 = (u_mat * quad_weights[None, :]) @ u_mat.T + (
+        v_mat * quad_weights[None, :]
+    ) @ v_mat.T
+    sigma_y0 = 0.5 * (sigma_y0 + sigma_y0.T)
+    root_y0 = _safe_psd_root(sigma_y0, jitter=jitter)
+    return sigma_y0, root_y0
+
+
+def _log_gaussian_variance_scale(
+    spectral_kernel: SpectralKernel,
+    q_mean: ArrayLike,
+    template: jax.Array | None = None,
+    mean_floor: float = 1e-3,
+) -> jax.Array:
+    """Stationary ``Q(t)`` variance multiplier ``q_mean^2 * expm1(sigma^2) / sigma^2``."""
+    parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
+    sq = jnp.asarray(0.0, dtype=jnp.float64)
+    for part in parts:
+        sq = sq + jnp.square(jnp.asarray(part.sigma, dtype=jnp.float64).reshape(()))
+    ratio = jnp.where(
+        sq > 1e-8,
+        jnp.expm1(sq) / jnp.where(sq > 1e-8, sq, 1.0),
+        1.0 + 0.5 * sq,
+    )
+    scale = jnp.square(jnp.asarray(q_mean, dtype=jnp.float64).reshape(())) * ratio
+    if template is not None:
+        t0 = jnp.maximum(jnp.asarray(template, dtype=jnp.float64)[0], mean_floor)
+        scale = scale * jnp.square(t0)
+    return scale
+
+
+def _field_variance_scale(field: GaussianField | LogGaussianField) -> jax.Array:
+    if isinstance(field, GaussianField):
+        if field.template is None:
+            return jnp.asarray(1.0, dtype=jnp.float64)
+        return jnp.square(jnp.asarray(field.template, dtype=jnp.float64)[0])
+    return _log_gaussian_variance_scale(
+        field.effective_kernel,
+        field.q_mean,
+        template=field.template,
+        mean_floor=field.mean_floor,
+    )
+
+
+def _field_prehistory_root_y0(
+    cbm: CarbonBoxModel,
+    alpha_unit: ArrayLike,
+    field: GaussianField | LogGaussianField,
+) -> jax.Array:
+    """Return stationary pre-history root ``root_y0`` derived from ``field``'s spectral kernel."""
+    _, root_y0 = stationary_cbm_spectral_cov(
+        cbm.matrix_A(),
+        cbm.production_vector(),
+        field.effective_kernel,
+        alpha_unit=alpha_unit,
+        variance_scale=_field_variance_scale(field),
+    )
+    return root_y0
+
+
 def _resolve_prehistory_root_y0(
     cbm: CarbonBoxModel,
     alpha_unit: ArrayLike,
@@ -1852,12 +2070,39 @@ def _resolve_prehistory_root_y0(
     """Return ``root_y0`` such that ``root_y0 @ root_y0.T == Sigma_{y,0}``."""
     if prehistory_kernel is None:
         return None
+    if isinstance(prehistory_kernel, SpectralKernel):
+        _, root_y0 = stationary_cbm_spectral_cov(
+            cbm.matrix_A(),
+            cbm.production_vector(),
+            prehistory_kernel,
+            alpha_unit=alpha_unit,
+        )
+        return root_y0
     _, root_y0 = stationary_cbm_gp_cov(
         cbm.matrix_A(),
         jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector(),
         prehistory_kernel,
     )
     return root_y0
+
+
+def _resolve_effective_prehistory_root_y0(
+    cbm: CarbonBoxModel,
+    alpha_unit: ArrayLike,
+    field: GaussianField | LogGaussianField,
+    *,
+    prehistory_root_y0: jax.Array | None = None,
+    prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool = True,
+) -> jax.Array | None:
+    """Precedence: explicit ``prehistory_root_y0`` > ``prehistory_kernel`` > ``field`` kernel."""
+    if prehistory_root_y0 is not None:
+        return prehistory_root_y0
+    if prehistory_kernel is not None:
+        return _resolve_prehistory_root_y0(cbm, alpha_unit, prehistory_kernel)
+    if include_field_initial_cov:
+        return _field_prehistory_root_y0(cbm, alpha_unit, field)
+    return None
 
 
 def _build_offset_whitening(
@@ -1960,6 +2205,113 @@ class IFTFieldFitResult(zdx.Base):
     n_steps: int = eqx.field(static=True)
     prehistory_root_y0: jax.Array | None = None
     prehistory_kernel: Any = None
+    include_field_initial_cov: bool = eqx.field(static=True, default=True)
+    initial_state_mean: jax.Array | None = None
+    initial_state_sd: jax.Array | None = None
+    initial_state_d14c_mean: jax.Array | None = None
+    initial_state_d14c_sd: jax.Array | None = None
+
+
+def _reconstruct_nuisance_and_initial_state(
+    cbm: CarbonBoxModel,
+    ds: Dataset,
+    op: DCTResponseOperator,
+    *,
+    q_std: ArrayLike,
+    alpha_unit: ArrayLike,
+    pred_no_off: jax.Array,
+    x_nuis: jax.Array,
+    mu_nuis: jax.Array,
+    root_nuis: jax.Array,
+    u_nuis: jax.Array,
+    eff_root_y0: jax.Array | None,
+    offset_mode: Literal["hierarchical", "none"],
+    lab_offset_prior_sd: float,
+    j_raw_at_z: jax.Array,
+    s_vals: jax.Array,
+    vt_svd: jax.Array,
+) -> tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array | None,
+    jax.Array | None,
+    jax.Array | None,
+    jax.Array | None,
+]:
+    """Reconstruct baseline offsets, exact marginal initial-state posterior, and ``d14c_pred``."""
+    inv_sig = 1.0 / ds.sigma_flat
+    n_obs = ds.n_obs
+    n_off = 0
+    if offset_mode == "hierarchical":
+        has_lab = lab_offset_prior_sd > 0.0 and ds.n_series > 0
+        n_off = 1 + (ds.n_series if has_lab else 0)
+    else:
+        has_lab = False
+
+    if u_nuis.shape[1] > 0:
+        resid_for_nuis = inv_sig * (ds.d14c_flat - pred_no_off - x_nuis @ mu_nuis)
+        w_std, c_w = _linear_posterior_std(resid_for_nuis, u_nuis)
+        w_nuis = mu_nuis + root_nuis @ w_std
+        if n_off > 0:
+            w_off = w_nuis[:n_off]
+            g_off = w_off[0]
+            l_off = (
+                w_off[1:]
+                if has_lab
+                else jnp.zeros((ds.n_series,), dtype=jnp.float64)
+            )
+            base_d14c = x_nuis[:, :n_off] @ w_off
+        else:
+            g_off = jnp.asarray(0.0, dtype=jnp.float64)
+            l_off = jnp.zeros((ds.n_series,), dtype=jnp.float64)
+            base_d14c = jnp.zeros((n_obs,), dtype=jnp.float64)
+    else:
+        w_std = jnp.zeros((0,), dtype=jnp.float64)
+        c_w = jnp.zeros((0, 0), dtype=jnp.float64)
+        g_off = jnp.asarray(0.0, dtype=jnp.float64)
+        l_off = jnp.zeros((ds.n_series,), dtype=jnp.float64)
+        base_d14c = jnp.zeros((n_obs,), dtype=jnp.float64)
+
+    init_mean: jax.Array | None = None
+    init_sd: jax.Array | None = None
+    init_d14c_mean: jax.Array | None = None
+    init_d14c_sd: jax.Array | None = None
+    init_d14c = jnp.zeros((n_obs,), dtype=jnp.float64)
+
+    if eff_root_y0 is not None and u_nuis.shape[1] > n_off:
+        init_mean = eff_root_y0 @ w_std[n_off:]
+        init_d14c = op.init_state_basis @ init_mean
+
+        # Law of total covariance: conditional nuisance covariance + field-latent propagation
+        c_y0_cond = eff_root_y0 @ c_w[n_off:, n_off:] @ eff_root_y0.T
+        m_y0 = eff_root_y0 @ (c_w[n_off:, :] @ (u_nuis.T @ j_raw_at_z))
+        m_v = m_y0 @ vt_svd.T
+        shrink = jnp.square(s_vals) / (1.0 + jnp.square(s_vals))
+        cov_y0 = c_y0_cond + m_y0 @ m_y0.T - (m_v * shrink[None, :]) @ m_v.T
+        cov_y0 = 0.5 * (cov_y0 + cov_y0.T)
+        init_sd = jnp.sqrt(jnp.maximum(jnp.diag(cov_y0), 0.0))
+
+        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
+        trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
+        y_trop = jnp.sum(y_ss[trop_idx])
+        m_rel = cbm.relative_reservoir_masses()
+        scale_all_boxes = 1000.0 / (y_trop * m_rel)
+        init_d14c_mean = scale_all_boxes * init_mean
+        init_d14c_sd = scale_all_boxes * init_sd
+
+    d14c_pred = pred_no_off + base_d14c + init_d14c
+    return (
+        d14c_pred,
+        base_d14c,
+        g_off,
+        l_off,
+        init_mean,
+        init_sd,
+        init_d14c_mean,
+        init_d14c_sd,
+    )
 
 
 def _parse_spike_priors(
@@ -2056,15 +2408,18 @@ def fit_ift_field(
     operator: DCTResponseOperator | None = None,
     prehistory_kernel: Any | None = None,
     prehistory_root_y0: jax.Array | None = None,
+    include_field_initial_cov: bool = True,
 ) -> IFTFieldFitResult:
     """Fit a :class:`GaussianField` (exact Wiener) or :class:`LogGaussianField` (whitened LM).
 
     Minimizes the whitened IFT Hamiltonian ``H(d, z) = 0.5 ||r_eff(z)||^2 + 0.5 ||z||^2``
     with analytical QR marginalization over hierarchical global and per-series laboratory
-    baseline offsets ``(Delta_global, delta_{lab,s})``.
+    baseline offsets ``(Delta_global, delta_{lab,s})`` and stationary pre-history reservoir
+    state ``delta_y(t_start)`` (derived from the field's spectral kernel by default when
+    ``include_field_initial_cov=True``).
 
     * For linear :class:`GaussianField` (with ``optimize_spike=False``), computes the exact
-    closed-form SVD Wiener filter in a single pass (``n_steps = 1``).
+      closed-form SVD Wiener filter in a single pass (``n_steps = 1``).
     * For nonlinear :class:`LogGaussianField` (or joint ``MiyakeSpike`` optimization when
       ``optimize_spike=True``), runs ``optimistix.LevenbergMarquardt`` on the full vector
       residual ``[r_eff(z), z]``, typically converging to ``1e-8`` in 10–25 steps.
@@ -2079,10 +2434,13 @@ def fit_ift_field(
         q_std=model.q_std,
         alpha_unit=model.alpha_unit,
     )
-    eff_root_y0 = (
-        prehistory_root_y0
-        if prehistory_root_y0 is not None
-        else _resolve_prehistory_root_y0(model.cbm, model.alpha_unit, prehistory_kernel)
+    eff_root_y0 = _resolve_effective_prehistory_root_y0(
+        model.cbm,
+        model.alpha_unit,
+        field,
+        prehistory_root_y0=prehistory_root_y0,
+        prehistory_kernel=prehistory_kernel,
+        include_field_initial_cov=include_field_initial_cov,
     )
     x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
         ds,
@@ -2120,7 +2478,8 @@ def fit_ift_field(
         x_raw = inv_sig * (d_obs - m_base)
         j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
         x_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(x_raw, j_raw, u_nuis)
-        z_hat, s_vals, _, chi2_eff = _wiener_solve_from_svd(x_eff, j_eff)
+        z_hat, s_vals, vt_svd, chi2_eff = _wiener_solve_from_svd(x_eff, j_eff)
+        j_raw_at_z = j_raw
         converged = True
         n_steps = 1
         fitted_model = model.set(f"{field_path}.latent", z_hat)
@@ -2150,8 +2509,15 @@ def fit_ift_field(
         nuis_mean_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
         j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
         u_all = jnp.concatenate([u_nuis, j_raw], axis=1)
-        cov_marg = jnp.eye(n_obs, dtype=jnp.float64) + u_all @ u_all.T
-        chol_marg = jnp.linalg.cholesky(cov_marg)
+        k_all = int(u_all.shape[1])
+        eye_k = jnp.eye(k_all, dtype=jnp.float64)
+        aug = jnp.concatenate([u_all, eye_k], axis=0)
+        _, r_upper = jnp.linalg.qr(aug, mode="reduced")
+        signs = jnp.where(jnp.diag(r_upper) >= 0.0, 1.0, -1.0)
+        chol_k = (signs[:, None] * r_upper).T
+        l_inv_t = jsl.solve_triangular(chol_k, eye_k, lower=True).T
+        w_mat = u_all @ l_inv_t
+        p_right = jsl.solve_triangular(eye_k + l_inv_t, w_mat.T, lower=False)
 
         flat_s, flat_e, packed_specs = _pack_dataset_quadrature(model.cbm, ds)
         modal_cbm = _modal_decomposition(model.cbm.matrix_A(), cbm=model.cbm)
@@ -2181,7 +2547,7 @@ def fit_ift_field(
                 modal=modal_cbm,
             )
             r_raw = r_fixed_raw + inv_sig * sp_exc
-            r_marg = jsl.solve_triangular(chol_marg, r_raw, lower=True)
+            r_marg = r_raw - w_mat @ (p_right @ r_raw)
             sp_pen = (u_sp - sp_prior_means) / sp_prior_sds
             return jnp.concatenate([r_marg, sp_pen], axis=0)
 
@@ -2233,7 +2599,8 @@ def fit_ift_field(
         )
         x_raw_opt = -(r_fixed_raw + inv_sig * sp_exc_opt)
         x_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(x_raw_opt, j_raw, u_nuis)
-        z_hat, s_vals, _, chi2_eff = _wiener_solve_from_svd(x_eff, j_eff)
+        z_hat, s_vals, vt_svd, chi2_eff = _wiener_solve_from_svd(x_eff, j_eff)
+        j_raw_at_z = j_raw
         fitted_model = (
             model.set(f"{field_path}.latent", z_hat)
             .set(f"{sp_path}.t_start", u_sp_opt[0])
@@ -2367,6 +2734,7 @@ def fit_ift_field(
 
         r_raw_map = _r_raw_of_z(z_hat)
         j_raw_map = jax.jacfwd(_r_raw_of_z)(z_hat)
+        j_raw_at_z = j_raw_map
         r_eff_map, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
             r_raw_map, j_raw_map, u_nuis
         )
@@ -2445,31 +2813,33 @@ def fit_ift_field(
         f_exc_final = op.w_grid @ f_grid
 
     pred_no_off = op.ss_d14c + extra_exc_final + f_exc_final
-    if u_nuis.shape[1] > 0:
-        resid_for_nuis = inv_sig * (d_obs - pred_no_off - x_nuis @ mu_nuis)
-        w_std, _ = _linear_posterior_std(resid_for_nuis, u_nuis)
-        w_nuis = mu_nuis + root_nuis @ w_std
-        if offset_mode == "hierarchical":
-            has_lab = lab_offset_prior_sd > 0.0 and ds.n_series > 0
-            n_off = 1 + (ds.n_series if has_lab else 0)
-            w_off = w_nuis[:n_off]
-            g_off = w_off[0]
-            l_off = (
-                w_off[1:]
-                if has_lab
-                else jnp.zeros((ds.n_series,), dtype=jnp.float64)
-            )
-            base_d14c = x_nuis[:, :n_off] @ w_off
-        else:
-            g_off = jnp.asarray(0.0, dtype=jnp.float64)
-            l_off = jnp.zeros((ds.n_series,), dtype=jnp.float64)
-            base_d14c = jnp.zeros((n_obs,), dtype=jnp.float64)
-    else:
-        g_off = jnp.asarray(0.0, dtype=jnp.float64)
-        l_off = jnp.zeros((ds.n_series,), dtype=jnp.float64)
-        base_d14c = jnp.zeros((n_obs,), dtype=jnp.float64)
-
-    d14c_pred = pred_no_off + base_d14c
+    (
+        d14c_pred,
+        base_d14c,
+        g_off,
+        l_off,
+        init_mean,
+        init_sd,
+        init_d14c_mean,
+        init_d14c_sd,
+    ) = _reconstruct_nuisance_and_initial_state(
+        fitted_model.cbm,
+        ds,
+        op,
+        q_std=fitted_model.q_std,
+        alpha_unit=fitted_model.alpha_unit,
+        pred_no_off=pred_no_off,
+        x_nuis=x_nuis,
+        mu_nuis=mu_nuis,
+        root_nuis=root_nuis,
+        u_nuis=u_nuis,
+        eff_root_y0=eff_root_y0,
+        offset_mode=offset_mode,
+        lab_offset_prior_sd=lab_offset_prior_sd,
+        j_raw_at_z=j_raw_at_z,
+        s_vals=s_vals,
+        vt_svd=vt_svd,
+    )
     z_norm_sq = z_hat @ z_hat
     half_logdet_field = 0.5 * jnp.sum(jnp.log1p(jnp.square(s_vals)))
     ln_z = (
@@ -2504,6 +2874,11 @@ def fit_ift_field(
         n_steps=n_steps,
         prehistory_root_y0=eff_root_y0,
         prehistory_kernel=prehistory_kernel,
+        include_field_initial_cov=bool(include_field_initial_cov),
+        initial_state_mean=init_mean,
+        initial_state_sd=init_sd,
+        initial_state_d14c_mean=init_d14c_mean,
+        initial_state_d14c_sd=init_d14c_sd,
     )
 
 
@@ -2616,6 +2991,7 @@ def log_evidence(
     extra_priors: Mapping[str, Any] | None = None,
     operator: DCTResponseOperator | None = None,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool | None = None,
 ) -> jax.Array:
     r"""MacKay / ``virgil`` log-evidence ``ln Z`` of a :class:`GaussianField` or :class:`LogGaussianField`.
 
@@ -2636,7 +3012,13 @@ def log_evidence(
     ``virgil.imaging.log_evidence``.
     """
     if isinstance(model_or_result, IFTFieldFitResult):
-        if dataset is None and not extra_priors and offset_mode is None and prehistory_kernel is None:
+        if (
+            dataset is None
+            and not extra_priors
+            and offset_mode is None
+            and prehistory_kernel is None
+            and include_field_initial_cov is None
+        ):
             return model_or_result.log_evidence
         model = model_or_result.model
         eff_offset_mode: Literal["hierarchical", "none"] = (
@@ -2647,12 +3029,22 @@ def log_evidence(
         eff_op = model_or_result.operator if operator is None else operator
         global_offset_prior_sd = model_or_result.global_offset_prior_sd
         lab_offset_prior_sd = model_or_result.lab_offset_prior_sd
-        inherited_root_y0 = model_or_result.prehistory_root_y0
-        inherited_pre_kern = model_or_result.prehistory_kernel
+        eff_inc_init = (
+            model_or_result.include_field_initial_cov
+            if include_field_initial_cov is None
+            else bool(include_field_initial_cov)
+        )
+        inherited_root_y0 = (
+            None if include_field_initial_cov is False else model_or_result.prehistory_root_y0
+        )
+        inherited_pre_kern = (
+            None if include_field_initial_cov is False else model_or_result.prehistory_kernel
+        )
     elif isinstance(model_or_result, RadiocarbonModel):
         model = model_or_result
         eff_offset_mode = "hierarchical" if offset_mode is None else offset_mode
         eff_op = operator
+        eff_inc_init = True if include_field_initial_cov is None else bool(include_field_initial_cov)
         inherited_root_y0 = None
         inherited_pre_kern = None
     else:
@@ -2679,8 +3071,12 @@ def log_evidence(
     elif inherited_root_y0 is not None:
         eff_root_y0 = inherited_root_y0
     else:
-        eff_root_y0 = _resolve_prehistory_root_y0(
-            model.cbm, model.alpha_unit, inherited_pre_kern
+        eff_root_y0 = _resolve_effective_prehistory_root_y0(
+            model.cbm,
+            model.alpha_unit,
+            field,
+            prehistory_kernel=inherited_pre_kern,
+            include_field_initial_cov=eff_inc_init,
         )
     x_nuis, mu_nuis, _, u_nuis = _build_offset_whitening(
         ds,
@@ -2909,6 +3305,7 @@ def laplace_samples(
     global_offset_prior_sd: float = 200.0,
     lab_offset_prior_sd: float = 1.5,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool | None = None,
 ) -> dict[str, jax.Array]:
     r"""Draw ``z^{(m)} = z_hat + (I + J^T J)^{-1/2} eps^{(m)}`` via economy SVD.
 
@@ -2921,8 +3318,10 @@ def laplace_samples(
     * **Laplace / MGVI** local Gaussian posterior samples for :class:`LogGaussianField`.
 
     Returns a dictionary containing ``"latents"`` ``(n_samples, n_grid)``,
-    ``"delta_q"`` ``(n_samples, n_grid)``, ``"q"`` ``(n_samples, n_grid)``, and
-    ``"t_grid"`` ``(n_grid,)``.
+    ``"delta_q"`` ``(n_samples, n_grid)``, ``"q"`` ``(n_samples, n_grid)``,
+    ``"d14c_pred"`` ``(n_samples, n_obs)``, and ``"t_grid"`` ``(n_grid,)``,
+    plus ``"initial_state"`` ``(n_samples, n_boxes)`` and ``"initial_state_d14c"``
+    ``(n_samples, n_boxes)`` when initial-state covariance is active.
     """
     n_s = int(n_samples)
     if n_s < 1:
@@ -2953,21 +3352,33 @@ def laplace_samples(
         )
         global_offset_prior_sd = fit_res.global_offset_prior_sd
         lab_offset_prior_sd = fit_res.lab_offset_prior_sd
+        eff_inc_init = (
+            fit_res.include_field_initial_cov
+            if include_field_initial_cov is None
+            else bool(include_field_initial_cov)
+        )
         if prehistory_kernel is not None:
             eff_root_y0 = _resolve_prehistory_root_y0(
                 model.cbm, model.alpha_unit, prehistory_kernel
             )
+        elif include_field_initial_cov is False:
+            eff_root_y0 = None
         elif fit_res.prehistory_root_y0 is not None:
             eff_root_y0 = fit_res.prehistory_root_y0
         else:
-            eff_root_y0 = _resolve_prehistory_root_y0(
-                model.cbm, model.alpha_unit, fit_res.prehistory_kernel
+            eff_root_y0 = _resolve_effective_prehistory_root_y0(
+                model.cbm,
+                model.alpha_unit,
+                field,
+                prehistory_kernel=fit_res.prehistory_kernel,
+                include_field_initial_cov=eff_inc_init,
             )
     elif isinstance(model_or_result, RadiocarbonModel):
         if dataset is None:
             raise ValueError("dataset must be provided when sampling from a RadiocarbonModel.")
         ds = _as_dataset(dataset)
         eff_offset_mode = "hierarchical" if offset_mode is None else offset_mode
+        eff_inc_init = True if include_field_initial_cov is None else bool(include_field_initial_cov)
         fit_res = fit_ift_field(
             model_or_result,
             ds,
@@ -2975,6 +3386,7 @@ def laplace_samples(
             global_offset_prior_sd=global_offset_prior_sd,
             lab_offset_prior_sd=lab_offset_prior_sd,
             prehistory_kernel=prehistory_kernel,
+            include_field_initial_cov=eff_inc_init,
         )
         model = fit_res.model
         op = fit_res.operator
@@ -2985,7 +3397,7 @@ def laplace_samples(
             f"Expected RadiocarbonModel or IFTFieldFitResult, got {type(model_or_result)!r}."
         )
 
-    _, _, _, u_nuis = _build_offset_whitening(
+    x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
         ds,
         op.box_activity_ratios,
         offset_mode=eff_offset_mode,
@@ -2994,6 +3406,14 @@ def laplace_samples(
         prehistory_root_y0=eff_root_y0,
         init_state_basis=op.init_state_basis,
     )
+    solver = (
+        model.solver
+        if isinstance(model.solver, ExactLinearSolver)
+        else ExactLinearSolver()
+    )
+    extra_exc = _eval_extra_terms_d14c(
+        model.cbm, solver, ds, extras, model.q_std, model.alpha_unit, op.steady_unit_response
+    )
     inv_sig = 1.0 / ds.sigma_flat
     z_hat = field.latent
     n_z = field.n_grid
@@ -3001,14 +3421,6 @@ def laplace_samples(
     if isinstance(field, GaussianField):
         j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
     else:
-        solver = (
-            model.solver
-            if isinstance(model.solver, ExactLinearSolver)
-            else ExactLinearSolver()
-        )
-        extra_exc = _eval_extra_terms_d14c(
-            model.cbm, solver, ds, extras, model.q_std, model.alpha_unit, op.steady_unit_response
-        )
         j_raw = jax.jacfwd(
             lambda z_in: inv_sig
             * (
@@ -3022,7 +3434,7 @@ def laplace_samples(
     _, j_eff, _ = _whiten_vec_and_mat_qr(jnp.zeros((ds.n_obs,), dtype=jnp.float64), j_raw, u_nuis)
     _, s_vals, vt_svd = jnp.linalg.svd(j_eff, full_matrices=False)
 
-    k1, k2 = jax.random.split(key)
+    k1, k2, k3 = jax.random.split(key, 3)
     e1 = jax.random.normal(k1, (n_s, s_vals.shape[0]), dtype=jnp.float64)
     e2 = jax.random.normal(k2, (n_s, n_z), dtype=jnp.float64)
     fluct = (e1 / jnp.sqrt(1.0 + jnp.square(s_vals))[None, :]) @ vt_svd
@@ -3032,16 +3444,48 @@ def laplace_samples(
     if isinstance(field, GaussianField):
         dq_draws = jax.vmap(lambda z: field.with_latent(z).evaluate_grid())(z_draws)
         q_draws = model.q_std + dq_draws
+        f_exc_draws = (z_draws * _safe_sqrt(field.power_spectrum())[None, :]) @ op.w_dct.T
     else:
         q_draws = jax.vmap(lambda z: field.with_latent(z).evaluate_q_grid())(z_draws)
         dq_draws = q_draws - model.q_std
+        f_exc_draws = dq_draws @ op.w_grid.T
 
-    return {
+    pred_no_off_draws = op.ss_d14c[None, :] + extra_exc[None, :] + f_exc_draws
+    k_nuis = u_nuis.shape[1]
+    out: dict[str, jax.Array] = {
         "latents": z_draws,
         "delta_q": dq_draws,
         "q": q_draws,
         "t_grid": op.t_grid,
     }
+    if k_nuis > 0:
+        _, c_w = _linear_posterior_std(jnp.zeros((ds.n_obs,), dtype=jnp.float64), u_nuis)
+        l_cw = jnp.linalg.cholesky(
+            0.5 * (c_w + c_w.T) + 1e-12 * jnp.eye(k_nuis, dtype=jnp.float64)
+        )
+        nuis_shift = x_nuis @ mu_nuis
+        resid_draws = (ds.d14c_flat[None, :] - pred_no_off_draws - nuis_shift[None, :]) * inv_sig[None, :]
+        w_std_mean_draws = (resid_draws @ u_nuis) @ c_w.T
+        eps_nuis = jax.random.normal(k3, (n_s, k_nuis), dtype=jnp.float64)
+        w_std_draws = w_std_mean_draws + eps_nuis @ l_cw.T
+        w_nuis_draws = mu_nuis[None, :] + w_std_draws @ root_nuis.T
+        d14c_pred_draws = pred_no_off_draws + w_nuis_draws @ x_nuis.T
+        out["d14c_pred"] = d14c_pred_draws
+
+        has_lab = eff_offset_mode == "hierarchical" and lab_offset_prior_sd > 0.0 and ds.n_series > 0
+        n_off = (1 + (ds.n_series if has_lab else 0)) if eff_offset_mode == "hierarchical" else 0
+        if eff_root_y0 is not None and k_nuis > n_off:
+            init_draws = w_std_draws[:, n_off:] @ eff_root_y0.T
+            y_ss = model.cbm.steady_state_c14(q_std=model.q_std, alpha_unit=model.alpha_unit)
+            trop_idx = jnp.asarray(model.cbm.topology.trop_box_indices, dtype=jnp.int32)
+            y_trop = jnp.sum(y_ss[trop_idx])
+            scale_all = 1000.0 / (y_trop * model.cbm.relative_reservoir_masses())
+            out["initial_state"] = init_draws
+            out["initial_state_d14c"] = init_draws * scale_all[None, :]
+    else:
+        out["d14c_pred"] = pred_no_off_draws
+
+    return out
 
 
 def error_scale(
@@ -3053,6 +3497,7 @@ def error_scale(
     global_offset_prior_sd: float = 200.0,
     lab_offset_prior_sd: float = 1.5,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool | None = None,
     max_iter: int = 200,
     rtol: float = 1e-10,
 ) -> float | dict[str, float]:
@@ -3088,18 +3533,30 @@ def error_scale(
         eff_offset_mode = fit_res.offset_mode if offset_mode is None else offset_mode
         global_offset_prior_sd = fit_res.global_offset_prior_sd
         lab_offset_prior_sd = fit_res.lab_offset_prior_sd
+        eff_inc_init = (
+            fit_res.include_field_initial_cov
+            if include_field_initial_cov is None
+            else bool(include_field_initial_cov)
+        )
         if prehistory_kernel is not None:
             eff_root_y0 = _resolve_prehistory_root_y0(
                 model.cbm, model.alpha_unit, prehistory_kernel
             )
+        elif include_field_initial_cov is False:
+            eff_root_y0 = None
         elif fit_res.prehistory_root_y0 is not None:
             eff_root_y0 = fit_res.prehistory_root_y0
         else:
-            eff_root_y0 = _resolve_prehistory_root_y0(
-                model.cbm, model.alpha_unit, fit_res.prehistory_kernel
+            eff_root_y0 = _resolve_effective_prehistory_root_y0(
+                model.cbm,
+                model.alpha_unit,
+                field,
+                prehistory_kernel=fit_res.prehistory_kernel,
+                include_field_initial_cov=eff_inc_init,
             )
     elif isinstance(model_or_result, RadiocarbonModel):
         eff_offset_mode = "hierarchical" if offset_mode is None else offset_mode
+        eff_inc_init = True if include_field_initial_cov is None else bool(include_field_initial_cov)
         fit_mode: Literal["hierarchical", "none"] = (
             "none" if eff_offset_mode == "none" else "hierarchical"
         )
@@ -3110,6 +3567,7 @@ def error_scale(
             global_offset_prior_sd=global_offset_prior_sd,
             lab_offset_prior_sd=lab_offset_prior_sd,
             prehistory_kernel=prehistory_kernel,
+            include_field_initial_cov=eff_inc_init,
         )
         model = fit_res.model
         op = fit_res.operator
@@ -3414,6 +3872,7 @@ def evidence_grid(
     zero_mode: bool | None = None,
     q_std: float = DEFAULT_Q_STD,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool = True,
 ) -> EvidenceGridResult:
     """Evaluate the 2D ``(sigma, length_yr)`` log-evidence surface (mirroring ``virgil``).
 
@@ -3435,6 +3894,7 @@ def evidence_grid(
     root_y0 = _resolve_prehistory_root_y0(
         cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
+    dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
     solver = ExactLinearSolver()
     extras = (
         tuple(
@@ -3464,23 +3924,57 @@ def evidence_grid(
         zm = False if zero_mode is None else bool(zero_mode)
         x_raw = inv_sig * (ds.d14c_flat - op.ss_d14c - extra_exc - nuis_shift)
         w_dct_scaled = inv_sig[:, None] * op.w_dct
-        x_eff, w_dct_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw, w_dct_scaled, u_nuis
-        )
+        if dynamic_prehistory:
+            init_scaled = inv_sig[:, None] * op.init_state_basis
+            x_eff, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+                x_raw, jnp.concatenate([w_dct_scaled, init_scaled], axis=1), u_nuis
+            )
+            w_dct_eff = aug_eff[:, : op.n_grid]
+            init_eff = aug_eff[:, op.n_grid :]
+            omegas_q, dw_q = _spectral_quad_grid(0.5, n_quad=128)
+            u_res, v_res = _solve_complex_resolvents(
+                cbm.matrix_A(),
+                ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
+                omegas_q,
+            )
 
-        @jax.jit
-        def _eval_grid_linear(s_vec: jax.Array, l_vec: jax.Array) -> jax.Array:
-            def _one(s_val: jax.Array, l_val: jax.Array) -> jax.Array:
-                spec = field_spectrum(op.n_grid, op.dt, s_val, l_val, order, zero_mode=zm)
-                j_eff = w_dct_eff * _safe_sqrt(spec)[None, :]
-                ln_z, _ = _exact_linear_evidence_core(
-                    x_eff, j_eff, log_norm_d, half_logdet_nuis
-                )
-                return ln_z
+            @jax.jit
+            def _eval_grid_linear_dyn(s_vec: jax.Array, l_vec: jax.Array) -> jax.Array:
+                def _one(s_val: jax.Array, l_val: jax.Array) -> jax.Array:
+                    spec = field_spectrum(op.n_grid, op.dt, s_val, l_val, order, zero_mode=zm)
+                    kern_ij = MaternSpectrum(sigma=s_val, length_yr=l_val, order=order, zero_mode=zm)
+                    qw = _spectral_kernel_quad_weights(kern_ij, omegas_q, dw_q)
+                    sig_y0 = (u_res * qw[None, :]) @ u_res.T + (v_res * qw[None, :]) @ v_res.T
+                    r_y0 = _safe_psd_root(0.5 * (sig_y0 + sig_y0.T), jitter=1e-13)
+                    j_eff = jnp.concatenate(
+                        [w_dct_eff * _safe_sqrt(spec)[None, :], init_eff @ r_y0], axis=1
+                    )
+                    ln_z, _ = _exact_linear_evidence_core(
+                        x_eff, j_eff, log_norm_d, half_logdet_nuis
+                    )
+                    return ln_z
 
-            return jax.vmap(lambda s_v: jax.vmap(lambda l_v: _one(s_v, l_v))(l_vec))(s_vec)
+                return jax.vmap(lambda s_v: jax.vmap(lambda l_v: _one(s_v, l_v))(l_vec))(s_vec)
 
-        grid_lnz = _eval_grid_linear(sig_arr, len_arr)
+            grid_lnz = _eval_grid_linear_dyn(sig_arr, len_arr)
+        else:
+            x_eff, w_dct_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+                x_raw, w_dct_scaled, u_nuis
+            )
+
+            @jax.jit
+            def _eval_grid_linear(s_vec: jax.Array, l_vec: jax.Array) -> jax.Array:
+                def _one(s_val: jax.Array, l_val: jax.Array) -> jax.Array:
+                    spec = field_spectrum(op.n_grid, op.dt, s_val, l_val, order, zero_mode=zm)
+                    j_eff = w_dct_eff * _safe_sqrt(spec)[None, :]
+                    ln_z, _ = _exact_linear_evidence_core(
+                        x_eff, j_eff, log_norm_d, half_logdet_nuis
+                    )
+                    return ln_z
+
+                return jax.vmap(lambda s_v: jax.vmap(lambda l_v: _one(s_v, l_v))(l_vec))(s_vec)
+
+            grid_lnz = _eval_grid_linear(sig_arr, len_arr)
     elif field_kind == "log_gaussian":
         zm = True if zero_mode is None else bool(zero_mode)
         rows_out: list[jax.Array] = []
@@ -3508,6 +4002,7 @@ def evidence_grid(
                     max_steps=35,
                     prehistory_kernel=prehistory_kernel,
                     prehistory_root_y0=root_y0,
+                    include_field_initial_cov=include_field_initial_cov,
                 )
                 z_warm = res_ij.latent
                 row_vals.append(res_ij.log_evidence)
@@ -3555,6 +4050,7 @@ def evidence_grid(
         operator=op,
         prehistory_kernel=prehistory_kernel,
         prehistory_root_y0=root_y0,
+        include_field_initial_cov=include_field_initial_cov,
     )
 
     return EvidenceGridResult(
@@ -3774,6 +4270,7 @@ def _preoptimize_extra_production(
     optimize_spike: bool = False,
     spike_priors: Mapping[str, Any] | None = None,
     prehistory_root_y0: jax.Array | None = None,
+    include_field_initial_cov: bool = True,
 ) -> tuple[ProductionTerm, jax.Array, jax.Array | None, float]:
     """Extract linear unit-fluence response for any ``MiyakeSpike`` in ``extra_production``.
 
@@ -3821,6 +4318,7 @@ def _preoptimize_extra_production(
             spike_priors=spike_priors,
             operator=op,
             prehistory_root_y0=prehistory_root_y0,
+            include_field_initial_cov=include_field_initial_cov,
         )
         _, _, extras_init = _extract_field_and_extras(fit_ref.model.production)
 
@@ -3889,6 +4387,38 @@ def _gram_neg_log_evidence(
     return 0.5 * quad + log_norm_d + half_logdet_nuis + half_logdet
 
 
+def _gram_neg_log_evidence_with_init(
+    amp: jax.Array,
+    root_y0: jax.Array,
+    fl: jax.Array,
+    gram_ext: jax.Array,
+    wt_x_base: jax.Array,
+    x_base_sq: jax.Array,
+    wt_sp: jax.Array,
+    x_dot_sp: jax.Array,
+    sp_sq: jax.Array,
+    log_norm_d: jax.Array,
+    half_logdet_nuis: jax.Array,
+) -> jax.Array:
+    """Shared ``O((n_grid + n_boxes)^3)`` Woodbury negative log-evidence with dynamic ``Sigma_{y,0}(phi)``."""
+    n_g = amp.shape[0]
+    n_b = root_y0.shape[1]
+    wt_x = wt_x_base - fl * wt_sp
+    x_sq = x_base_sq - 2.0 * fl * x_dot_sp + (fl * fl) * sp_sq
+    g_dd = (amp[:, None] * gram_ext[:n_g, :n_g]) * amp[None, :]
+    g_di = amp[:, None] * (gram_ext[:n_g, n_g:] @ root_y0)
+    g_ii = root_y0.T @ gram_ext[n_g:, n_g:] @ root_y0
+    c_mat = jnp.eye(n_g + n_b, dtype=jnp.float64) + jnp.block(
+        [[g_dd, g_di], [g_di.T, g_ii]]
+    )
+    chol = jnp.linalg.cholesky(0.5 * (c_mat + c_mat.T))
+    rhs = jnp.concatenate([amp * wt_x[:n_g], root_y0.T @ wt_x[n_g:]], axis=0)
+    w_sol = jsl.solve_triangular(chol, rhs, lower=True)
+    quad = jnp.maximum(x_sq - (w_sol @ w_sol), 0.0)
+    half_logdet = jnp.sum(jnp.log(jnp.diag(chol)))
+    return 0.5 * quad + log_norm_d + half_logdet_nuis + half_logdet
+
+
 def _custom_kernel_cache_tag(kernel_obj: SpectralKernel) -> str:
     """Deterministic recursive JIT cache tag for any custom :class:`SpectralKernel`."""
     if isinstance(kernel_obj, MaternSpectrum):
@@ -3939,52 +4469,105 @@ def _get_cached_gram_grad_fn(
     n_g: int,
     dt: float,
     has_spike_amp: bool,
+    *,
+    dynamic_prehistory: bool = False,
 ) -> tuple[Any, Any]:
     """Return module-cached ``@jax.jit`` ``(value_and_grad_fn, hess_fn)`` for ``cache_key``."""
     cached = _SPEC_JIT_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    def _loss_u(
-        u_vec: jax.Array,
-        sp_prior_mu: jax.Array,
-        sp_prior_sd: jax.Array,
-        gram_dct: jax.Array,
-        wt_x_base: jax.Array,
-        x_base_sq: jax.Array,
-        wt_sp: jax.Array,
-        x_dot_sp: jax.Array,
-        sp_sq: jax.Array,
-        log_norm_d: jax.Array,
-        half_logdet_nuis: jax.Array,
-    ) -> jax.Array:
-        u_like = jnp.clip(u_vec, -20.0, 20.0)
-        phi_like = u_like[:n_k]
-        amp = _safe_sqrt(build_kernel_fn(phi_like).spectrum(n_g, dt))
-        if has_spike_amp:
-            fl = _safe_exp_hyper(u_like[n_k])
-            lp_sp = _normal_logpdf(u_vec[n_k], sp_prior_mu, sp_prior_sd)
-        else:
-            fl = jnp.asarray(0.0, dtype=jnp.float64)
-            lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
-        nll = _gram_neg_log_evidence(
-            amp,
-            fl,
-            gram_dct,
-            wt_x_base,
-            x_base_sq,
-            wt_sp,
-            x_dot_sp,
-            sp_sq,
-            log_norm_d,
-            half_logdet_nuis,
-        )
-        return nll - (prior_fn(u_vec[:n_k]) + lp_sp)
+    if not dynamic_prehistory:
+        def _loss_u(
+            u_vec: jax.Array,
+            sp_prior_mu: jax.Array,
+            sp_prior_sd: jax.Array,
+            gram_dct: jax.Array,
+            wt_x_base: jax.Array,
+            x_base_sq: jax.Array,
+            wt_sp: jax.Array,
+            x_dot_sp: jax.Array,
+            sp_sq: jax.Array,
+            log_norm_d: jax.Array,
+            half_logdet_nuis: jax.Array,
+        ) -> jax.Array:
+            u_like = jnp.clip(u_vec, -20.0, 20.0)
+            phi_like = u_like[:n_k]
+            amp = _safe_sqrt(build_kernel_fn(phi_like).spectrum(n_g, dt))
+            if has_spike_amp:
+                fl = _safe_exp_hyper(u_like[n_k])
+                lp_sp = _normal_logpdf(u_vec[n_k], sp_prior_mu, sp_prior_sd)
+            else:
+                fl = jnp.asarray(0.0, dtype=jnp.float64)
+                lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
+            nll = _gram_neg_log_evidence(
+                amp,
+                fl,
+                gram_dct,
+                wt_x_base,
+                x_base_sq,
+                wt_sp,
+                x_dot_sp,
+                sp_sq,
+                log_norm_d,
+                half_logdet_nuis,
+            )
+            return nll - (prior_fn(u_vec[:n_k]) + lp_sp)
 
-    pair = (
-        jax.jit(jax.value_and_grad(_loss_u, argnums=0)),
-        jax.jit(jax.hessian(_loss_u, argnums=0)),
-    )
+        pair = (
+            jax.jit(jax.value_and_grad(_loss_u, argnums=0)),
+            jax.jit(jax.hessian(_loss_u, argnums=0)),
+        )
+    else:
+        def _loss_u_dyn(
+            u_vec: jax.Array,
+            sp_prior_mu: jax.Array,
+            sp_prior_sd: jax.Array,
+            gram_ext: jax.Array,
+            wt_x_base: jax.Array,
+            x_base_sq: jax.Array,
+            wt_sp: jax.Array,
+            x_dot_sp: jax.Array,
+            sp_sq: jax.Array,
+            log_norm_d: jax.Array,
+            half_logdet_nuis: jax.Array,
+            omegas_q: jax.Array,
+            dw_q: jax.Array,
+            u_res: jax.Array,
+            v_res: jax.Array,
+        ) -> jax.Array:
+            u_like = jnp.clip(u_vec, -20.0, 20.0)
+            phi_like = u_like[:n_k]
+            kern_u = build_kernel_fn(phi_like)
+            amp = _safe_sqrt(kern_u.spectrum(n_g, dt))
+            qw = _spectral_kernel_quad_weights(kern_u, omegas_q, dw_q)
+            sig_y0 = (u_res * qw[None, :]) @ u_res.T + (v_res * qw[None, :]) @ v_res.T
+            root_y0 = _safe_psd_root(0.5 * (sig_y0 + sig_y0.T), jitter=1e-13)
+            if has_spike_amp:
+                fl = _safe_exp_hyper(u_like[n_k])
+                lp_sp = _normal_logpdf(u_vec[n_k], sp_prior_mu, sp_prior_sd)
+            else:
+                fl = jnp.asarray(0.0, dtype=jnp.float64)
+                lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
+            nll = _gram_neg_log_evidence_with_init(
+                amp,
+                root_y0,
+                fl,
+                gram_ext,
+                wt_x_base,
+                x_base_sq,
+                wt_sp,
+                x_dot_sp,
+                sp_sq,
+                log_norm_d,
+                half_logdet_nuis,
+            )
+            return nll - (prior_fn(u_vec[:n_k]) + lp_sp)
+
+        pair = (
+            jax.jit(jax.value_and_grad(_loss_u_dyn, argnums=0)),
+            jax.jit(jax.hessian(_loss_u_dyn, argnums=0)),
+        )
     _SPEC_JIT_CACHE[cache_key] = pair
     return pair
 
@@ -4041,10 +4624,14 @@ def _optimize_single_kernel_precomputed(
     rng_key: jax.Array,
     prehistory_root_y0: jax.Array | None = None,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool = True,
+    init_eff: jax.Array | None = None,
+    pre_resolvents: tuple[jax.Array, jax.Array, jax.Array, jax.Array] | None = None,
 ) -> OptimizedKernelResult:
     """Optimize ``phi`` (and optional spike log-fluence) via multi-start BFGS."""
     n_k = int(phi0.shape[0])
     has_spike_amp = unit_spike_eff is not None
+    dynamic_prehistory = init_eff is not None and pre_resolvents is not None
     sp_prior_mu = jnp.asarray(float(spike_log_fluence_prior[0]), dtype=jnp.float64)
     sp_prior_sd = jnp.asarray(float(spike_log_fluence_prior[1]), dtype=jnp.float64)
     if has_spike_amp:
@@ -4063,18 +4650,37 @@ def _optimize_single_kernel_precomputed(
 
     if field_kind == "gaussian":
         n_g = op.n_grid
-        gram_dct = w_dct_eff.T @ w_dct_eff
-        wt_x_base = w_dct_eff.T @ x_eff_base
-        x_base_sq = x_eff_base @ x_eff_base
-        if has_spike_amp:
-            assert unit_spike_eff is not None
-            wt_sp = w_dct_eff.T @ unit_spike_eff
-            x_dot_sp = x_eff_base @ unit_spike_eff
-            sp_sq = unit_spike_eff @ unit_spike_eff
+        if dynamic_prehistory:
+            assert init_eff is not None and pre_resolvents is not None
+            omegas_q, dw_q, u_res, v_res = pre_resolvents
+            w_ext_eff = jnp.concatenate([w_dct_eff, init_eff], axis=1)
+            gram_mat = w_ext_eff.T @ w_ext_eff
+            wt_x_base = w_ext_eff.T @ x_eff_base
+            x_base_sq = x_eff_base @ x_eff_base
+            if has_spike_amp:
+                assert unit_spike_eff is not None
+                wt_sp = w_ext_eff.T @ unit_spike_eff
+                x_dot_sp = x_eff_base @ unit_spike_eff
+                sp_sq = unit_spike_eff @ unit_spike_eff
+            else:
+                wt_sp = jnp.zeros((w_ext_eff.shape[1],), dtype=jnp.float64)
+                x_dot_sp = jnp.asarray(0.0, dtype=jnp.float64)
+                sp_sq = jnp.asarray(0.0, dtype=jnp.float64)
+            n_b_key = int(init_eff.shape[1])
         else:
-            wt_sp = jnp.zeros((n_g,), dtype=jnp.float64)
-            x_dot_sp = jnp.asarray(0.0, dtype=jnp.float64)
-            sp_sq = jnp.asarray(0.0, dtype=jnp.float64)
+            gram_mat = w_dct_eff.T @ w_dct_eff
+            wt_x_base = w_dct_eff.T @ x_eff_base
+            x_base_sq = x_eff_base @ x_eff_base
+            if has_spike_amp:
+                assert unit_spike_eff is not None
+                wt_sp = w_dct_eff.T @ unit_spike_eff
+                x_dot_sp = x_eff_base @ unit_spike_eff
+                sp_sq = unit_spike_eff @ unit_spike_eff
+            else:
+                wt_sp = jnp.zeros((n_g,), dtype=jnp.float64)
+                x_dot_sp = jnp.asarray(0.0, dtype=jnp.float64)
+                sp_sq = jnp.asarray(0.0, dtype=jnp.float64)
+            n_b_key = 0
 
         cache_key = (
             cache_tag,
@@ -4082,25 +4688,54 @@ def _optimize_single_kernel_precomputed(
             round(float(op.dt), 11),
             bool(has_spike_amp),
             n_k,
+            n_b_key,
         )
         jit_vg, jit_hess = _get_cached_gram_grad_fn(
-            cache_key, build_kernel_fn, prior_fn, n_k, n_g, op.dt, has_spike_amp
+            cache_key,
+            build_kernel_fn,
+            prior_fn,
+            n_k,
+            n_g,
+            op.dt,
+            has_spike_amp,
+            dynamic_prehistory=dynamic_prehistory,
         )
 
         def _obj_and_grad_np(u_np: np.ndarray) -> tuple[float, np.ndarray]:
-            val_j, g_u = jit_vg(
-                jnp.asarray(u_np, dtype=jnp.float64),
-                sp_prior_mu,
-                sp_prior_sd,
-                gram_dct,
-                wt_x_base,
-                x_base_sq,
-                wt_sp,
-                x_dot_sp,
-                sp_sq,
-                log_norm_d,
-                half_logdet_nuis,
-            )
+            u_j = jnp.asarray(u_np, dtype=jnp.float64)
+            if dynamic_prehistory:
+                assert pre_resolvents is not None
+                val_j, g_u = jit_vg(
+                    u_j,
+                    sp_prior_mu,
+                    sp_prior_sd,
+                    gram_mat,
+                    wt_x_base,
+                    x_base_sq,
+                    wt_sp,
+                    x_dot_sp,
+                    sp_sq,
+                    log_norm_d,
+                    half_logdet_nuis,
+                    pre_resolvents[0],
+                    pre_resolvents[1],
+                    pre_resolvents[2],
+                    pre_resolvents[3],
+                )
+            else:
+                val_j, g_u = jit_vg(
+                    u_j,
+                    sp_prior_mu,
+                    sp_prior_sd,
+                    gram_mat,
+                    wt_x_base,
+                    x_base_sq,
+                    wt_sp,
+                    x_dot_sp,
+                    sp_sq,
+                    log_norm_d,
+                    half_logdet_nuis,
+                )
             total_val = float(val_j)
             grad_arr = np.asarray(g_u, dtype=np.float64)
             if not (math.isfinite(total_val) and np.all(np.isfinite(grad_arr))):
@@ -4139,117 +4774,79 @@ def _optimize_single_kernel_precomputed(
                 converged = conv_s
 
         u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
-        hess_all = jit_hess(
-            u_opt,
-            sp_prior_mu,
-            sp_prior_sd,
-            gram_dct,
-            wt_x_base,
-            x_base_sq,
-            wt_sp,
-            x_dot_sp,
-            sp_sq,
-            log_norm_d,
-            half_logdet_nuis,
-        )
+        if dynamic_prehistory:
+            assert pre_resolvents is not None
+            hess_all = jit_hess(
+                u_opt,
+                sp_prior_mu,
+                sp_prior_sd,
+                gram_mat,
+                wt_x_base,
+                x_base_sq,
+                wt_sp,
+                x_dot_sp,
+                sp_sq,
+                log_norm_d,
+                half_logdet_nuis,
+                pre_resolvents[0],
+                pre_resolvents[1],
+                pre_resolvents[2],
+                pre_resolvents[3],
+            )
+        else:
+            hess_all = jit_hess(
+                u_opt,
+                sp_prior_mu,
+                sp_prior_sd,
+                gram_mat,
+                wt_x_base,
+                x_base_sq,
+                wt_sp,
+                x_dot_sp,
+                sp_sq,
+                log_norm_d,
+                half_logdet_nuis,
+            )
         phi_opt = u_opt[:n_k]
         kern_opt = build_kernel_fn(phi_opt)
 
         if has_spike_amp:
             fl_opt = _safe_exp_hyper(u_opt[n_k])
             final_extra = _update_extra_spike_fluence(updated_extra, fl_opt)
-            assert unit_spike_eff is not None and unit_sp_raw is not None
-            x_eff_final = x_eff_base - fl_opt * unit_spike_eff
-            extra_exc_final = fixed_exc + fl_opt * unit_sp_raw
         else:
             final_extra = updated_extra
-            x_eff_final = x_eff_base
-            extra_exc_final = fixed_exc
 
-        # Fast closed-form Wiener reconstruction without re-running ODE solves
-        spec_opt = kern_opt.spectrum(op.n_grid, op.dt)
-        amp_opt = _safe_sqrt(spec_opt)
-        j_eff_opt = w_dct_eff * amp_opt[None, :]
-        z_hat, s_vals, _, chi2_eff = _wiener_solve_from_svd(x_eff_final, j_eff_opt)
-
-        gf = GaussianField(
-            z_hat,
+        gf_init = GaussianField(
+            jnp.zeros((op.n_grid,), dtype=jnp.float64),
             op.t_start,
             op.t_end,
             kernel=kern_opt,
             zero_mode=getattr(kern_opt, "zero_mode", False),
         )
-        prod_final = gf if final_extra is None else (final_extra + gf)
-        fitted_model = RadiocarbonModel(cbm, prod_final, ExactLinearSolver(), q_std=q_std)
-        f_grid = gf.evaluate_grid()
-        q_grid = q_std + f_grid
-        f_exc_final = op.w_dct @ (amp_opt * z_hat)
-        pred_no_off = op.ss_d14c + extra_exc_final + f_exc_final
-        inv_sig = 1.0 / ds.sigma_flat
-
-        if u_nuis.shape[1] > 0:
-            resid_nuis = inv_sig * (ds.d14c_flat - pred_no_off - x_nuis @ mu_nuis)
-            w_std, _ = _linear_posterior_std(resid_nuis, u_nuis)
-            w_nuis = mu_nuis + root_nuis @ w_std
-            if offset_mode == "hierarchical":
-                n_off = 1 + (ds.n_series if ds.n_series > 0 else 0)
-                w_off = w_nuis[:n_off]
-                g_off = w_off[0]
-                l_off = (
-                    w_off[1:]
-                    if ds.n_series > 0
-                    else jnp.zeros((0,), dtype=jnp.float64)
-                )
-                base_d14c = x_nuis[:, :n_off] @ w_off
-            else:
-                g_off = jnp.asarray(0.0, dtype=jnp.float64)
-                l_off = jnp.zeros((ds.n_series,), dtype=jnp.float64)
-                base_d14c = jnp.zeros((ds.n_obs,), dtype=jnp.float64)
-        else:
-            g_off = jnp.asarray(0.0, dtype=jnp.float64)
-            l_off = jnp.zeros((ds.n_series,), dtype=jnp.float64)
-            base_d14c = jnp.zeros((ds.n_obs,), dtype=jnp.float64)
-
-        z_norm_sq = z_hat @ z_hat
-        half_logdet_field = 0.5 * jnp.sum(jnp.log1p(jnp.square(s_vals)))
-        ln_z_val = (
-            -0.5 * chi2_eff
-            - 0.5 * z_norm_sq
-            - log_norm_d
-            - half_logdet_nuis
-            - half_logdet_field
-        )
-        gamma_val = jnp.sum(jnp.square(s_vals) / (1.0 + jnp.square(s_vals)))
-        fit_res = IFTFieldFitResult(
-            model=fitted_model,
-            latent=z_hat,
-            field_grid=f_grid,
-            q_grid=q_grid,
-            t_grid=op.t_grid,
-            d14c_pred=pred_no_off + base_d14c,
-            baseline_d14c=base_d14c,
-            global_offset=g_off,
-            lab_offsets=l_off,
-            chi2=chi2_eff,
-            latent_norm_sq=z_norm_sq,
-            log_evidence=ln_z_val,
-            gamma=gamma_val,
-            operator=op,
+        prod_final = gf_init if final_extra is None else (final_extra + gf_init)
+        fit_res = fit_ift_field(
+            RadiocarbonModel(cbm, prod_final, ExactLinearSolver(), q_std=q_std),
+            ds,
             offset_mode=offset_mode,
-            global_offset_prior_sd=200.0,
-            lab_offset_prior_sd=1.5,
-            converged=converged,
-            n_steps=1,
-            prehistory_root_y0=prehistory_root_y0,
+            operator=op,
             prehistory_kernel=prehistory_kernel,
+            prehistory_root_y0=prehistory_root_y0,
+            include_field_initial_cov=include_field_initial_cov,
         )
+        ln_z_val = fit_res.log_evidence
+        gamma_val = fit_res.gamma
     else:
         n_g = op.n_grid
         eye_g = jnp.eye(n_g, dtype=jnp.float64)
 
-        def _amp_and_target(u_vec: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        def _amp_and_target(
+            u_vec: jax.Array,
+        ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
             u_like = jnp.clip(u_vec, -20.0, 20.0)
-            amp = _safe_sqrt(build_kernel_fn(u_like[:n_k]).spectrum(n_g, op.dt))
+            kern_u = build_kernel_fn(u_like[:n_k])
+            spec = kern_u.spectrum(n_g, op.dt)
+            amp = _safe_sqrt(spec)
+            ito_shift = -0.5 * dct_knot_variance(spec)
             if has_spike_amp:
                 assert unit_spike_eff is not None
                 fl = _safe_exp_hyper(u_like[n_k])
@@ -4258,20 +4855,41 @@ def _optimize_single_kernel_precomputed(
             else:
                 x_t = x_eff_base
                 lp_s = jnp.asarray(0.0, dtype=jnp.float64)
-            return amp, x_t, prior_fn(u_vec[:n_k]) + lp_s
+            if dynamic_prehistory:
+                assert init_eff is not None and pre_resolvents is not None
+                om_q, dw_q_arr, u_r, v_r = pre_resolvents
+                v_scale = _log_gaussian_variance_scale(kern_u, q_std)
+                qw = _spectral_kernel_quad_weights(
+                    kern_u, om_q, dw_q_arr, variance_scale=v_scale
+                )
+                sig_y0 = (u_r * qw[None, :]) @ u_r.T + (v_r * qw[None, :]) @ v_r.T
+                r_y0 = _safe_psd_root(0.5 * (sig_y0 + sig_y0.T), jitter=1e-13)
+                u_init = init_eff @ r_y0
+                x_t, wg_eff_u, half_ld_init = _whiten_vec_and_mat_qr(x_t, w_grid_eff, u_init)
+                half_ld_tot = half_logdet_nuis + half_ld_init
+            else:
+                wg_eff_u = w_grid_eff
+                half_ld_tot = half_logdet_nuis
+            return amp, ito_shift, x_t, wg_eff_u, half_ld_tot, prior_fn(u_vec[:n_k]) + lp_s
 
-        def _ham_z(z_in: jax.Array, amp: jax.Array, x_t: jax.Array) -> jax.Array:
-            q = q_std * jnp.exp(jnp.clip(idct2(amp * z_in), -30.0, 30.0))
-            r_e = w_grid_eff @ (q - q_std) - x_t
+        def _ham_z(
+            z_in: jax.Array,
+            amp: jax.Array,
+            ito_shift: jax.Array,
+            x_t: jax.Array,
+            wg_eff_u: jax.Array,
+        ) -> jax.Array:
+            q = q_std * jnp.exp(jnp.clip(idct2(amp * z_in) + ito_shift, -30.0, 30.0))
+            r_e = wg_eff_u @ (q - q_std) - x_t
             return 0.5 * (r_e @ r_e) + 0.5 * (z_in @ z_in)
 
         @jax.jit
         def _solve_inner_z(u_vec: jax.Array, z_init: jax.Array) -> jax.Array:
-            amp, x_t, _ = _amp_and_target(u_vec)
+            amp, ito_shift, x_t, wg_eff_u, _, _ = _amp_and_target(u_vec)
 
             def _res_z(z_in: jax.Array, _: Any) -> jax.Array:
-                q = q_std * jnp.exp(jnp.clip(idct2(amp * z_in), -30.0, 30.0))
-                return jnp.concatenate([w_grid_eff @ (q - q_std) - x_t, z_in], axis=0)
+                q = q_std * jnp.exp(jnp.clip(idct2(amp * z_in) + ito_shift, -30.0, 30.0))
+                return jnp.concatenate([wg_eff_u @ (q - q_std) - x_t, z_in], axis=0)
 
             sol_z = optx.least_squares(
                 _res_z,
@@ -4282,39 +4900,38 @@ def _optimize_single_kernel_precomputed(
             )
             z_c = sol_z.value
             for _ in range(2):
-                g_z = jax.grad(_ham_z, argnums=0)(z_c, amp, x_t)
-                k_zz = 0.5 * (
-                    jax.hessian(_ham_z, argnums=0)(z_c, amp, x_t)
-                    + jax.hessian(_ham_z, argnums=0)(z_c, amp, x_t).T
-                )
+                g_z = jax.grad(_ham_z, argnums=0)(z_c, amp, ito_shift, x_t, wg_eff_u)
+                k_zz = jax.hessian(_ham_z, argnums=0)(z_c, amp, ito_shift, x_t, wg_eff_u)
+                k_zz = 0.5 * (k_zz + k_zz.T)
                 min_ev = jnp.min(jnp.linalg.eigvalsh(k_zz))
                 damp = jnp.where(min_ev > 1e-8, 0.0, 1e-6 - min_ev)
                 z_step = z_c - jnp.linalg.solve(k_zz + damp * eye_g, g_z)
                 z_c = jnp.where(
-                    _ham_z(z_step, amp, x_t) <= _ham_z(z_c, amp, x_t) + 1e-12,
+                    _ham_z(z_step, amp, ito_shift, x_t, wg_eff_u)
+                    <= _ham_z(z_c, amp, ito_shift, x_t, wg_eff_u) + 1e-12,
                     z_step,
                     z_c,
                 )
             return z_c
 
         def _implicit_laplace_loss(u_vec: jax.Array, z_anchor: jax.Array) -> jax.Array:
-            amp, x_t, lp_tot = _amp_and_target(u_vec)
+            amp, ito_shift, x_t, wg_eff_u, half_ld_tot, lp_tot = _amp_and_target(u_vec)
             z_c = z_anchor
             for _ in range(2):
-                g_z = jax.grad(_ham_z, argnums=0)(z_c, amp, x_t)
-                k_zz = jax.hessian(_ham_z, argnums=0)(z_c, amp, x_t)
+                g_z = jax.grad(_ham_z, argnums=0)(z_c, amp, ito_shift, x_t, wg_eff_u)
+                k_zz = jax.hessian(_ham_z, argnums=0)(z_c, amp, ito_shift, x_t, wg_eff_u)
                 k_zz = 0.5 * (k_zz + k_zz.T)
                 z_c = z_c - jnp.linalg.solve(k_zz, g_z)
-            q = q_std * jnp.exp(jnp.clip(idct2(amp * z_c), -30.0, 30.0))
-            r_e = w_grid_eff @ (q - q_std) - x_t
-            j_e = dct2(w_grid_eff * q[None, :], axis=1) * amp[None, :]
+            q = q_std * jnp.exp(jnp.clip(idct2(amp * z_c) + ito_shift, -30.0, 30.0))
+            r_e = wg_eff_u @ (q - q_std) - x_t
+            j_e = dct2(wg_eff_u * q[None, :], axis=1) * amp[None, :]
             chol = jnp.linalg.cholesky(eye_g + j_e.T @ j_e)
             half_ld = jnp.sum(jnp.log(jnp.diag(chol)))
             ln_z_lap = (
                 -0.5 * (r_e @ r_e)
                 - 0.5 * (z_c @ z_c)
                 - log_norm_d
-                - half_logdet_nuis
+                - half_ld_tot
                 - half_ld
             )
             return -(ln_z_lap + lp_tot)
@@ -4395,6 +5012,7 @@ def _optimize_single_kernel_precomputed(
             tol=1e-10,
             prehistory_kernel=prehistory_kernel,
             prehistory_root_y0=prehistory_root_y0,
+            include_field_initial_cov=include_field_initial_cov,
         )
         ln_z_val = fit_res.log_evidence
         gamma_val = fit_res.gamma
@@ -4457,6 +5075,7 @@ def optimize_gp_kernel(
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool = True,
     multi_start: int = 3,
     n_grid: int = 128,
     pad_years: float = 15.0,
@@ -4492,6 +5111,7 @@ def optimize_gp_kernel(
     root_y0 = _resolve_prehistory_root_y0(
         cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
+    dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
     eff_fluence_prior = spike_log_fluence_prior
     if (
         spike_priors is not None
@@ -4512,6 +5132,7 @@ def optimize_gp_kernel(
             optimize_spike=optimize_spike,
             spike_priors=spike_priors,
             prehistory_root_y0=root_y0,
+            include_field_initial_cov=include_field_initial_cov,
         )
     else:
         upd_extra = None
@@ -4535,25 +5156,33 @@ def optimize_gp_kernel(
     w_dct_scaled = inv_sig[:, None] * op.w_dct
     w_grid_scaled = inv_sig[:, None] * op.w_grid
     n_g = op.n_grid
+    n_b = op.init_state_basis.shape[1]
 
+    blocks_to_whiten = [w_dct_scaled, w_grid_scaled]
+    if dynamic_prehistory:
+        blocks_to_whiten.append(inv_sig[:, None] * op.init_state_basis)
     if unit_sp is not None:
-        aug_mat = jnp.concatenate(
-            [w_dct_scaled, w_grid_scaled, (inv_sig * unit_sp)[:, None]], axis=1
+        blocks_to_whiten.append((inv_sig * unit_sp)[:, None])
+    aug_mat = jnp.concatenate(blocks_to_whiten, axis=1)
+    x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+        x_raw_base, aug_mat, u_nuis
+    )
+    w_dct_eff = aug_eff[:, :n_g]
+    w_grid_eff = aug_eff[:, n_g : 2 * n_g]
+    cursor_eff = 2 * n_g
+    init_eff: jax.Array | None = None
+    pre_resolvents: tuple[jax.Array, jax.Array, jax.Array, jax.Array] | None = None
+    if dynamic_prehistory:
+        init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
+        cursor_eff += n_b
+        om_q, dw_q = _spectral_quad_grid(0.5, n_quad=128)
+        u_r, v_r = _solve_complex_resolvents(
+            cbm.matrix_A(),
+            ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
+            om_q,
         )
-        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, aug_mat, u_nuis
-        )
-        w_dct_eff = aug_eff[:, :n_g]
-        w_grid_eff = aug_eff[:, n_g : 2 * n_g]
-        unit_sp_eff: jax.Array | None = aug_eff[:, -1]
-    else:
-        aug_mat = jnp.concatenate([w_dct_scaled, w_grid_scaled], axis=1)
-        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, aug_mat, u_nuis
-        )
-        w_dct_eff = aug_eff[:, :n_g]
-        w_grid_eff = aug_eff[:, n_g:]
-        unit_sp_eff = None
+        pre_resolvents = (om_q, dw_q, u_r, v_r)
+    unit_sp_eff: jax.Array | None = aug_eff[:, cursor_eff] if unit_sp is not None else None
 
     return _optimize_single_kernel_precomputed(
         label=label,
@@ -4586,6 +5215,9 @@ def optimize_gp_kernel(
         rng_key=key,
         prehistory_root_y0=root_y0,
         prehistory_kernel=prehistory_kernel,
+        include_field_initial_cov=include_field_initial_cov,
+        init_eff=init_eff,
+        pre_resolvents=pre_resolvents,
     )
 
 
@@ -4660,6 +5292,7 @@ def select_gp_kernel(
     hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None = None,
     spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
     prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool = True,
     multi_start: int = 3,
     n_grid: int = 128,
     pad_years: float = 15.0,
@@ -4701,6 +5334,7 @@ def select_gp_kernel(
     root_y0 = _resolve_prehistory_root_y0(
         cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
     )
+    dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
     eff_fluence_prior = spike_log_fluence_prior
     if (
         spike_priors is not None
@@ -4721,6 +5355,7 @@ def select_gp_kernel(
             optimize_spike=optimize_spike,
             spike_priors=spike_priors,
             prehistory_root_y0=root_y0,
+            include_field_initial_cov=include_field_initial_cov,
         )
     else:
         upd_extra = None
@@ -4744,25 +5379,33 @@ def select_gp_kernel(
     w_dct_scaled = inv_sig[:, None] * op.w_dct
     w_grid_scaled = inv_sig[:, None] * op.w_grid
     n_g = op.n_grid
+    n_b = op.init_state_basis.shape[1]
 
+    blocks_to_whiten = [w_dct_scaled, w_grid_scaled]
+    if dynamic_prehistory:
+        blocks_to_whiten.append(inv_sig[:, None] * op.init_state_basis)
     if unit_sp is not None:
-        aug_mat = jnp.concatenate(
-            [w_dct_scaled, w_grid_scaled, (inv_sig * unit_sp)[:, None]], axis=1
+        blocks_to_whiten.append((inv_sig * unit_sp)[:, None])
+    aug_mat = jnp.concatenate(blocks_to_whiten, axis=1)
+    x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+        x_raw_base, aug_mat, u_nuis
+    )
+    w_dct_eff = aug_eff[:, :n_g]
+    w_grid_eff = aug_eff[:, n_g : 2 * n_g]
+    cursor_eff = 2 * n_g
+    init_eff: jax.Array | None = None
+    pre_resolvents: tuple[jax.Array, jax.Array, jax.Array, jax.Array] | None = None
+    if dynamic_prehistory:
+        init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
+        cursor_eff += n_b
+        om_q, dw_q = _spectral_quad_grid(0.5, n_quad=128)
+        u_r, v_r = _solve_complex_resolvents(
+            cbm.matrix_A(),
+            ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
+            om_q,
         )
-        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, aug_mat, u_nuis
-        )
-        w_dct_eff = aug_eff[:, :n_g]
-        w_grid_eff = aug_eff[:, n_g : 2 * n_g]
-        unit_sp_eff: jax.Array | None = aug_eff[:, -1]
-    else:
-        aug_mat = jnp.concatenate([w_dct_scaled, w_grid_scaled], axis=1)
-        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, aug_mat, u_nuis
-        )
-        w_dct_eff = aug_eff[:, :n_g]
-        w_grid_eff = aug_eff[:, n_g:]
-        unit_sp_eff = None
+        pre_resolvents = (om_q, dw_q, u_r, v_r)
+    unit_sp_eff: jax.Array | None = aug_eff[:, cursor_eff] if unit_sp is not None else None
 
     subkeys = jax.random.split(key, len(cand_items) + 1)
     sample_key = subkeys[-1]
@@ -4814,6 +5457,9 @@ def select_gp_kernel(
             rng_key=subkeys[idx],
             prehistory_root_y0=root_y0,
             prehistory_kernel=prehistory_kernel,
+            include_field_initial_cov=include_field_initial_cov,
+            init_eff=init_eff,
+            pre_resolvents=pre_resolvents,
         )
         results.append(res_k)
 

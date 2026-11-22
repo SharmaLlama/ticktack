@@ -44,6 +44,7 @@ from .data import Dataset
 from .fields import (
     GaussianField,
     LogGaussianField,
+    _field_prehistory_root_y0,
     _safe_sqrt,
     build_dct_response_operator,
     idct2,
@@ -420,6 +421,7 @@ class LinearMarginalConfig(eqx.Module):
     marginalise_field: bool = eqx.field(static=True)
     n_gp_modes: int | None = eqx.field(static=True)
     include_gp_initial_cov: bool = eqx.field(static=True)
+    include_field_initial_cov: bool = eqx.field(static=True)
     whiten_method: str = eqx.field(static=True)
 
     def __init__(
@@ -443,6 +445,7 @@ class LinearMarginalConfig(eqx.Module):
         marginalize_field: bool | None = None,
         n_gp_modes: int | None = None,
         include_gp_initial_cov: bool = True,
+        include_field_initial_cov: bool = True,
         whiten_method: Literal["cholesky", "qr", "rank_one"] = "cholesky",
     ) -> None:
         valid_offset_modes = ("hierarchical", "per_series", "shared", "none")
@@ -482,6 +485,7 @@ class LinearMarginalConfig(eqx.Module):
         self.marginalise_field = bool(eff_field)
         self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
+        self.include_field_initial_cov = bool(include_field_initial_cov)
         self.whiten_method = str(whiten_method)
 
     @property
@@ -645,8 +649,15 @@ def _build_marginal_design_with_projections(
     model: RadiocarbonModel,
     dataset: Dataset,
     cfg: LinearMarginalConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array, list[CausalGPProjection]]:
-    """Build ``(X, prior_mean, prior_sd, gp_projections)`` for all marginalized linear terms."""
+) -> tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    list[CausalGPProjection],
+    list[jax.Array | None],
+    list[tuple[slice, jax.Array]],
+]:
+    """Build ``(X, prior_mean, prior_sd, gp_projections, field_init_roots, init_state_blocks)``."""
     cbm = model.cbm
     A = cbm.matrix_A()
     b = cbm.production_vector()
@@ -776,6 +787,7 @@ def _build_marginal_design_with_projections(
         psd_parts.append(jnp.array([cfg.trend_prior_sd], dtype=jnp.float64))
 
     # 4. Marginalized GPProduction causal Solin-Särkkä columns (dataset-wide!)
+    init_state_blocks: list[tuple[slice, jax.Array]] = []
     if gp_terms:
         for gp in gp_terms:
             proj = _project_single_gp_dataset(
@@ -795,11 +807,21 @@ def _build_marginal_design_with_projections(
             assert proj.whitened_design is not None
             H_gp = proj.whitened_design
             r_total = H_gp.shape[1]
+            r_modes = proj.omegas.shape[0]
+            col_start = sum(c.shape[1] for c in design_cols)
             design_cols.append(H_gp)
             pmean_parts.append(jnp.zeros((r_total,), dtype=jnp.float64))
             psd_parts.append(jnp.ones((r_total,), dtype=jnp.float64))
+            if r_total > r_modes and proj.anchor_cov_root is not None:
+                init_state_blocks.append(
+                    (
+                        slice(col_start + r_modes, col_start + r_total),
+                        proj.anchor_cov_root,
+                    )
+                )
 
     # 5. Marginalized GaussianField reflecting-boundary DCT-II columns
+    field_init_roots: list[jax.Array | None] = []
     if field_terms and n_tot > 0:
         for gf in field_terms:
             op_gf = build_dct_response_operator(
@@ -816,6 +838,20 @@ def _build_marginal_design_with_projections(
             design_cols.append(H_gf)
             pmean_parts.append(jnp.zeros((gf.n_grid,), dtype=jnp.float64))
             psd_parts.append(jnp.ones((gf.n_grid,), dtype=jnp.float64))
+            if cfg.include_field_initial_cov:
+                root_y0_gf = _field_prehistory_root_y0(cbm, model.alpha_unit, gf)
+                H_init = op_gf.init_state_basis @ root_y0_gf
+                m_rank = H_init.shape[1]
+                init_start = sum(c.shape[1] for c in design_cols)
+                design_cols.append(H_init)
+                pmean_parts.append(jnp.zeros((m_rank,), dtype=jnp.float64))
+                psd_parts.append(jnp.ones((m_rank,), dtype=jnp.float64))
+                init_state_blocks.append(
+                    (slice(init_start, init_start + m_rank), root_y0_gf)
+                )
+                field_init_roots.append(root_y0_gf)
+            else:
+                field_init_roots.append(None)
 
     if design_cols:
         X = jnp.concatenate(design_cols, axis=1)
@@ -826,7 +862,7 @@ def _build_marginal_design_with_projections(
         pm = jnp.zeros((0,), dtype=jnp.float64)
         ps = jnp.zeros((0,), dtype=jnp.float64)
 
-    return X, pm, ps, gp_projs
+    return X, pm, ps, gp_projs, field_init_roots, init_state_blocks
 
 
 def _build_marginal_design(
@@ -835,7 +871,7 @@ def _build_marginal_design(
     cfg: LinearMarginalConfig,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Build ``(X, prior_mean, prior_sd)`` for all marginalized linear terms."""
-    X, pm, ps, _ = _build_marginal_design_with_projections(model, dataset, cfg)
+    X, pm, ps, _, _, _ = _build_marginal_design_with_projections(model, dataset, cfg)
     return X, pm, ps
 
 
@@ -1371,6 +1407,7 @@ def _laplace_marginal_log_likelihood_lgf(
         marginalise_field=False,
         n_gp_modes=cfg.n_gp_modes,
         include_gp_initial_cov=cfg.include_gp_initial_cov,
+        include_field_initial_cov=False,
         whiten_method=cfg.whiten_method,
     )
     model_no_lgf = RadiocarbonModel(
@@ -1382,11 +1419,6 @@ def _laplace_marginal_log_likelihood_lgf(
     )
     resid_base = _nonlinear_residual(model_no_lgf, dataset, cfg_no_field)
     X_o, pm_o, ps_o = _build_marginal_design(model_no_lgf, dataset, cfg_no_field)
-    lm_o = LinearMarginal(X_o, prior_mean=pm_o, prior_sd=ps_o, method=cfg.whiten_method)
-    shift_c, inv_sig, w_mat, p_right, const_n = _prefactor_static_whiten(lm_o, sigma)
-
-    x_arr = (resid_base - shift_c) * inv_sig
-    x_target = x_arr - w_mat @ (p_right @ x_arr)
     op_lgf = build_dct_response_operator(
         model.cbm,
         dataset,
@@ -1396,6 +1428,18 @@ def _laplace_marginal_log_likelihood_lgf(
         q_std=model.q_std,
         alpha_unit=model.alpha_unit,
     )
+    if cfg.include_field_initial_cov:
+        root_y0_lgf = _field_prehistory_root_y0(model.cbm, model.alpha_unit, lgf)
+        H_init_lgf = op_lgf.init_state_basis @ root_y0_lgf
+        m_rank = H_init_lgf.shape[1]
+        X_o = jnp.concatenate([X_o, H_init_lgf], axis=1)
+        pm_o = jnp.concatenate([pm_o, jnp.zeros((m_rank,), dtype=jnp.float64)], axis=0)
+        ps_o = jnp.concatenate([ps_o, jnp.ones((m_rank,), dtype=jnp.float64)], axis=0)
+    lm_o = LinearMarginal(X_o, prior_mean=pm_o, prior_sd=ps_o, method=cfg.whiten_method)
+    shift_c, inv_sig, w_mat, p_right, const_n = _prefactor_static_whiten(lm_o, sigma)
+
+    x_arr = (resid_base - shift_c) * inv_sig
+    x_target = x_arr - w_mat @ (p_right @ x_arr)
     wg_scaled = inv_sig[:, None] * op_lgf.w_grid
     w_grid_eff = wg_scaled - w_mat @ (p_right @ wg_scaled)
 
@@ -1627,6 +1671,18 @@ class LinearPosteriorResult(NamedTuple):
     coeff_draws: jax.Array | None = None
     """Joint conditional Gaussian coefficient draws ``(n_draws, k_total)``, or ``None``."""
 
+    initial_state_mean: jax.Array | None = None
+    """Posterior mean of initial reservoir perturbation ``delta_y(t_0)`` (``14C kg``), shape ``(n_boxes,)``."""
+
+    initial_state_sd: jax.Array | None = None
+    """Exact marginal posterior SD of ``delta_y(t_0)`` (``14C kg``), shape ``(n_boxes,)``."""
+
+    initial_state_d14c_mean: jax.Array | None = None
+    """Posterior mean of initial reservoir ``Delta14C(t_0)`` perturbation (‰), shape ``(n_boxes,)``."""
+
+    initial_state_d14c_sd: jax.Array | None = None
+    """Exact marginal posterior SD of initial reservoir ``Delta14C(t_0)`` (‰), shape ``(n_boxes,)``."""
+
 
 def _offset_column_count(cfg: LinearMarginalConfig, n_series: int) -> int:
     if cfg.offset_mode == "hierarchical":
@@ -1654,8 +1710,8 @@ def _linear_posterior_impl(
         sigma = jnp.sqrt(jnp.square(sigma) + jnp.square(sigma_jitter_arr))
 
     resid = _nonlinear_residual(model, dataset, cfg)
-    X, prior_mean, prior_sd, gp_projs = _build_marginal_design_with_projections(
-        model, dataset, cfg
+    X, prior_mean, prior_sd, gp_projs, field_init_roots, init_state_blocks = (
+        _build_marginal_design_with_projections(model, dataset, cfg)
     )
 
     lm = LinearMarginal(
@@ -1666,6 +1722,41 @@ def _linear_posterior_impl(
     )
     coeff_mean, coeff_cov = lm.posterior(resid, sigma)
     ring_pred_mean = dataset.d14c_flat - resid + X @ coeff_mean
+
+    # --- Reconstruct initial-state posterior vector (delta_y(t_0) across all boxes) ---
+    initial_state_mean: jax.Array | None = None
+    initial_state_sd: jax.Array | None = None
+    initial_state_d14c_mean: jax.Array | None = None
+    initial_state_d14c_sd: jax.Array | None = None
+    if init_state_blocks:
+        if len(init_state_blocks) == 1:
+            anc_slice, anc_root = init_state_blocks[0]
+            initial_state_mean = anc_root @ coeff_mean[anc_slice]
+            cov_y0 = anc_root @ coeff_cov[anc_slice, anc_slice] @ anc_root.T
+        else:
+            idx_anc = jnp.concatenate(
+                [
+                    jnp.arange(sl.start, sl.stop, dtype=jnp.int32)
+                    for sl, _ in init_state_blocks
+                ]
+            )
+            anc_root_all = jnp.concatenate([r for _, r in init_state_blocks], axis=1)
+            initial_state_mean = anc_root_all @ coeff_mean[idx_anc]
+            cov_y0 = anc_root_all @ coeff_cov[jnp.ix_(idx_anc, idx_anc)] @ anc_root_all.T
+        cov_y0 = 0.5 * (cov_y0 + cov_y0.T)
+        initial_state_sd = jnp.sqrt(jnp.maximum(jnp.diag(cov_y0), 0.0))
+
+        y_ss_init = model.cbm.steady_state_c14(
+            q_std=model.q_std, alpha_unit=model.alpha_unit
+        )
+        trop_idx_init = jnp.asarray(
+            model.cbm.topology.trop_box_indices, dtype=jnp.int32
+        )
+        y_trop_init = jnp.sum(y_ss_init[trop_idx_init])
+        m_rel_init = model.cbm.relative_reservoir_masses()
+        scale_all_boxes = 1000.0 / (y_trop_init * m_rel_init)
+        initial_state_d14c_mean = scale_all_boxes * initial_state_mean
+        initial_state_d14c_sd = scale_all_boxes * initial_state_sd
 
     # --- Reconstruct offsets ---
     n_series = dataset.n_series
@@ -1880,7 +1971,8 @@ def _linear_posterior_impl(
             phi_d14c_cols.append(phi_d14c_gp)
 
         # 5. Marginalized GaussianField columns
-        for gf in field_terms:
+        modal_fine_gf = _modal_decomposition(A, cbm=cbm) if field_terms else None
+        for gf, root_y0_gf in zip(field_terms, field_init_roots):
             n_g = gf.n_grid
             amp_gf = _safe_sqrt(gf.power_spectrum())
             b_knots = idct2(jnp.eye(n_g, dtype=jnp.float64), axis=0) * amp_gf[None, :]
@@ -1910,6 +2002,26 @@ def _linear_posterior_impl(
 
             phi_d14c_gf = jax.jacfwd(_gf_d14c_of_z)(jnp.zeros((n_g,), dtype=jnp.float64))
             phi_d14c_cols.append(phi_d14c_gf)
+
+            if root_y0_gf is not None:
+                m_rank = root_y0_gf.shape[1]
+                phi_q_cols.append(jnp.zeros((n_fine, m_rank), dtype=jnp.float64))
+                dt_start = jnp.maximum(t_fine_arr - gf.t_start, 0.0)
+                if modal_fine_gf is not None:
+                    lam_f, v_eig_f, v_inv_f = modal_fine_gf
+                    expm_tstart_row = jnp.real(
+                        (
+                            v_eig_f[target_box, :][None, :]
+                            * jnp.exp(dt_start[:, None] * lam_f[None, :])
+                        )
+                        @ v_inv_f
+                    )
+                else:
+                    expm_tstart_row = jax.vmap(
+                        lambda dt: jax.scipy.linalg.expm(A * dt)[target_box]
+                    )(dt_start)
+                phi_d14c_init = scale_box * (expm_tstart_row @ root_y0_gf)
+                phi_d14c_cols.append(phi_d14c_init)
 
         if phi_q_cols:
             phi_q = jnp.concatenate(phi_q_cols, axis=1)
@@ -1950,6 +2062,10 @@ def _linear_posterior_impl(
         d14c_fine_std=d14c_fine_std,
         ring_pred_mean=ring_pred_mean,
         coeff_draws=coeff_draws,
+        initial_state_mean=initial_state_mean,
+        initial_state_sd=initial_state_sd,
+        initial_state_d14c_mean=initial_state_d14c_mean,
+        initial_state_d14c_sd=initial_state_d14c_sd,
     )
 
 
