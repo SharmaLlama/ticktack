@@ -3,7 +3,9 @@
 Every plotting function in this module is strictly stateless:
 - Never mutates ``matplotlib.rcParams`` or global styles.
 - Never relies on ``plt.gca()`` / ``plt.gcf()`` implicit state.
-- Accepts optional caller-supplied ``Axes`` and always returns ``(fig, axes)``.
+- Standard single/pair-panel helpers accept optional caller-supplied ``Axes`` and
+  return ``(fig, axes)``; multi-grid composite diagnostics such as
+  :func:`plot_ringdown_comparison` return ``Figure`` directly.
 """
 
 from __future__ import annotations
@@ -2418,6 +2420,14 @@ class RingdownDiagnosticResult(eqx.Module):
     rms_post_subspace: float = eqx.field(static=True)
     excitation_ratio_subspace: float = eqx.field(static=True)
 
+    # Conditional-mean-only RMS excursions and direct between-model post-spike shift
+    rms_pre_mean_m0: float = eqx.field(static=True)
+    rms_post_mean_m0: float = eqx.field(static=True)
+    rms_pre_mean_subspace: float = eqx.field(static=True)
+    rms_post_mean_subspace: float = eqx.field(static=True)
+    rms_post_diff: float = eqx.field(static=True)
+    max_abs_diff_post: float = eqx.field(static=True)
+
     chi2_m0: float = eqx.field(static=True)
     chi2_per_n_m0: float = eqx.field(static=True)
     chi2_subspace: float = eqx.field(static=True)
@@ -2440,13 +2450,20 @@ class RingdownDiagnosticResult(eqx.Module):
 
     @property
     def rms_post_reduction(self) -> float:
-        """Factor by which post-spike background RMS drops from ``m = 0`` to ``SubspaceCBM``."""
+        """Ratio ``rms_post_m0 / rms_post_subspace`` of posterior realization RMS (``> 1`` when ``SubspaceCBM`` reduces post-spike variance)."""
         return _safe_ratio(self.rms_post_m0, self.rms_post_subspace)
 
     @property
     def excitation_ratio_reduction(self) -> float:
-        """Factor by which the post/pre excitation ratio drops from ``m = 0`` to ``SubspaceCBM``."""
+        """Ratio ``excitation_ratio_m0 / excitation_ratio_subspace`` (``> 1`` when ``SubspaceCBM`` reduces excess post/pre excitation)."""
         return _safe_ratio(self.excitation_ratio_m0, self.excitation_ratio_subspace)
+
+    @property
+    def rmse_post_reduction(self) -> float | None:
+        """Ratio ``rmse_post_m0 / rmse_post_subspace`` against ``q_true_fine`` (``None`` when truth is absent)."""
+        if self.rmse_post_m0 is None or self.rmse_post_subspace is None:
+            return None
+        return _safe_ratio(self.rmse_post_m0, self.rmse_post_subspace)
 
     def format_summary(self) -> str:
         """Return a concise Markdown comparison table of ringdown metrics."""
@@ -2454,9 +2471,10 @@ class RingdownDiagnosticResult(eqx.Module):
             f"| Metric | {self.label_m0} | {self.label_subspace} |",
             "| :--- | :---: | :---: |",
             f"| Raw $\\chi^2 / N$ ($N = {self.n_obs}$) | `{self.chi2_per_n_m0:.2f}` | `{self.chi2_per_n_subspace:.2f}` |",
-            f"| Pre-spike RMS excursion ({self.pre_window[0]:g}–{self.pre_window[1]:g}) | `{self.rms_pre_m0:.3g}` | `{self.rms_pre_subspace:.3g}` |",
-            f"| Post-spike RMS excursion ({self.post_window[0]:g}–{self.post_window[1]:g}) | `{self.rms_post_m0:.3g}` | `{self.rms_post_subspace:.3g}` |",
+            f"| Pre-spike posterior RMS ({self.pre_window[0]:g}–{self.pre_window[1]:g}) | `{self.rms_pre_m0:.3g}` | `{self.rms_pre_subspace:.3g}` |",
+            f"| Post-spike posterior RMS ({self.post_window[0]:g}–{self.post_window[1]:g}) | `{self.rms_post_m0:.3g}` | `{self.rms_post_subspace:.3g}` |",
             f"| Excitation ratio $\\mathrm{{RMS}}_{{\\mathrm{{post}}}} / \\mathrm{{RMS}}_{{\\mathrm{{pre}}}}$ | `{self.excitation_ratio_m0:.2f}` | `{self.excitation_ratio_subspace:.2f}` |",
+            f"| Between-model post-spike $\\mathrm{{RMS}}(Q_{{m=0}} - Q_{{\\mathrm{{sub}}}})$ | `{self.rms_post_diff:.3g}` | (max `{self.max_abs_diff_post:.3g}`) |",
         ]
         if self.rmse_post_m0 is not None and self.rmse_post_subspace is not None:
             lines.extend(
@@ -2469,6 +2487,53 @@ class RingdownDiagnosticResult(eqx.Module):
         return "\n".join(lines)
 
 
+def _infer_default_ringdown_windows(
+    t_lo_grid: float,
+    t_hi_grid: float,
+    spike_win: tuple[float, float] | None,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Infer epoch-agnostic ``(pre_window, post_window)`` from spike and grid span."""
+    if spike_win is None:
+        raise ValueError(
+            "pre_window and post_window must be specified explicitly when neither "
+            "model contains a MiyakeSpike."
+        )
+    sp_lo, sp_hi = float(spike_win[0]), float(spike_win[1])
+    pre_hi = sp_lo - 1.0 if (sp_lo - 1.0) > t_lo_grid else sp_lo
+    if not (pre_hi > t_lo_grid):
+        raise ValueError(
+            f"Cannot infer a non-empty pre_window before spike onset {sp_lo:.2f} "
+            f"within t_fine [{t_lo_grid:.2f}, {t_hi_grid:.2f}]; pass pre_window explicitly."
+        )
+    pre_win = (t_lo_grid, pre_hi)
+
+    post_lo = max(sp_hi, sp_lo + 0.5)
+    if post_lo >= t_hi_grid:
+        post_lo = sp_hi
+    post_hi = min(post_lo + 17.0, t_hi_grid)
+    if not (post_hi > post_lo):
+        raise ValueError(
+            f"Cannot infer a non-empty post_window after spike end {sp_hi:.2f} "
+            f"within t_fine [{t_lo_grid:.2f}, {t_hi_grid:.2f}]; pass post_window explicitly."
+        )
+    post_win = (post_lo, post_hi)
+    return pre_win, post_win
+
+
+def _collect_field_spans(production: ProductionTerm) -> list[tuple[float, float]]:
+    """Collect ``(t_start, t_end)`` spans of any ``GaussianField`` terms."""
+    from .fields import GaussianField
+
+    if isinstance(production, GaussianField):
+        return [(float(production.t_start), float(production.t_end))]
+    if isinstance(production, ProductionSum):
+        spans: list[tuple[float, float]] = []
+        for part in production.parts:
+            spans.extend(_collect_field_spans(part))
+        return spans
+    return []
+
+
 def ringdown_diagnostic(
     model_m0: RadiocarbonModel,
     model_subspace: RadiocarbonModel,
@@ -2476,14 +2541,15 @@ def ringdown_diagnostic(
     marginal_config_m0: LinearMarginalConfig | None = None,
     marginal_config_subspace: LinearMarginalConfig | None = None,
     *,
-    pre_window: tuple[float, float] = (760.0, 773.0),
-    post_window: tuple[float, float] = (775.0, 792.0),
+    pre_window: tuple[float, float] | None = None,
+    post_window: tuple[float, float] | None = None,
     t_fine: Any | None = None,
     n_draws: int = 100,
     rng_key: Any | None = None,
     q_true_fine: Any | None = None,
     q_baseline: float | None = None,
     subspace_models: Sequence[RadiocarbonModel] | None = None,
+    subspace_weights: Any | None = None,
     label_m0: str | None = None,
     label_subspace: str | None = None,
 ) -> RingdownDiagnosticResult:
@@ -2494,8 +2560,11 @@ def ringdown_diagnostic(
     :class:`~ticktack.production.MiyakeSpike` contribution so ``q_field(t)`` isolates
     the background cosmic-ray production field, and computes:
 
-    * Pre-spike and post-spike RMS background excursions around the steady baseline
-      ``q_baseline`` together with the excitation ratio ``rms_post / rms_pre``;
+    * Pre-spike and post-spike posterior realization RMS excursions
+      ``sqrt(mean((Q_hat(t) - Q_0)^2 + sigma_Q(t)^2))`` (whose stationary prior
+      expectation equals ``sigma_GP`` regardless of observational coverage gaps)
+      together with ``excitation_ratio = rms_post / rms_pre``, conditional-mean RMS
+      values, and the direct between-model post-spike shift ``rms_post_diff``;
     * Raw ``chi2`` and ``chi2_per_n`` (``chi^2 / N``) and per-observation z-score
       residuals ``(d - m_pred) / sigma`` on the quoted, unrescaled ``dataset.sigma_flat``;
     * Optional synthetic-truth errors (``rmse_pre``, ``rmse_post``, ``max_abs_err_post``)
@@ -2512,14 +2581,20 @@ def ringdown_diagnostic(
     marginal_config_m0 : LinearMarginalConfig, optional
         Marginalization configuration for ``model_m0`` (defaults to ``LinearMarginalConfig()``).
     marginal_config_subspace : LinearMarginalConfig, optional
-        Marginalization configuration for ``model_subspace`` (defaults to ``marginal_config_m0``).
-    pre_window : tuple[float, float], default (760.0, 773.0)
-        Pre-spike reference window ``(t_lo, t_hi)`` in astronomical CE.
-    post_window : tuple[float, float], default (775.0, 792.0)
+        Marginalization configuration for ``model_subspace``. When ``None``, inherits
+        ``marginal_config_m0`` with any fixed-CBM :class:`~ticktack.fields.DCTResponseOperator`
+        stripped so ``model_subspace`` never reuses ``model_m0``'s response matrix.
+    pre_window : tuple[float, float], optional
+        Pre-spike reference window ``(t_lo, t_hi)`` in astronomical CE. When ``None``,
+        inferred cleanly before the detected :class:`~ticktack.production.MiyakeSpike`
+        within the dataset span.
+    post_window : tuple[float, float], optional
         Post-spike ringdown evaluation window ``(t_lo, t_hi)`` in astronomical CE.
+        When ``None``, inferred cleanly after the detected spike (up to ``17 yr``)
+        within the dataset span.
     t_fine : array-like, optional
         Fine evaluation grid in astronomical CE. If ``None``, constructed at
-        ``~0.1 yr`` spacing spanning ``dataset``, ``pre_window``, and ``post_window``.
+        ``~0.1 yr`` spacing spanning ``dataset`` alone.
     n_draws : int, default 100
         Number of correlated posterior background draws per model (``0`` disables draws).
     rng_key : jax.Array, optional
@@ -2531,9 +2606,12 @@ def ringdown_diagnostic(
         Baseline steady production rate subtracted before computing RMS excursions
         (defaults to ``model_m0``'s steady production rate / ``q_std``).
     subspace_models : sequence of RadiocarbonModel, optional
-        Optional ensemble of posterior ``SubspaceCBM`` models (e.g. thinned NUTS draws)
-        over which ``q_field_subspace_mean`` and ``q_field_subspace_std`` are
-        marginalized via the Law of Total Variance.
+        Optional ensemble of posterior ``SubspaceCBM`` models (e.g. NUTS or IS-weighted
+        draws) over which ``q_field_subspace_mean``, ``q_field_subspace_std``, and
+        ``q_field_subspace_draws`` are marginalized via the Law of Total Variance.
+    subspace_weights : array-like, optional
+        Optional non-negative importance weights matching ``subspace_models`` (normalized
+        internally; defaults to uniform weights).
     label_m0, label_subspace : str, optional
         Display labels stored on the returned :class:`RingdownDiagnosticResult`.
 
@@ -2542,49 +2620,84 @@ def ringdown_diagnostic(
     RingdownDiagnosticResult
         Frozen PyTree containing reconstructed trajectories, residuals, and summary metrics.
     """
+    from .fields import DCTResponseOperator
+
     if dataset.n_obs <= 0:
         raise ValueError("dataset must contain at least one observation.")
-
-    pre_lo, pre_hi = float(pre_window[0]), float(pre_window[1])
-    post_lo, post_hi = float(post_window[0]), float(post_window[1])
-    if not (pre_hi > pre_lo):
-        raise ValueError(f"pre_window must satisfy t_hi > t_lo, got {pre_window!r}.")
-    if not (post_hi > post_lo):
-        raise ValueError(f"post_window must satisfy t_hi > t_lo, got {post_window!r}.")
 
     n_draws_int = int(n_draws)
     if n_draws_int < 0:
         raise ValueError(f"n_draws must be >= 0, got {n_draws!r}.")
 
     cfg_m0 = LinearMarginalConfig() if marginal_config_m0 is None else marginal_config_m0
-    cfg_sub = cfg_m0 if marginal_config_subspace is None else marginal_config_subspace
+    if marginal_config_subspace is None:
+        if cfg_m0.dct_operator is not None and isinstance(
+            cfg_m0.dct_operator, DCTResponseOperator
+        ):
+            cfg_sub = eqx.tree_at(lambda c: c.dct_operator, cfg_m0, None)
+        else:
+            cfg_sub = cfg_m0
+    else:
+        cfg_sub = marginal_config_subspace
 
     if t_fine is None:
         ds_lo = min(float(np.min(s.t_starts)) for s in dataset.series)
         ds_hi = max(float(np.max(s.t_ends)) for s in dataset.series)
-        t_lo = min(ds_lo, pre_lo, post_lo)
-        t_hi = max(ds_hi, pre_hi, post_hi)
-        n_pts = max(201, int(round((t_hi - t_lo) * 10.0)) + 1)
-        t_fine_np = np.linspace(t_lo, t_hi, n_pts, dtype=np.float64)
+        n_pts = max(201, int(round((ds_hi - ds_lo) * 10.0)) + 1)
+        t_fine_np = np.linspace(ds_lo, ds_hi, n_pts, dtype=np.float64)
     else:
         t_fine_np = np.asarray(t_fine, dtype=np.float64).reshape(-1)
         if t_fine_np.size < 2:
             raise ValueError("t_fine must contain at least 2 points.")
 
     t_fine_arr = jnp.asarray(t_fine_np, dtype=jnp.float64)
+    t_lo_grid = float(np.min(t_fine_np))
+    t_hi_grid = float(np.max(t_fine_np))
+
+    spike_win = _infer_spike_window(model_subspace.production) or _infer_spike_window(
+        model_m0.production
+    )
+    if pre_window is None or post_window is None:
+        inferred_pre, inferred_post = _infer_default_ringdown_windows(
+            t_lo_grid, t_hi_grid, spike_win
+        )
+        eff_pre = inferred_pre if pre_window is None else pre_window
+        eff_post = inferred_post if post_window is None else post_window
+    else:
+        eff_pre = pre_window
+        eff_post = post_window
+
+    pre_lo, pre_hi = float(eff_pre[0]), float(eff_pre[1])
+    post_lo, post_hi = float(eff_post[0]), float(eff_post[1])
+    if not (pre_hi > pre_lo):
+        raise ValueError(f"pre_window must satisfy t_hi > t_lo, got {eff_pre!r}.")
+    if not (post_hi > post_lo):
+        raise ValueError(f"post_window must satisfy t_hi > t_lo, got {eff_post!r}.")
 
     pre_mask = (t_fine_np >= pre_lo) & (t_fine_np <= pre_hi)
     post_mask = (t_fine_np >= post_lo) & (t_fine_np <= post_hi)
     if not np.any(pre_mask):
         raise ValueError(
-            f"pre_window={pre_window!r} contains no points in t_fine "
-            f"[{float(t_fine_np[0]):.2f}, {float(t_fine_np[-1]):.2f}]."
+            f"pre_window={eff_pre!r} contains no points in t_fine "
+            f"[{t_lo_grid:.2f}, {t_hi_grid:.2f}]."
         )
     if not np.any(post_mask):
         raise ValueError(
-            f"post_window={post_window!r} contains no points in t_fine "
-            f"[{float(t_fine_np[0]):.2f}, {float(t_fine_np[-1]):.2f}]."
+            f"post_window={eff_post!r} contains no points in t_fine "
+            f"[{t_lo_grid:.2f}, {t_hi_grid:.2f}]."
         )
+
+    for gf_lo, gf_hi in _collect_field_spans(model_m0.production) + _collect_field_spans(
+        model_subspace.production
+    ):
+        if pre_hi < gf_lo or pre_lo > gf_hi:
+            raise ValueError(
+                f"pre_window={eff_pre!r} lies outside GaussianField domain [{gf_lo:.2f}, {gf_hi:.2f}]."
+            )
+        if post_hi < gf_lo or post_lo > gf_hi:
+            raise ValueError(
+                f"post_window={eff_post!r} lies outside GaussianField domain [{gf_lo:.2f}, {gf_hi:.2f}]."
+            )
 
     q_true_np: np.ndarray | None = None
     q_true_arr: jax.Array | None = None
@@ -2629,28 +2742,56 @@ def ringdown_diagnostic(
     )
     ring_pred_m0 = lp_m0.ring_pred_mean
 
-    # 2. Joint SubspaceCBM(m) linear posterior (single model or ensemble average)
+    # 2. Joint SubspaceCBM(m) linear posterior (single model or weighted ensemble)
     if subspace_models is not None and len(subspace_models) > 0:
         n_ens = len(subspace_models)
-        draws_per_member = (
-            max(1, int(math.ceil(n_draws_int / n_ens))) if n_draws_int > 0 else 0
-        )
-        ens_keys = (
-            jax.random.split(key_sub, n_ens)
-            if (draws_per_member > 0 and key_sub is not None)
-            else [None] * n_ens
-        )
+        if subspace_weights is None:
+            w_norm = np.full((n_ens,), 1.0 / n_ens, dtype=np.float64)
+        else:
+            w_raw = np.asarray(subspace_weights, dtype=np.float64).reshape(-1)
+            if w_raw.shape != (n_ens,):
+                raise ValueError(
+                    f"subspace_weights length {w_raw.size} does not match "
+                    f"len(subspace_models)={n_ens}."
+                )
+            if not np.all(np.isfinite(w_raw)) or np.any(w_raw < 0.0):
+                raise ValueError("subspace_weights must be finite and non-negative.")
+            w_sum = float(np.sum(w_raw))
+            if not (w_sum > 0.0):
+                raise ValueError("subspace_weights must have a strictly positive sum.")
+            w_norm = w_raw / w_sum
+
+        if n_draws_int > 0 and key_sub is not None:
+            key_idx, key_draw = jax.random.split(key_sub)
+            member_indices = np.asarray(
+                jax.random.choice(
+                    key_idx,
+                    n_ens,
+                    shape=(n_draws_int,),
+                    replace=True,
+                    p=jnp.asarray(w_norm, dtype=jnp.float64),
+                ),
+                dtype=np.int64,
+            )
+            counts_per_member = np.bincount(member_indices, minlength=n_ens)
+            ens_keys = jax.random.split(key_draw, n_ens)
+        else:
+            member_indices = np.zeros((0,), dtype=np.int64)
+            counts_per_member = np.zeros((n_ens,), dtype=np.int64)
+            ens_keys = [None] * n_ens
+
         bg_means: list[np.ndarray] = []
         bg_vars: list[np.ndarray] = []
-        bg_draws_list: list[np.ndarray] = []
+        member_draws: list[np.ndarray | None] = []
         ring_preds: list[np.ndarray] = []
-        for m_s, k_s in zip(subspace_models, ens_keys):
+        for idx_m, (m_s, k_s) in enumerate(zip(subspace_models, ens_keys)):
+            c_m = int(counts_per_member[idx_m])
             lp_s = linear_posterior(
                 m_s,
                 dataset,
                 cfg_sub,
-                rng_key=k_s,
-                n_draws=draws_per_member,
+                rng_key=(k_s if c_m > 0 else None),
+                n_draws=c_m,
                 t_fine=t_fine_arr,
             )
             assert lp_s.q_fine_mean is not None
@@ -2660,28 +2801,48 @@ def ringdown_diagnostic(
             bg_means.append(np.asarray(lp_s.q_fine_mean - sp_s, dtype=np.float64))
             bg_vars.append(np.asarray(lp_s.q_fine_std, dtype=np.float64) ** 2)
             ring_preds.append(np.asarray(lp_s.ring_pred_mean, dtype=np.float64))
-            if lp_s.q_fine_draws is not None:
-                bg_draws_list.append(
+            if c_m > 0 and lp_s.q_fine_draws is not None:
+                member_draws.append(
                     np.asarray(lp_s.q_fine_draws - sp_s[None, :], dtype=np.float64)
                 )
+            else:
+                member_draws.append(None)
+
         bg_means_arr = np.stack(bg_means, axis=0)
         bg_vars_arr = np.stack(bg_vars, axis=0)
-        q_sub_mean_np = np.mean(bg_means_arr, axis=0)
-        # Law of Total Variance: Var[Q] = E[Var[Q | theta]] + Var[E[Q | theta]]
-        ddof_ens = 1 if n_ens > 1 else 0
-        q_sub_var_np = np.mean(bg_vars_arr, axis=0) + np.var(
-            bg_means_arr, axis=0, ddof=ddof_ens
+        # Weighted Law of Total Expectation & Law of Total Variance:
+        # Var[Q] = E_w[Var[Q | theta]] + Var_w[E[Q | theta]]
+        q_sub_mean_np = np.sum(w_norm[:, None] * bg_means_arr, axis=0)
+        mean_cond_var = np.sum(w_norm[:, None] * bg_vars_arr, axis=0)
+        between_var = np.sum(
+            w_norm[:, None] * (bg_means_arr - q_sub_mean_np[None, :]) ** 2, axis=0
         )
+        q_sub_var_np = mean_cond_var + between_var
         q_sub_mean = jnp.asarray(q_sub_mean_np, dtype=jnp.float64)
-        q_sub_std = jnp.asarray(np.sqrt(np.maximum(q_sub_var_np, 0.0)), dtype=jnp.float64)
-        ring_pred_sub = jnp.asarray(np.mean(np.stack(ring_preds, axis=0), axis=0), dtype=jnp.float64)
-        if bg_draws_list:
-            q_sub_draws = jnp.asarray(
-                np.concatenate(bg_draws_list, axis=0)[:n_draws_int], dtype=jnp.float64
-            )
+        q_sub_std = jnp.asarray(
+            np.sqrt(np.maximum(q_sub_var_np, 0.0)), dtype=jnp.float64
+        )
+        ring_pred_sub = jnp.asarray(
+            np.sum(w_norm[:, None] * np.stack(ring_preds, axis=0), axis=0),
+            dtype=jnp.float64,
+        )
+        if n_draws_int > 0:
+            draw_cursors = np.zeros((n_ens,), dtype=np.int64)
+            assembled = np.empty((n_draws_int, t_fine_np.size), dtype=np.float64)
+            for out_i, m_idx in enumerate(member_indices):
+                m_i = int(m_idx)
+                arr_m = member_draws[m_i]
+                assert arr_m is not None
+                assembled[out_i] = arr_m[int(draw_cursors[m_i])]
+                draw_cursors[m_i] += 1
+            q_sub_draws = jnp.asarray(assembled, dtype=jnp.float64)
         else:
             q_sub_draws = None
     else:
+        if subspace_weights is not None:
+            raise ValueError(
+                "subspace_weights can only be supplied together with subspace_models."
+            )
         lp_sub = linear_posterior(
             model_subspace,
             dataset,
@@ -2717,25 +2878,37 @@ def ringdown_diagnostic(
     chi2_sub = float(np.sum(z_sub_np**2))
     chi2_per_n_sub = float(chi2_sub / n_obs)
 
-    # 4. Pre-spike vs post-spike RMS background excursion around steady baseline
+    # 4. Pre-spike vs post-spike posterior realization RMS (and conditional-mean RMS)
     q_ref = (
         float(q_baseline)
         if q_baseline is not None
         else _steady_baseline_rate(model_m0)
     )
     q_m0_np = np.asarray(q_m0_mean, dtype=np.float64)
+    q_m0_sd_np = np.asarray(q_m0_std, dtype=np.float64)
     q_sub_np = np.asarray(q_sub_mean, dtype=np.float64)
+    q_sub_sd_np = np.asarray(q_sub_std, dtype=np.float64)
 
     dq_m0 = q_m0_np - q_ref
     dq_sub = q_sub_np - q_ref
 
-    rms_pre_m0 = float(np.sqrt(np.mean(dq_m0[pre_mask] ** 2)))
-    rms_post_m0 = float(np.sqrt(np.mean(dq_m0[post_mask] ** 2)))
+    rms_pre_mean_m0 = float(np.sqrt(np.mean(dq_m0[pre_mask] ** 2)))
+    rms_post_mean_m0 = float(np.sqrt(np.mean(dq_m0[post_mask] ** 2)))
+    rms_pre_mean_sub = float(np.sqrt(np.mean(dq_sub[pre_mask] ** 2)))
+    rms_post_mean_sub = float(np.sqrt(np.mean(dq_sub[post_mask] ** 2)))
+
+    # Posterior realization second-moment RMS: sqrt(<dQ_hat^2 + sigma_Q^2>)
+    rms_pre_m0 = float(np.sqrt(np.mean(dq_m0[pre_mask] ** 2 + q_m0_sd_np[pre_mask] ** 2)))
+    rms_post_m0 = float(np.sqrt(np.mean(dq_m0[post_mask] ** 2 + q_m0_sd_np[post_mask] ** 2)))
     exc_m0 = _safe_ratio(rms_post_m0, rms_pre_m0)
 
-    rms_pre_sub = float(np.sqrt(np.mean(dq_sub[pre_mask] ** 2)))
-    rms_post_sub = float(np.sqrt(np.mean(dq_sub[post_mask] ** 2)))
+    rms_pre_sub = float(np.sqrt(np.mean(dq_sub[pre_mask] ** 2 + q_sub_sd_np[pre_mask] ** 2)))
+    rms_post_sub = float(np.sqrt(np.mean(dq_sub[post_mask] ** 2 + q_sub_sd_np[post_mask] ** 2)))
     exc_sub = _safe_ratio(rms_post_sub, rms_pre_sub)
+
+    diff_post = q_m0_np[post_mask] - q_sub_np[post_mask]
+    rms_post_diff = float(np.sqrt(np.mean(diff_post**2)))
+    max_abs_diff_post = float(np.max(np.abs(diff_post)))
 
     # 5. Optional synthetic-truth errors
     rmse_pre_m0: float | None = None
@@ -2755,9 +2928,6 @@ def ringdown_diagnostic(
         max_abs_err_post_sub = float(np.max(np.abs(err_sub[post_mask])))
 
     m_modes = _infer_subspace_modes(model_subspace.cbm)
-    spike_win = _infer_spike_window(model_subspace.production) or _infer_spike_window(
-        model_m0.production
-    )
     eff_label_m0 = "Fixed CBM ($m=0$)" if label_m0 is None else str(label_m0)
     eff_label_sub = (
         f"Joint SubspaceCBM ($m={m_modes}$)"
@@ -2790,6 +2960,12 @@ def ringdown_diagnostic(
         rms_pre_subspace=rms_pre_sub,
         rms_post_subspace=rms_post_sub,
         excitation_ratio_subspace=exc_sub,
+        rms_pre_mean_m0=rms_pre_mean_m0,
+        rms_post_mean_m0=rms_post_mean_m0,
+        rms_pre_mean_subspace=rms_pre_mean_sub,
+        rms_post_mean_subspace=rms_post_mean_sub,
+        rms_post_diff=rms_post_diff,
+        max_abs_diff_post=max_abs_diff_post,
         chi2_m0=chi2_m0,
         chi2_per_n_m0=chi2_per_n_m0,
         chi2_subspace=chi2_sub,
@@ -3080,16 +3256,14 @@ def plot_ringdown_comparison(
             )
         else:
             diff_q = q_m0 - q_sub
-            rms_diff_post = float(np.sqrt(np.mean(diff_q[post_mask] ** 2)))
-            max_diff_post = float(np.max(np.abs(diff_q[post_mask])))
             ax_b.plot(
                 t_fine,
                 diff_q,
                 color=c_verm,
                 lw=1.9,
                 label=(
-                    f"$Q_{{m=0}} - Q_{{\\mathrm{{sub}}}}$: post-spike RMS = {rms_diff_post:.3g}, "
-                    f"max $|\\Delta Q|$ = {max_diff_post:.3g}"
+                    f"$Q_{{m=0}} - Q_{{\\mathrm{{sub}}}}$: post-spike RMS = {diag.rms_post_diff:.3g}, "
+                    f"max $|\\Delta Q|$ = {diag.max_abs_diff_post:.3g}"
                 ),
             )
             ax_b.fill_between(t_fine, 0.0, diff_q, color=c_verm, alpha=0.15)

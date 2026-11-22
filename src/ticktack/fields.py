@@ -156,6 +156,15 @@ def _as_dataset(dataset_or_series: Dataset | TreeRingSeries) -> Dataset:
 # =============================================================================
 
 
+def _dct2_ortho_matrix(n_grid: int) -> jax.Array:
+    """Orthonormal DCT-II matrix ``C`` satisfying ``dct2(x) == C @ x`` (vmap/jacfwd-safe)."""
+    n = int(n_grid)
+    k = jnp.arange(n, dtype=jnp.float64)[:, None]
+    idx = jnp.arange(n, dtype=jnp.float64)[None, :]
+    scale = jnp.where(k == 0.0, math.sqrt(1.0 / n), math.sqrt(2.0 / n))
+    return scale * jnp.cos((math.pi / (2.0 * n)) * k * (2.0 * idx + 1.0))
+
+
 def dct2(x: ArrayLike, *, axis: int = -1) -> jax.Array:
     """Orthonormal 1D Discrete Cosine Transform (DCT-II) in ``float64``."""
     return _jax_dct(jnp.asarray(x, dtype=jnp.float64), type=2, axis=axis, norm="ortho")
@@ -1075,6 +1084,7 @@ class DCTResponseOperator(zdx.Base):
     dt: float = eqx.field(static=True)
     dataset_digest: str = eqx.field(static=True, default="")
     template_digest: str = eqx.field(static=True, default="")
+    cbm_digest: str = eqx.field(static=True, default="")
 
     @property
     def t_grid(self) -> jax.Array:
@@ -1202,6 +1212,7 @@ def _compute_dct_operator_jit(
     template: jax.Array | None,
     dataset_digest: str = "",
     template_digest: str = "none",
+    cbm_digest: str = "",
 ) -> DCTResponseOperator:
     """Direct FOH DCT response operator (modal scalar path + low-RAM Van Loan fallback)."""
     dt_f = (t_end - t_start) / float(n_grid - 1)
@@ -1384,7 +1395,7 @@ def _compute_dct_operator_jit(
     init_basis = full_mat[:, n_grid:]
 
     w_eff = w_grid if template is None else w_grid * template[None, :]
-    w_dct = dct2(w_eff, axis=1)
+    w_dct = w_eff @ _dct2_ortho_matrix(n_grid).T
 
     v_unit = jnp.linalg.solve(-A, b_scaled)
     unit_d14c_boxes = 1000.0 * ((v_unit / y_trop) / m_rel)
@@ -1410,6 +1421,7 @@ def _compute_dct_operator_jit(
         dt=dt_f,
         dataset_digest=dataset_digest,
         template_digest=template_digest,
+        cbm_digest=cbm_digest,
     )
 
 
@@ -1521,6 +1533,7 @@ def build_dct_response_operator(
                 tmpl_arr,
                 ds_digest,
                 tmpl_digest,
+                cbm_digest,
             )
         if not any(
             isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(op)
@@ -1545,6 +1558,7 @@ def build_dct_response_operator(
         tmpl_arr,
         ds_digest,
         tmpl_digest,
+        cbm_digest,
     )
 
 
@@ -1615,7 +1629,31 @@ def build_dct_response_matrix(
     return op if return_operator else op.w_dct
 
 
-class LinearizedDCTOperator(eqx.Module):
+def _compute_subspace_basis_digest(cbm: SubspaceCBM) -> str:
+    """Deterministic SHA-256 fingerprint of a :class:`SubspaceCBM`'s static basis & topology."""
+    h = hashlib.sha256()
+    topo = cbm.topology
+    h.update(
+        f"nb={topo.n_boxes};ne={topo.n_edges};"
+        f"src={topo.edges_src};dst={topo.edges_dst};"
+        f"trop={topo.trop_box_indices};prod={topo.prod_box_indices};"
+        f"pw={cbm.prod_weights};decay={cbm.decay_rate:.16e};"
+        f"lmt={cbm.base_log_total_mass:.16e};".encode("utf-8")
+    )
+    h.update(
+        np.ascontiguousarray(np.asarray(cbm.base_log_rates_free, dtype=np.float64)).tobytes()
+    )
+    h.update(
+        np.ascontiguousarray(np.asarray(cbm.basis_rows, dtype=np.float64)).tobytes()
+    )
+    if cbm.tie_matrix_rows is not None:
+        h.update(
+            np.ascontiguousarray(np.asarray(cbm.tie_matrix_rows, dtype=np.float64)).tobytes()
+        )
+    return h.hexdigest()
+
+
+class LinearizedDCTOperator(zdx.Base):
     r"""First-order tangent-linear approximation of ``W_DCT(alpha)`` for :class:`SubspaceCBM`.
 
     Evaluates the DCT-II forward response matrix of a :class:`GaussianField` around
@@ -1636,12 +1674,15 @@ class LinearizedDCTOperator(eqx.Module):
     w_ref: jax.Array
     dw_dalpha: jax.Array
     t_grid: jax.Array
+    init_basis_ref: jax.Array | None
+    d_init_basis_dalpha: jax.Array | None
     dt: float = eqx.field(static=True)
     t_start: float = eqx.field(static=True)
     t_end: float = eqx.field(static=True)
     n_grid: int = eqx.field(static=True)
     dataset_digest: str = eqx.field(static=True)
     template_digest: str = eqx.field(static=True)
+    subspace_basis_digest: str = eqx.field(static=True)
 
     def __init__(
         self,
@@ -1656,6 +1697,9 @@ class LinearizedDCTOperator(eqx.Module):
         n_grid: int | None = None,
         dataset_digest: str = "",
         template_digest: str = "none",
+        subspace_basis_digest: str = "",
+        init_basis_ref: ArrayLike | None = None,
+        d_init_basis_dalpha: ArrayLike | None = None,
     ) -> None:
         a_ref = jnp.asarray(alpha_ref, dtype=jnp.float64).reshape(-1)
         w_r = jnp.asarray(w_ref, dtype=jnp.float64)
@@ -1676,18 +1720,28 @@ class LinearizedDCTOperator(eqx.Module):
         if not (math.isfinite(dt_f) and dt_f > 0.0):
             raise ValueError(f"dt must be finite and positive, got {dt}.")
 
+        ib_r = None if init_basis_ref is None else jnp.asarray(init_basis_ref, dtype=jnp.float64)
+        dib = (
+            None
+            if d_init_basis_dalpha is None
+            else jnp.asarray(d_init_basis_dalpha, dtype=jnp.float64)
+        )
+
         t0 = float(tg[0]) if t_start is None else float(t_start)
         t1 = float(tg[-1]) if t_end is None else float(t_end)
         self.alpha_ref = a_ref
         self.w_ref = w_r
         self.dw_dalpha = dw
         self.t_grid = tg
+        self.init_basis_ref = ib_r
+        self.d_init_basis_dalpha = dib
         self.dt = dt_f
         self.t_start = t0
         self.t_end = t1
         self.n_grid = n_g if n_grid is None else int(n_grid)
         self.dataset_digest = str(dataset_digest)
         self.template_digest = str(template_digest)
+        self.subspace_basis_digest = str(subspace_basis_digest)
 
     @property
     def n_modes(self) -> int:
@@ -1704,6 +1758,23 @@ class LinearizedDCTOperator(eqx.Module):
         if self.alpha_ref.shape[0] == 0:
             return self.w_ref
         return self.w_ref + jnp.tensordot(a - self.alpha_ref, self.dw_dalpha, axes=([0], [0]))
+
+    def evaluate_init_state_basis(self, alpha: ArrayLike) -> jax.Array:
+        """Evaluate tangent-linear initial-state basis ``(n_obs, n_boxes)`` at ``alpha``."""
+        if self.init_basis_ref is None or self.d_init_basis_dalpha is None:
+            raise ValueError(
+                "LinearizedDCTOperator was constructed without init_basis_ref / d_init_basis_dalpha."
+            )
+        a = jnp.asarray(alpha, dtype=jnp.float64).reshape(-1)
+        if a.shape != self.alpha_ref.shape:
+            raise ValueError(
+                f"Expected alpha of shape {self.alpha_ref.shape}, got {a.shape}."
+            )
+        if self.alpha_ref.shape[0] == 0:
+            return self.init_basis_ref
+        return self.init_basis_ref + jnp.tensordot(
+            a - self.alpha_ref, self.d_init_basis_dalpha, axes=([0], [0])
+        )
 
 
 def build_linearized_dct_operator(
@@ -1779,6 +1850,7 @@ def build_linearized_dct_operator(
 
     ds_digest = _compute_dataset_digest(subspace_cbm, ds)
     tmpl_digest = _compute_template_digest(template)
+    basis_digest = _compute_subspace_basis_digest(subspace_cbm)
     tmpl_arr = None if template is None else jnp.asarray(template, dtype=jnp.float64)
     q_arr = jnp.asarray(q_std, dtype=jnp.float64).reshape(())
     a_arr = jnp.asarray(alpha_unit, dtype=jnp.float64).reshape(())
@@ -1789,9 +1861,9 @@ def build_linearized_dct_operator(
     dt_f = (t1 - t0) / float(n_g - 1)
     t_grid = jnp.linspace(t0, t1, n_g, dtype=jnp.float64)
 
-    def _w_dct_of_alpha(alpha_vec: jax.Array) -> jax.Array:
+    def _w_and_init_of_alpha(alpha_vec: jax.Array) -> tuple[jax.Array, jax.Array]:
         cbm_a = eqx.tree_at(lambda c: c.alpha, subspace_cbm, alpha_vec)
-        return _compute_dct_operator_jit(
+        op_a = _compute_dct_operator_jit(
             cbm_a,
             q_arr,
             a_arr,
@@ -1804,27 +1876,35 @@ def build_linearized_dct_operator(
             tmpl_arr,
             ds_digest,
             tmpl_digest,
-        ).w_dct
+        )
+        return op_a.w_dct, op_a.init_state_basis
 
     if m_modes == 0:
-        w_ref = _w_dct_of_alpha(alpha_ref)
+        w_ref, ib_ref = _w_and_init_of_alpha(alpha_ref)
         dw_dalpha = jnp.zeros((0, w_ref.shape[0], n_g), dtype=jnp.float64)
+        dib_dalpha = jnp.zeros((0, ib_ref.shape[0], ib_ref.shape[1]), dtype=jnp.float64)
     elif _concrete_np(alpha_ref) is not None:
         @jax.jit
-        def _jvp_one(a_val: jax.Array, tang: jax.Array) -> tuple[jax.Array, jax.Array]:
-            return jax.jvp(_w_dct_of_alpha, (a_val,), (tang,))
+        def _jvp_one(
+            a_val: jax.Array, tang: jax.Array
+        ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+            return jax.jvp(_w_and_init_of_alpha, (a_val,), (tang,))
 
         eye_m = jnp.eye(m_modes, dtype=jnp.float64)
-        w_ref, dw0 = _jvp_one(alpha_ref, eye_m[0])
+        (w_ref, ib_ref), (dw0, dib0) = _jvp_one(alpha_ref, eye_m[0])
         dw_list = [dw0]
+        dib_list = [dib0]
         for k in range(1, m_modes):
-            _, dw_k = _jvp_one(alpha_ref, eye_m[k])
+            _, (dw_k, dib_k) = _jvp_one(alpha_ref, eye_m[k])
             dw_list.append(dw_k)
+            dib_list.append(dib_k)
         dw_dalpha = jnp.stack(dw_list, axis=0)
+        dib_dalpha = jnp.stack(dib_list, axis=0)
     else:
-        w_ref = _w_dct_of_alpha(alpha_ref)
-        jac = jax.jacfwd(_w_dct_of_alpha)(alpha_ref)  # (n_obs, n_grid, m_modes)
-        dw_dalpha = jnp.moveaxis(jac, -1, 0)
+        w_ref, ib_ref = _w_and_init_of_alpha(alpha_ref)
+        jac_w, jac_ib = jax.jacfwd(_w_and_init_of_alpha)(alpha_ref)
+        dw_dalpha = jnp.moveaxis(jac_w, -1, 0)
+        dib_dalpha = jnp.moveaxis(jac_ib, -1, 0)
 
     return LinearizedDCTOperator(
         alpha_ref=alpha_ref,
@@ -1837,6 +1917,9 @@ def build_linearized_dct_operator(
         n_grid=n_g,
         dataset_digest=ds_digest,
         template_digest=tmpl_digest,
+        subspace_basis_digest=basis_digest,
+        init_basis_ref=ib_ref,
+        d_init_basis_dalpha=dib_dalpha,
     )
 
 
@@ -4763,6 +4846,7 @@ def _cbm_amp_neg_log_evidence_vg(
     ps_all: jax.Array,
     box_indices_flat: jax.Array,
     trop_idx: jax.Array,
+    prehistory_kernel: Any | None,
     spike_name: str | None,
     offset_mode: str,
     has_spike: bool,
@@ -4794,6 +4878,7 @@ def _cbm_amp_neg_log_evidence_vg(
 
         w_tan = lin_op.evaluate_w_dct(alpha_like)
         h_gf = w_tan * amp_in[None, :]
+        x_parts: list[jax.Array] = []
         if offset_mode == "hierarchical":
             y_ss = cbm_a.steady_state_c14(
                 q_std=q_std, alpha_unit=ALPHA_ATOMS_CM2_S_TO_KG_YR
@@ -4802,9 +4887,16 @@ def _cbm_amp_neg_log_evidence_vg(
             m_rel = cbm_a.relative_reservoir_masses()
             r_ratio = (y_ss / y_trop) / m_rel
             x_off = x_off_base.at[:, 0].set(r_ratio[box_indices_flat])
-            x_mat = jnp.concatenate([x_off, h_gf], axis=1)
-        else:
-            x_mat = h_gf
+            x_parts.append(x_off)
+        if prehistory_kernel is not None:
+            root_y0 = _resolve_prehistory_root_y0(
+                cbm_a, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
+            )
+            assert root_y0 is not None
+            h_pre = lin_op.evaluate_init_state_basis(alpha_like) @ root_y0
+            x_parts.append(h_pre)
+        x_parts.append(h_gf)
+        x_mat = x_parts[0] if len(x_parts) == 1 else jnp.concatenate(x_parts, axis=1)
 
         lm = LinearMarginal(x_mat, prior_mean=pm_all, prior_sd=ps_all, method="cholesky")
         return -lm.loglike(resid, ds.sigma_flat)
@@ -4833,7 +4925,7 @@ def _optimize_single_kernel_with_cbm(
     alpha_init: jax.Array | None = None,
     spike_init_term: MiyakeSpike | None = None,
     prehistory_kernel: Any | None = None,
-    recenter_threshold: float = 0.25,
+    recenter_threshold: float = 1e-3,
 ) -> OptimizedKernelResult:
     """Jointly optimize ``(phi, cbm.alpha[, spike])`` with tangent-linear ``W_DCT(alpha)``."""
     n_k = int(phi0.shape[0])
@@ -4915,6 +5007,8 @@ def _optimize_single_kernel_with_cbm(
         dtype=jnp.int32,
     )
     trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
+    pm_parts: list[jax.Array] = []
+    ps_parts: list[jax.Array] = []
     if offset_mode == "hierarchical":
         x_off_base, pm_off, ps_off = hierarchical_offset_design(
             ds.series_indices,
@@ -4923,16 +5017,22 @@ def _optimize_single_kernel_with_cbm(
             global_prior_sd=200.0,
             lab_prior_sd=1.5,
         )
-        pm_all = jnp.concatenate([pm_off, jnp.zeros((n_g,), dtype=jnp.float64)], axis=0)
-        ps_all = jnp.concatenate([ps_off, jnp.ones((n_g,), dtype=jnp.float64)], axis=0)
+        pm_parts.append(pm_off)
+        ps_parts.append(ps_off)
     elif offset_mode == "none":
         x_off_base = jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
-        pm_all = jnp.zeros((n_g,), dtype=jnp.float64)
-        ps_all = jnp.ones((n_g,), dtype=jnp.float64)
     else:
         raise ValueError(
             f"offset_mode must be 'hierarchical' or 'none', got {offset_mode!r}."
         )
+    if prehistory_kernel is not None:
+        n_boxes = int(cbm.n_boxes)
+        pm_parts.append(jnp.zeros((n_boxes,), dtype=jnp.float64))
+        ps_parts.append(jnp.ones((n_boxes,), dtype=jnp.float64))
+    pm_parts.append(jnp.zeros((n_g,), dtype=jnp.float64))
+    ps_parts.append(jnp.ones((n_g,), dtype=jnp.float64))
+    pm_all = jnp.concatenate(pm_parts, axis=0)
+    ps_all = jnp.concatenate(ps_parts, axis=0)
 
     @jax.jit
     def _phi_amp_and_prior(phi_vec: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -4947,15 +5047,6 @@ def _optimize_single_kernel_with_cbm(
             phi_vec,
         )
         return vjp_fn(g_amp)[0]
-
-    def _prior_total(u_vec: jax.Array) -> jax.Array:
-        phi = u_vec[:n_k]
-        alpha = u_vec[n_k : n_k + m_modes]
-        sp_u = u_vec[n_k + m_modes :]
-        lp = prior_fn(phi) + jnp.sum(_normal_logpdf(alpha, 0.0, cbm_sd_f))
-        if has_spike:
-            lp = lp + jnp.sum(_normal_logpdf(sp_u, sp_prior_mu_vec, sp_prior_sd_vec))
-        return lp
 
     def _eval_vg(u_np: np.ndarray, cur_lin_op: LinearizedDCTOperator) -> tuple[float, np.ndarray]:
         u_j = jnp.asarray(u_np, dtype=jnp.float64)
@@ -4978,6 +5069,7 @@ def _optimize_single_kernel_with_cbm(
             ps_all,
             box_indices_flat,
             trop_idx,
+            prehistory_kernel,
             spike_name,
             offset_mode,
             has_spike,
@@ -5087,6 +5179,42 @@ def _optimize_single_kernel_with_cbm(
         else _replace_spike_in_extra(extra_production, spike_name, sp_opt, float(q_std))
     )
 
+    # Ensure active_lin_op is centred at cbm_opt and stationary before the Laplace Hessian
+    final_shift = float(
+        np.linalg.norm(np.asarray(alpha_opt) - np.asarray(active_lin_op.alpha_ref))
+    )
+    if recenter_threshold < 1e8 and final_shift > 1e-3:
+        active_lin_op = build_linearized_dct_operator(
+            cbm_opt,
+            ds,
+            t_start=t0,
+            t_end=t1,
+            n_grid=n_g,
+            q_std=q_std,
+        )
+        best_u_np, converged = _run_opt(
+            active_lin_op, jnp.asarray(best_u_np, dtype=jnp.float64)[None, :], maxiter=30
+        )
+        u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
+        phi_opt = u_opt[:n_k]
+        alpha_opt = u_opt[n_k : n_k + m_modes]
+        kern_opt = build_kernel_fn(phi_opt)
+        cbm_opt = eqx.tree_at(lambda c: c.alpha, cbm, alpha_opt)
+        sp_opt = _unpack_spike_from_vec(
+            u_opt[n_k + m_modes :],
+            spike_ref,
+            has_spike=has_spike,
+            opt_full_spike=opt_full_spike,
+            t0=t0,
+            t1=t1,
+            clip_like=False,
+        )
+        final_extra = (
+            None
+            if extra_production is None
+            else _replace_spike_in_extra(extra_production, spike_name, sp_opt, float(q_std))
+        )
+
     # Exact DCT operator & closed-form Wiener fit at (cbm_opt, kern_opt, final_extra)
     op_opt = build_dct_response_operator(
         cbm_opt, ds, t_start=t0, t_end=t1, n_grid=n_g, q_std=q_std
@@ -5109,19 +5237,29 @@ def _optimize_single_kernel_with_cbm(
     ln_z_val = fit_res.log_evidence
     gamma_val = fit_res.gamma
 
-    # Central finite-difference Hessian of exact first-order gradient at u_opt
-    def _grad_np(u_arr_np: np.ndarray) -> np.ndarray:
-        _, g_val = _eval_vg(u_arr_np, active_lin_op)
-        return g_val
+    # Central finite-difference Hessian of first-order gradient at u_opt (centred at cbm_opt)
+    # Harmonize Laplace integration coordinates with optimize_cbm=False: integrate over
+    # (phi, alpha[, log_fluence]) while keeping (t_start, log_duration) point-profiled at MAP.
+    if opt_full_spike:
+        lap_idx = list(range(n_k + m_modes)) + [n_k + m_modes + 2]
+    else:
+        lap_idx = list(range(d_u))
+    d_lap = len(lap_idx)
 
-    hess_all = _finite_diff_hessian_from_grad(_grad_np, best_u_np, eps=1e-5)
-    hess_all_sym = 0.5 * (hess_all + hess_all.T)
+    def _grad_lap_np(v_lap_np: np.ndarray) -> np.ndarray:
+        u_full_np = best_u_np.copy()
+        u_full_np[lap_idx] = v_lap_np
+        _, g_full = _eval_vg(u_full_np, active_lin_op)
+        return g_full[lap_idx]
+
+    hess_lap = _finite_diff_hessian_from_grad(_grad_lap_np, best_u_np[lap_idx], eps=1e-5)
+    hess_lap_sym = 0.5 * (hess_lap + hess_lap.T)
 
     # Schur-complement kernel hyperparameter Hessian block
-    if d_u > n_k:
-        h_pp = hess_all_sym[:n_k, :n_k]
-        h_pn = hess_all_sym[:n_k, n_k:]
-        h_nn = hess_all_sym[n_k:, n_k:]
+    if d_lap > n_k:
+        h_pp = hess_lap_sym[:n_k, :n_k]
+        h_pn = hess_lap_sym[:n_k, n_k:]
+        h_nn = hess_lap_sym[n_k:, n_k:]
         evals_nn = jnp.linalg.eigvalsh(h_nn)
         if bool(jnp.all(jnp.isfinite(evals_nn)) and jnp.all(evals_nn > 0.0)):
             schur = h_pp - h_pn @ jnp.linalg.solve(h_nn, h_pn.T)
@@ -5129,21 +5267,27 @@ def _optimize_single_kernel_with_cbm(
         else:
             h_sym = h_pp
     else:
-        h_sym = hess_all_sym
+        h_sym = hess_lap_sym
 
-    lp_val = _prior_total(u_opt)
+    lp_val = prior_fn(phi_opt) + jnp.sum(_normal_logpdf(alpha_opt, 0.0, cbm_sd_f))
+    if has_spike:
+        log_fl_opt = u_opt[n_k + m_modes + 2] if opt_full_spike else u_opt[n_k + m_modes]
+        fl_mu = sp_prior_mu_vec[2] if opt_full_spike else sp_prior_mu_vec[0]
+        fl_sd = sp_prior_sd_vec[2] if opt_full_spike else sp_prior_sd_vec[0]
+        lp_val = lp_val + _normal_logpdf(log_fl_opt, fl_mu, fl_sd)
+
     ln_joint = ln_z_val + lp_val
-    evals_all = jnp.linalg.eigvalsh(hess_all_sym)
-    hess_is_pd = bool(jnp.all(jnp.isfinite(evals_all)) and jnp.all(evals_all > 0.0))
+    evals_lap = jnp.linalg.eigvalsh(hess_lap_sym)
+    hess_is_pd = bool(jnp.all(jnp.isfinite(evals_lap)) and jnp.all(evals_lap > 0.0))
     if converged and hess_is_pd and bool(jnp.isfinite(ln_joint)):
-        _, logdet_h_all = jnp.linalg.slogdet(hess_all_sym)
-        ln_hyper = ln_joint + 0.5 * d_u * math.log(2.0 * math.pi) - 0.5 * logdet_h_all
+        _, logdet_h_lap = jnp.linalg.slogdet(hess_lap_sym)
+        ln_hyper = ln_joint + 0.5 * d_lap * math.log(2.0 * math.pi) - 0.5 * logdet_h_lap
     else:
         converged = False
         ln_hyper = jnp.asarray(-jnp.inf, dtype=jnp.float64)
 
-    aic_val = -2.0 * ln_z_val + 2.0 * d_u
-    bic_val = -2.0 * ln_z_val + float(d_u) * math.log(max(ds.n_obs, 1))
+    aic_val = -2.0 * ln_z_val + 2.0 * d_lap
+    bic_val = -2.0 * ln_z_val + float(d_lap) * math.log(max(ds.n_obs, 1))
 
     return OptimizedKernelResult(
         name=label,
@@ -5214,10 +5358,9 @@ def optimize_gp_kernel(
 
     if optimize_cbm:
         _check_positive_concrete("cbm_prior_sd", cbm_prior_sd)
-        if not isinstance(cbm, SubspaceCBM) or cbm.n_modes == 0:
+        if not isinstance(cbm, SubspaceCBM):
             warnings.warn(
-                "optimize_cbm=True requires a SubspaceCBM with n_modes > 0; "
-                "proceeding with fixed CBM.",
+                "optimize_cbm=True requires a SubspaceCBM; proceeding with fixed CBM.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -5467,10 +5610,9 @@ def select_gp_kernel(
     use_cbm_opt = False
     if optimize_cbm:
         _check_positive_concrete("cbm_prior_sd", cbm_prior_sd)
-        if not isinstance(cbm, SubspaceCBM) or cbm.n_modes == 0:
+        if not isinstance(cbm, SubspaceCBM):
             warnings.warn(
-                "optimize_cbm=True requires a SubspaceCBM with n_modes > 0; "
-                "proceeding with fixed CBM.",
+                "optimize_cbm=True requires a SubspaceCBM; proceeding with fixed CBM.",
                 UserWarning,
                 stacklevel=2,
             )

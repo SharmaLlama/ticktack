@@ -168,8 +168,8 @@ $$
 
 and projects out nonlinear `MiyakeSpike` tangents `(t_start, duration, fluence)` (and any uninformative infinite-variance offsets) via the QR-stabilized Schur complement. Evaluating `cbm_gp_fisher_spectrum` across NH-only versus two-hemisphere `760–800 CE` compilations (see [Tutorial 6](tutorials.md)) reveals two key regimes:
 
-- **Single-hemisphere collapse ($d_{\mathrm{eff}} < 1$)**: With Northern Hemisphere rings alone, an unpinned global GP background $\delta Q(t)$ is nearly collinear with every symmetric carbon-cycle mode ($d_{\mathrm{eff}} = 0.59$ on real `775CE` NH series under `sho_solar`).
-- **Two-hemisphere rescue ($d_{\mathrm{eff}} \approx 3.6\text{–}4.5$)**: Because cosmic-ray modulation is globally shared across hemispheres whereas exchange modes alter NH–SH stratosphere–troposphere partitioning and inter-hemispheric mixing asymmetrically, pairing NH and SH chronologies rescues $3\text{–}5$ identifiable modes on a single Miyake event (`SubspaceCBM.from_fisher(cbm, spec_gp, n_modes=m)`).
+- **Single-hemisphere collapse ($d_{\mathrm{eff}} \approx 1$)**: With Northern Hemisphere rings alone, an unpinned global GP background $\delta Q(t)$ is nearly collinear with every symmetric carbon-cycle mode ($d_{\mathrm{eff}} = 1.21$ on real `775CE` NH series under `sho_solar`, with $\mu_2 = 0.62 < 1$).
+- **Two-hemisphere rescue ($d_{\mathrm{eff}} \approx 4.2\text{–}5.1$)**: Because cosmic-ray modulation is globally shared across hemispheres whereas exchange modes alter NH–SH stratosphere–troposphere partitioning and inter-hemispheric mixing asymmetrically, pairing NH and SH chronologies rescues $4\text{–}5$ identifiable modes on a single Miyake event (`SubspaceCBM.from_fisher(cbm, spec_gp, n_modes=m)`).
 
 ### MAP-Centred `LinearizedDCTOperator` & Exact IS Reweighting (`fit_subspace_cbm_gp`)
 

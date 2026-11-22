@@ -1214,115 +1214,33 @@ def _pack_unconstrained_from_idata(
 
 
 @eqx.filter_jit
-def _eval_marginal_ll_one(
-    u_vec: jax.Array,
+def _eval_marginal_ll_batch_jit(
+    u_batch: jax.Array,
     model_template: RadiocarbonModel,
     dataset: Dataset,
     parameter_space: ParameterSpace,
     cfg: LinearMarginalConfig,
     sigma_jitter_arr: jax.Array | None,
 ) -> jax.Array:
-    """Evaluate marginal log-likelihood at one unconstrained draw with bounded XLA RAM."""
-    m = parameter_space.constrain(u_vec, model_template)
-    return marginal_log_likelihood(m, dataset, cfg, sigma_jitter=sigma_jitter_arr)
+    """Evaluate marginal log-likelihood over ``(S, d)`` draws via memory-bounded ``lax.map``."""
+    def _one(u_vec: jax.Array) -> jax.Array:
+        m = parameter_space.constrain(u_vec, model_template)
+        return marginal_log_likelihood(m, dataset, cfg, sigma_jitter=sigma_jitter_arr)
+
+    return jax.lax.map(_one, u_batch, batch_size=4)
 
 
-def reweight_exact_marginal(
+def _attach_log_weight_is(
     idata: az.InferenceData,
-    model_template: RadiocarbonModel,
-    dataset: Dataset,
-    parameter_space: ParameterSpace,
-    marginal_config_exact: LinearMarginalConfig,
-    marginal_config_tan: LinearMarginalConfig,
-    *,
-    is_max_draws: int | None = 250,
-    sigma_jitter: ArrayLike | None = None,
-) -> tuple[az.InferenceData, dict[str, Any]]:
-    r"""Compute exact importance-sampling weights ``ln L_exact(u_s) - ln L_tan(u_s)``.
-
-    Evaluates the discrepancy between the exact marginalized log-likelihood and the
-    MAP-centred tangent-linear surrogate across posterior draws (all draws when
-    ``S_total <= is_max_draws`` or ``is_max_draws is None``, otherwise ``is_max_draws``
-    evenly spaced draws), attaches ``log_weight_is`` to ``idata.sample_stats``, and
-    returns normalized importance weights and Kish effective sample size diagnostics.
-    """
-    u_chains, n_chains, n_draws = _pack_unconstrained_from_idata(idata, parameter_space)
-    s_total = n_chains * n_draws
-    d = parameter_space.n_params
-    u_flat = u_chains.reshape(s_total, d)
-
-    if is_max_draws is not None and int(is_max_draws) < 1:
-        raise ValueError(f"is_max_draws must be >= 1 or None; got {is_max_draws}.")
-
-    if is_max_draws is None or s_total <= int(is_max_draws):
-        eval_idx = np.arange(s_total, dtype=np.int64)
-    else:
-        eval_idx = np.linspace(0, s_total - 1, int(is_max_draws), dtype=np.int64)
-
-    jit_arr = (
-        jnp.asarray(sigma_jitter, dtype=jnp.float64)
-        if sigma_jitter is not None
-        else None
-    )
-
-    log_w_eval = np.empty((eval_idx.shape[0],), dtype=np.float64)
-    for out_i, draw_i in enumerate(eval_idx):
-        u_i = jnp.asarray(u_flat[draw_i], dtype=jnp.float64)
-        ll_ex = float(
-            _eval_marginal_ll_one(
-                u_i,
-                model_template,
-                dataset,
-                parameter_space,
-                marginal_config_exact,
-                jit_arr,
-            )
-        )
-        ll_tn = float(
-            _eval_marginal_ll_one(
-                u_i,
-                model_template,
-                dataset,
-                parameter_space,
-                marginal_config_tan,
-                jit_arr,
-            )
-        )
-        log_w_eval[out_i] = ll_ex - ll_tn
-
-    finite = np.isfinite(log_w_eval)
-    if np.any(finite):
-        lw_max = float(np.max(log_w_eval[finite]))
-        w_unnorm = np.where(finite, np.exp(np.where(finite, log_w_eval - lw_max, -np.inf)), 0.0)
-        w_sum = float(np.sum(w_unnorm))
-        w_is = w_unnorm / max(w_sum, 1e-300)
-        kish_ess = float((np.sum(w_is) ** 2) / max(float(np.sum(w_is**2)), 1e-300))
-        kish_ess_ratio = float(kish_ess / max(len(w_is), 1))
-        log_z_corr = float(lw_max + math.log(max(w_sum, 1e-300)) - math.log(len(w_is)))
-        abs_lw = np.abs(log_w_eval[finite])
-        med_abs = float(np.median(abs_lw))
-        max_abs = float(np.max(abs_lw))
-    else:
-        w_is = np.full_like(log_w_eval, np.nan)
-        kish_ess = 0.0
-        kish_ess_ratio = 0.0
-        log_z_corr = float("nan")
-        med_abs = float("nan")
-        max_abs = float("nan")
-
-    log_w_full = np.full((s_total,), np.nan, dtype=np.float64)
-    log_w_full[eval_idx] = log_w_eval
-
+    log_w_2d: np.ndarray,
+) -> az.InferenceData:
+    """Attach ``(chain, draw)`` ``log_weight_is`` to ``idata.sample_stats`` (ArviZ 0.x & 1.x)."""
     idata_out = idata.copy()
     coords = {
-        "chain": idata.posterior.coords["chain"],
-        "draw": idata.posterior.coords["draw"],
+        "chain": idata_out.posterior.coords["chain"],
+        "draw": idata_out.posterior.coords["draw"],
     }
-    da_lw = xr.DataArray(
-        log_w_full.reshape(n_chains, n_draws),
-        dims=("chain", "draw"),
-        coords=coords,
-    )
+    da_lw = xr.DataArray(log_w_2d, dims=("chain", "draw"), coords=coords)
     has_ss = hasattr(idata_out, "sample_stats") and idata_out.sample_stats is not None
     if has_ss:
         ss_obj = idata_out.sample_stats
@@ -1338,6 +1256,147 @@ def reweight_exact_marginal(
             idata_out["sample_stats"] = xr.DataTree(ds_new)
         else:
             idata_out.add_groups({"sample_stats": ds_new})
+    return idata_out
+
+
+def _thin_idata_for_is(
+    idata: az.InferenceData,
+    n_chains: int,
+    n_draws: int,
+    is_max_draws: int | None,
+) -> tuple[az.InferenceData, np.ndarray, int, int]:
+    """Return ``(idata_sel, flat_eval_indices, n_chains_out, n_draws_out)`` with aligned draws."""
+    s_total = n_chains * n_draws
+    if is_max_draws is None or s_total <= int(is_max_draws):
+        return idata, np.arange(s_total, dtype=np.int64), n_chains, n_draws
+
+    cap = int(is_max_draws)
+    if cap >= n_chains:
+        per_chain = max(cap // n_chains, 1)
+        chain_idx = np.arange(n_chains, dtype=np.int64)
+        draw_idx = np.linspace(0, n_draws - 1, per_chain, dtype=np.int64)
+    else:
+        chain_idx = np.linspace(0, n_chains - 1, cap, dtype=np.int64)
+        draw_idx = np.array([0], dtype=np.int64)
+
+    flat_idx = (chain_idx[:, None] * n_draws + draw_idx[None, :]).reshape(-1)
+    if hasattr(xr, "DataTree") and isinstance(idata, xr.DataTree):
+        new_groups: dict[str, xr.Dataset] = {}
+        for gname in idata.children:
+            ds_g = idata[gname].to_dataset()
+            sel: dict[str, Any] = {}
+            if "chain" in ds_g.dims:
+                sel["chain"] = chain_idx
+            if "draw" in ds_g.dims:
+                sel["draw"] = draw_idx
+            new_groups[gname] = ds_g.isel(**sel) if sel else ds_g
+        idata_sel = xr.DataTree.from_dict(new_groups)
+    else:
+        idata_sel = idata.isel(chain=chain_idx, draw=draw_idx)
+    return idata_sel, flat_idx, int(chain_idx.shape[0]), int(draw_idx.shape[0])
+
+
+def _summarize_is_weights(
+    log_w_eval: np.ndarray,
+    *,
+    center_for_spread: bool = False,
+) -> tuple[np.ndarray, float, float, float, float, float]:
+    """Compute ``(w_is, kish_ess, kish_ess_ratio, log_mean_w, median_abs, max_abs)``."""
+    finite = np.isfinite(log_w_eval)
+    if not np.any(finite):
+        return (
+            np.full_like(log_w_eval, np.nan),
+            0.0,
+            0.0,
+            float("nan"),
+            float("nan"),
+            float("nan"),
+        )
+    lw_max = float(np.max(log_w_eval[finite]))
+    w_unnorm = np.where(
+        finite, np.exp(np.where(finite, log_w_eval - lw_max, -np.inf)), 0.0
+    )
+    w_sum = float(np.sum(w_unnorm))
+    w_is = w_unnorm / max(w_sum, 1e-300)
+    kish_ess = float((np.sum(w_is) ** 2) / max(float(np.sum(w_is**2)), 1e-300))
+    kish_ess_ratio = float(kish_ess / max(len(w_is), 1))
+    log_mean_w = float(lw_max + math.log(max(w_sum, 1e-300)) - math.log(len(w_is)))
+    spread_vals = (
+        np.abs(log_w_eval[finite] - log_mean_w)
+        if center_for_spread
+        else np.abs(log_w_eval[finite])
+    )
+    return (
+        w_is,
+        kish_ess,
+        kish_ess_ratio,
+        log_mean_w,
+        float(np.median(spread_vals)),
+        float(np.max(spread_vals)),
+    )
+
+
+def reweight_exact_marginal(
+    idata: az.InferenceData,
+    model_template: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    marginal_config_exact: LinearMarginalConfig,
+    marginal_config_tan: LinearMarginalConfig,
+    *,
+    is_max_draws: int | None = None,
+    sigma_jitter: ArrayLike | None = None,
+) -> tuple[az.InferenceData, dict[str, Any]]:
+    r"""Compute exact importance-sampling weights ``ln L_exact(u_s) - ln L_tan(u_s)``.
+
+    Evaluates the discrepancy between the exact marginalized log-likelihood and the
+    MAP-centred tangent-linear surrogate via memory-bounded ``jax.lax.map`` batches
+    across all posterior draws by default (``is_max_draws=None``). When an explicit
+    cap ``is_max_draws < S_total`` is requested, evenly thins ``idata`` along the
+    draw/chain axes so ``idata_out.sample_stats["log_weight_is"]`` contains zero
+    ``NaN``s and ``diagnostics["weights_is"]`` stays shape-aligned with ``idata_out``.
+    """
+    u_chains, n_chains, n_draws = _pack_unconstrained_from_idata(idata, parameter_space)
+    s_total = n_chains * n_draws
+    d = parameter_space.n_params
+    u_flat = u_chains.reshape(s_total, d)
+
+    if is_max_draws is not None and int(is_max_draws) < 1:
+        raise ValueError(f"is_max_draws must be >= 1 or None; got {is_max_draws}.")
+
+    idata_sel, eval_idx, n_c_out, n_d_out = _thin_idata_for_is(
+        idata, n_chains, n_draws, is_max_draws
+    )
+    u_eval = jnp.asarray(u_flat[eval_idx], dtype=jnp.float64)
+
+    jit_arr = (
+        jnp.asarray(sigma_jitter, dtype=jnp.float64)
+        if sigma_jitter is not None
+        else None
+    )
+
+    ll_ex = _eval_marginal_ll_batch_jit(
+        u_eval,
+        model_template,
+        dataset,
+        parameter_space,
+        marginal_config_exact,
+        jit_arr,
+    )
+    ll_tn = _eval_marginal_ll_batch_jit(
+        u_eval,
+        model_template,
+        dataset,
+        parameter_space,
+        marginal_config_tan,
+        jit_arr,
+    )
+    log_w_eval = np.asarray(ll_ex - ll_tn, dtype=np.float64)
+
+    w_is, kish_ess, kish_ess_ratio, log_z_corr, med_abs, max_abs = _summarize_is_weights(
+        log_w_eval, center_for_spread=False
+    )
+    idata_out = _attach_log_weight_is(idata_sel, log_w_eval.reshape(n_c_out, n_d_out))
 
     diagnostics: dict[str, Any] = {
         "log_weight_is": log_w_eval,
@@ -1362,7 +1421,7 @@ def fit_subspace_cbm_gp(
     *,
     sampler: Literal["nuts", "smc", "laplace"] = "nuts",
     reweight_exact: bool = True,
-    is_max_draws: int | None = 200,
+    is_max_draws: int | None = None,
     rng_key: jax.Array | None = None,
     sigma_jitter: ArrayLike | None = None,
     **sampler_kwargs: Any,
@@ -1377,8 +1436,9 @@ def fit_subspace_cbm_gp(
     ``marginal_config_tan = eqx.tree_at(lambda c: c.dct_operator, cfg_exact, lin_op)``
     while keeping ``SteadyProduction + MiyakeSpike``, hierarchical offset ratios, and
     any sampled GP kernel hyperparameters (``production.field.kernel.*``) exact at every step.
-    Stage 3 (when ``reweight_exact=True``) applies :func:`reweight_exact_marginal` to
-    attach exact importance-sampling weights and Kish ESS diagnostics.
+    Stage 3 (when ``reweight_exact=True``) applies exact importance reweighting:
+    ``ln L_exact(u_s) - ln L_tan(u_s)`` for ``sampler`` in ``{"nuts", "smc"}`` and
+    ``ln L_exact(u_s) + ln p(u_s) - ln N(u_s | u_map, Sigma_spd)`` for ``sampler="laplace"``.
     """
     if not isinstance(model.cbm, SubspaceCBM):
         raise TypeError(
@@ -1410,7 +1470,7 @@ def fit_subspace_cbm_gp(
 
     skw = dict(sampler_kwargs)
     map_method = skw.pop("map_method", "BFGS")
-    map_max_steps = int(skw.pop("map_max_steps", 500))
+    map_max_steps = int(skw.pop("map_max_steps", 1000))
     map_tol = float(skw.pop("map_tol", 1e-6))
 
     # --- Stage 1: Exact MAP + MAP-centred LinearizedDCTOperator + Laplace cov ---
@@ -1427,6 +1487,14 @@ def fit_subspace_cbm_gp(
         compute_laplace=False,
         compute_linear_posterior=False,
     )
+    if not map_result.converged:
+        warnings.warn(
+            f"fit_subspace_cbm_gp Stage-1 MAP optimization did not converge "
+            f"(n_steps={map_result.n_steps}, method={map_method!r}); centring "
+            "LinearizedDCTOperator at the best iterate anyway — inspect IS diagnostics.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     assert isinstance(map_result.model.cbm, SubspaceCBM)
     lin_op = build_linearized_dct_operator(
         map_result.model.cbm,
@@ -1463,6 +1531,8 @@ def fit_subspace_cbm_gp(
     }
 
     # --- Stage 2: Sampling under MAP-centred tangent-linear operator ---
+    laplace_u_draws: jax.Array | None = None
+    laplace_log_q: jax.Array | None = None
     if sampler == "nuts":
         num_warmup = int(skw.pop("num_warmup", 200))
         adapt_mm = skw.pop("adapt_mass_matrix", num_warmup >= 150)
@@ -1505,28 +1575,72 @@ def fit_subspace_cbm_gp(
         cov_spd = (evec * jnp.maximum(ev, 1e-12)[None, :]) @ evec.T
         L_u = jnp.linalg.cholesky(0.5 * (cov_spd + cov_spd.T))
         z_draw = jax.random.normal(samp_key, (1, num_samples, d), dtype=jnp.float64)
-        u_draws = map_result.u_map[None, None, :] + z_draw @ L_u.T
-        post_dict = _unpack_constrained_samples(parameter_space, u_draws)
+        laplace_u_draws = map_result.u_map[None, None, :] + z_draw @ L_u.T
+        log_det_l = jnp.sum(jnp.log(jnp.diag(L_u)))
+        laplace_log_q = (
+            -0.5 * jnp.sum(jnp.square(z_draw), axis=-1)
+            - log_det_l
+            - 0.5 * float(d) * math.log(2.0 * math.pi)
+        )
+        post_dict = _unpack_constrained_samples(parameter_space, laplace_u_draws)
         idata = az.from_dict({"posterior": post_dict})
 
     # --- Stage 3: Exact importance-sampling reweighting ---
     if reweight_exact:
-        idata, is_diag = reweight_exact_marginal(
-            idata,
-            model,
-            dataset,
-            parameter_space,
-            cfg_exact,
-            cfg_tan,
-            is_max_draws=is_max_draws,
-            sigma_jitter=sigma_jitter,
-        )
-        diagnostics.update(is_diag)
-        if sampler == "smc" and "log_evidence_tan" in diagnostics:
-            diagnostics["log_evidence_exact"] = (
-                float(diagnostics["log_evidence_tan"])
-                + float(is_diag["log_z_correction"])
+        if sampler == "laplace":
+            assert laplace_u_draws is not None and laplace_log_q is not None
+            n_c_lap, n_d_lap, d_lap = laplace_u_draws.shape
+            idata_sel, eval_idx, n_c_out, n_d_out = _thin_idata_for_is(
+                idata, n_c_lap, n_d_lap, is_max_draws
             )
+            u_eval = laplace_u_draws.reshape(-1, d_lap)[eval_idx]
+            log_q_eval = laplace_log_q.reshape(-1)[eval_idx]
+            jit_arr = (
+                jnp.asarray(sigma_jitter, dtype=jnp.float64)
+                if sigma_jitter is not None
+                else None
+            )
+            ll_ex = _eval_marginal_ll_batch_jit(
+                u_eval, model, dataset, parameter_space, cfg_exact, jit_arr
+            )
+            lp_ex = _vmap_log_prior_jit(parameter_space, u_eval)
+            log_w_eval = np.asarray(ll_ex + lp_ex - log_q_eval, dtype=np.float64)
+            w_is, kish_ess, kish_ess_ratio, log_z_exact, med_abs, max_abs = (
+                _summarize_is_weights(log_w_eval, center_for_spread=True)
+            )
+            idata = _attach_log_weight_is(
+                idata_sel, log_w_eval.reshape(n_c_out, n_d_out)
+            )
+            is_diag: dict[str, Any] = {
+                "log_weight_is": log_w_eval,
+                "weights_is": w_is,
+                "eval_indices": eval_idx,
+                "n_eval": int(eval_idx.shape[0]),
+                "n_total": int(n_c_lap * n_d_lap),
+                "kish_ess": kish_ess,
+                "kish_ess_ratio": kish_ess_ratio,
+                "median_abs_dlnL": med_abs,
+                "max_abs_dlnL": max_abs,
+                "log_evidence_exact": log_z_exact,
+            }
+            diagnostics.update(is_diag)
+        else:
+            idata, is_diag = reweight_exact_marginal(
+                idata,
+                model,
+                dataset,
+                parameter_space,
+                cfg_exact,
+                cfg_tan,
+                is_max_draws=is_max_draws,
+                sigma_jitter=sigma_jitter,
+            )
+            diagnostics.update(is_diag)
+            if sampler == "smc" and "log_evidence_tan" in diagnostics:
+                diagnostics["log_evidence_exact"] = (
+                    float(diagnostics["log_evidence_tan"])
+                    + float(is_diag["log_z_correction"])
+                )
         if math.isfinite(is_diag["kish_ess_ratio"]) and is_diag["kish_ess_ratio"] < 0.85:
             warnings.warn(
                 f"fit_subspace_cbm_gp exact IS efficiency is low "

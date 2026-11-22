@@ -6,7 +6,7 @@ Publication-ready diagnostic figures (`ticktack.plotting`) and explicit opt-in f
 
 ## `ticktack.plotting`
 
-Every diagnostic helper in `ticktack.plotting` is strictly stateless (never mutating `matplotlib.rcParams` or calling `plt.gca()` / `plt.gcf()`), accepts optional caller-supplied `Axes`, and returns `(fig, axes)`:
+Every diagnostic helper in `ticktack.plotting` is strictly stateless (never mutating `matplotlib.rcParams` or calling `plt.gca()` / `plt.gcf()`); standard single/pair-panel helpers accept optional caller-supplied `Axes` and return `(fig, axes)`, while multi-grid composite diagnostics such as `plot_ringdown_comparison` return `Figure` directly:
 
 - `plot_d14c_fit` – observed tree-ring $\Delta^{14}\text{C}$ windows and continuous posterior curves with optional standardized pull panel $(d - m) / \sigma$.
 - `plot_data_model_correlation` – 1-to-1 observed vs model-predicted $\Delta^{14}\text{C}$ calibration scatter with $1\sigma$ error bars, `1:1` identity line, matched square limits, and reduced $\chi^2 / N_{\text{obs}}$ + WRMS pull summary.
@@ -70,12 +70,17 @@ def ringdown_diagnostic(
     marginal_config_m0: LinearMarginalConfig | None = None,
     marginal_config_subspace: LinearMarginalConfig | None = None,
     *,
-    pre_window: tuple[float, float] = (760.0, 773.0),
-    post_window: tuple[float, float] = (775.0, 792.0),
+    pre_window: tuple[float, float] | None = None,
+    post_window: tuple[float, float] | None = None,
     t_fine: Any | None = None,
     n_draws: int = 100,
     rng_key: Any | None = None,
     q_true_fine: Any | None = None,
+    q_baseline: float | None = None,
+    subspace_models: Sequence[RadiocarbonModel] | None = None,
+    subspace_weights: Any | None = None,
+    label_m0: str | None = None,
+    label_subspace: str | None = None,
 ) -> RingdownDiagnosticResult
 
 def plot_ringdown_comparison(
@@ -85,10 +90,12 @@ def plot_ringdown_comparison(
     spike_window: tuple[float, float] | None = None,
     q_true_fine: Any | None = None,
     title: str | None = None,
+    vmax: float | None = None,
+    figsize: tuple[float, float] | None = None,
 ) -> Figure
 ```
 
-  Subtracts parametric `MiyakeSpike.delta_q(t_fine)` cleanly from `linear_posterior` trajectories, computes raw unrescaled $\chi^2 / N$, per-observation z-score residuals $(d - m) / \sigma$, pre-/post-spike RMS background excursions (`rms_pre`, `rms_post`, excitation ratio `rms_post / rms_pre`), and optional synthetic truth RMSE metrics, and renders the 4-panel diagnostic figure with paired NH (top) / SH (bottom) `RdBu_r` residual heatmaps and grey hatched missing-year cells.
+  Subtracts parametric `MiyakeSpike.delta_q(t_fine)` cleanly from `linear_posterior` trajectories, strips any fixed-CBM `DCTResponseOperator` when `marginal_config_subspace is None`, infers epoch-agnostic `pre_window`/`post_window` from the detected spike when omitted, computes raw unrescaled $\chi^2 / N$, per-observation z-score residuals $(d - m) / \sigma$, unbiased posterior realization RMS excursions $\sqrt{\langle(\widehat{\mu}_Q - Q_0)^2 + \sigma_Q^2\rangle}$ (`rms_pre`, `rms_post`, `excitation_ratio`), direct post-spike shift `rms_post_diff`, optional weighted Law-of-Total-Variance ensemble marginalization (`subspace_models` + `subspace_weights`), and optional synthetic truth RMSE metrics. `plot_ringdown_comparison` renders the 4-panel diagnostic figure with paired NH (top) / SH (bottom) `RdBu_r` residual heatmaps and grey hatched missing-year cells.
 
 ---
 
