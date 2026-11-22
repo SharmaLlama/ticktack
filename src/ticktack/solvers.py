@@ -1280,6 +1280,55 @@ class ExactLinearSolver(AbstractSolver):
         q_std: ArrayLike,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """Return ``(t0_grid, dt, delta_q_grid)`` for a general/gridded FOH term."""
+        raw_term = term
+        if hasattr(term, "to_gridded"):
+            term = term.to_gridded(q_std=q_std)
+
+        has_static_uniform_grid = (
+            isinstance(getattr(raw_term, "t_start", None), (int, float))
+            and isinstance(getattr(raw_term, "t_end", None), (int, float))
+            and isinstance(getattr(raw_term, "n_grid", None), int)
+            and isinstance(term, GriddedProduction)
+        )
+        if has_static_uniform_grid:
+            t0_u = float(raw_term.t_start)  # type: ignore[attr-defined]
+            t1_u = float(raw_term.t_end)  # type: ignore[attr-defined]
+            dt_u = (t1_u - t0_u) / float(int(raw_term.n_grid) - 1)  # type: ignore[attr-defined]
+            dq_u = (
+                term.values
+                if term.is_delta
+                else term.values - jnp.asarray(q_std, dtype=jnp.float64)
+            )
+            try:
+                tmin_f = float(np.asarray(t_min_req))
+                tmax_f = float(np.asarray(t_max_req))
+            except (
+                jax.errors.TracerArrayConversionError,
+                jax.errors.ConcretizationTypeError,
+            ):
+                return (
+                    jnp.asarray(t0_u, dtype=jnp.float64),
+                    jnp.asarray(dt_u, dtype=jnp.float64),
+                    dq_u,
+                )
+            if t0_u <= tmin_f + 1e-12 and t1_u >= tmax_f - 1e-12:
+                return (
+                    jnp.asarray(t0_u, dtype=jnp.float64),
+                    jnp.asarray(dt_u, dtype=jnp.float64),
+                    dq_u,
+                )
+            start_f = min(tmin_f, t0_u)
+            end_f = max(tmax_f, t1_u)
+            dt_f = 1.0 / float(self.oversample)
+            n_steps = max(int(math.ceil((end_f - start_f) / dt_f)) + 2, 3)
+            grid = start_f + jnp.arange(n_steps, dtype=jnp.float64) * dt_f
+            dq = raw_term.delta_q(grid, q_std=q_std)
+            return (
+                jnp.asarray(start_f, dtype=jnp.float64),
+                jnp.asarray(dt_f, dtype=jnp.float64),
+                dq,
+            )
+
         if isinstance(term, GriddedProduction):
             tg = term.t_grid
             # Check if tg is concrete and uniform and covers [t_min_req, t_max_req]

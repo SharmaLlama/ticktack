@@ -29,7 +29,11 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
+import numpyro.distributions.distribution as _np_dist_mod
 import optax
+
+if not hasattr(dist, "distribution"):
+    dist.distribution = _np_dist_mod
 from jax.typing import ArrayLike
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO, autoguide
 
@@ -40,12 +44,13 @@ from .likelihood import (
     LinearMarginalConfig,
     ParameterSpace,
     _build_marginal_design,
-    _has_loggp,
+    _extract_single_lgf,
     _make_fast_unconstrained_loglike,
     _marginal_design_is_static,
     _offset_column_count,
     _offset_only_cfg,
     _partition_terms_for_cfg,
+    _uses_joint_mode,
     joint_log_likelihood,
     linear_posterior,
     marginal_log_likelihood,
@@ -63,8 +68,16 @@ __all__ = [
 ]
 
 
-def _use_joint_mode(model: RadiocarbonModel) -> bool:
-    return _has_loggp(model.production) or isinstance(model.solver, ModaxSolver)
+def _use_joint_mode(
+    model: RadiocarbonModel,
+    parameter_space: ParameterSpace | None = None,
+    cfg: LinearMarginalConfig | None = None,
+) -> bool:
+    return _uses_joint_mode(
+        model,
+        parameter_space,
+        LinearMarginalConfig() if cfg is None else cfg,
+    )
 
 
 def _eval_single_loglike(
@@ -72,8 +85,9 @@ def _eval_single_loglike(
     dataset: Dataset,
     cfg: LinearMarginalConfig,
     sigma_jitter: ArrayLike | None,
+    parameter_space: ParameterSpace | None = None,
 ) -> jax.Array:
-    if _use_joint_mode(model_eval):
+    if _use_joint_mode(model_eval, parameter_space, cfg):
         return joint_log_likelihood(
             model_eval,
             dataset,
@@ -478,11 +492,15 @@ def sample_nuts(
 
     # --- Conditional Gaussian reconstruction of marginalized linear parameters ---
     if reconstruct_linear:
-        joint_mode = _use_joint_mode(model)
-        lin_cfg = _offset_only_cfg(cfg) if joint_mode else cfg
+        joint_mode = _use_joint_mode(model, parameter_space, cfg)
+        is_lgf_marg = (
+            not joint_mode
+            and _extract_single_lgf(model.production)[0] is not None
+        )
+        lin_cfg = _offset_only_cfg(cfg) if (joint_mode or is_lgf_marg) else cfg
         n_off = _offset_column_count(lin_cfg, dataset.n_series)
         n_series = dataset.n_series
-        _, _solar_terms, _, _ = _partition_terms_for_cfg(model.production, lin_cfg)
+        _, _solar_terms, _, _, _ = _partition_terms_for_cfg(model.production, lin_cfg)
         n_solar = sum(
             2 * int(jnp.asarray(s.omegas, dtype=jnp.float64).reshape(-1).size)
             for s in _solar_terms

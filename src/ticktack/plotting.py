@@ -1871,3 +1871,18 @@ def plot_cbm_mode_impulse_responses(
             out_axes[i + 1] = flat_mode_axes[i]
         return fig, out_axes
     return fig, mode_axes
+
+
+from .fields import plot_evidence_grid, plot_field_draws  # noqa: E402
+
+__all__ = [
+    "plot_cbm_eigenmodes",
+    "plot_cbm_mode_impulse_responses",
+    "plot_cbm_tikz_modes",
+    "plot_corner",
+    "plot_d14c_fit",
+    "plot_evidence_grid",
+    "plot_field_draws",
+    "plot_fisher_spectrum",
+    "plot_production_posterior",
+]
