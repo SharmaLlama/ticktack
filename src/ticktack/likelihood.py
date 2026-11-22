@@ -40,9 +40,12 @@ import optimistix as optx
 import zodiax as zdx
 from jax.typing import ArrayLike
 
+from .cbm import SubspaceCBM
 from .data import Dataset
 from .fields import (
+    DCTResponseOperator,
     GaussianField,
+    LinearizedDCTOperator,
     LogGaussianField,
     _safe_sqrt,
     build_dct_response_operator,
@@ -421,6 +424,7 @@ class LinearMarginalConfig(eqx.Module):
     n_gp_modes: int | None = eqx.field(static=True)
     include_gp_initial_cov: bool = eqx.field(static=True)
     whiten_method: str = eqx.field(static=True)
+    dct_operator: DCTResponseOperator | LinearizedDCTOperator | None
 
     def __init__(
         self,
@@ -444,11 +448,19 @@ class LinearMarginalConfig(eqx.Module):
         n_gp_modes: int | None = None,
         include_gp_initial_cov: bool = True,
         whiten_method: Literal["cholesky", "qr", "rank_one"] = "cholesky",
+        dct_operator: DCTResponseOperator | LinearizedDCTOperator | None = None,
     ) -> None:
         valid_offset_modes = ("hierarchical", "per_series", "shared", "none")
         if offset_mode not in valid_offset_modes:
             raise ValueError(
                 f"offset_mode must be one of {valid_offset_modes}; got {offset_mode!r}."
+            )
+        if dct_operator is not None and not isinstance(
+            dct_operator, (DCTResponseOperator, LinearizedDCTOperator)
+        ):
+            raise TypeError(
+                "dct_operator must be a DCTResponseOperator, LinearizedDCTOperator, or None; "
+                f"got {type(dct_operator).__name__}."
             )
         eff_solar = (
             marginalize_solar
@@ -483,6 +495,7 @@ class LinearMarginalConfig(eqx.Module):
         self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.whiten_method = str(whiten_method)
+        self.dct_operator = dct_operator
 
     @property
     def marginalize_solar(self) -> bool:
@@ -802,17 +815,49 @@ def _build_marginal_design_with_projections(
     # 5. Marginalized GaussianField reflecting-boundary DCT-II columns
     if field_terms and n_tot > 0:
         for gf in field_terms:
-            op_gf = build_dct_response_operator(
-                cbm,
-                dataset,
-                t_start=gf.t_start,
-                t_end=gf.t_end,
-                n_grid=gf.n_grid,
-                q_std=model.q_std,
-                alpha_unit=model.alpha_unit,
-                template=gf.template,
-            )
-            H_gf = op_gf.w_dct * _safe_sqrt(gf.power_spectrum())[None, :]
+            op_cfg = cfg.dct_operator
+            if isinstance(op_cfg, LinearizedDCTOperator):
+                if not isinstance(cbm, SubspaceCBM):
+                    raise TypeError(
+                        "LinearMarginalConfig.dct_operator is a LinearizedDCTOperator, "
+                        f"which requires model.cbm to be a SubspaceCBM; got {type(cbm).__name__}."
+                    )
+                if op_cfg.w_ref.shape != (n_tot, gf.n_grid) or (
+                    abs(op_cfg.t_start - gf.t_start) > 1e-9
+                    or abs(op_cfg.t_end - gf.t_end) > 1e-9
+                ):
+                    raise ValueError(
+                        "LinearizedDCTOperator geometry "
+                        f"(shape={op_cfg.w_ref.shape}, [{op_cfg.t_start}, {op_cfg.t_end}]) "
+                        f"does not match dataset/GaussianField "
+                        f"(shape=({n_tot}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
+                    )
+                w_dct_gf = op_cfg.evaluate_w_dct(cbm.alpha)
+            elif isinstance(op_cfg, DCTResponseOperator):
+                if op_cfg.w_dct.shape != (n_tot, gf.n_grid) or (
+                    abs(op_cfg.t_start - gf.t_start) > 1e-9
+                    or abs(op_cfg.t_end - gf.t_end) > 1e-9
+                ):
+                    raise ValueError(
+                        "DCTResponseOperator geometry "
+                        f"(shape={op_cfg.w_dct.shape}, [{op_cfg.t_start}, {op_cfg.t_end}]) "
+                        f"does not match dataset/GaussianField "
+                        f"(shape=({n_tot}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
+                    )
+                w_dct_gf = op_cfg.w_dct
+            else:
+                op_gf = build_dct_response_operator(
+                    cbm,
+                    dataset,
+                    t_start=gf.t_start,
+                    t_end=gf.t_end,
+                    n_grid=gf.n_grid,
+                    q_std=model.q_std,
+                    alpha_unit=model.alpha_unit,
+                    template=gf.template,
+                )
+                w_dct_gf = op_gf.w_dct
+            H_gf = w_dct_gf * _safe_sqrt(gf.power_spectrum())[None, :]
             design_cols.append(H_gf)
             pmean_parts.append(jnp.zeros((gf.n_grid,), dtype=jnp.float64))
             psd_parts.append(jnp.ones((gf.n_grid,), dtype=jnp.float64))

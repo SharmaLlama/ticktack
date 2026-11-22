@@ -48,6 +48,7 @@ __all__ = [
     "FisherSpectrumResult",
     "RelaxationModesResult",
     "cbm_fisher_spectrum",
+    "cbm_gp_fisher_spectrum",
     "cbm_mode_impulse_responses",
     "expected_fisher",
     "fisher_projection",
@@ -1386,4 +1387,361 @@ def cbm_mode_impulse_responses(
         parameter_loadings=sel_loadings,
         units=units,
         source="impulse_svd",
+    )
+
+
+def _resolve_spike_prior_precision(
+    p_spike: int,
+    spike_prior_precision: ArrayLike | None,
+) -> jax.Array:
+    """Resolve ``(p_spike, p_spike)`` prior precision matrix on active spike leaves."""
+    if spike_prior_precision is None:
+        return jnp.zeros((p_spike, p_spike), dtype=jnp.float64)
+    arr = jnp.asarray(spike_prior_precision, dtype=jnp.float64)
+    if arr.ndim == 0:
+        return arr * jnp.eye(p_spike, dtype=jnp.float64)
+    if arr.ndim == 1 and arr.shape == (p_spike,):
+        return jnp.diag(arr)
+    if arr.ndim == 2 and arr.shape == (p_spike, p_spike):
+        return 0.5 * (arr + arr.T)
+    raise ValueError(
+        f"spike_prior_precision must be scalar, ({p_spike},), or ({p_spike}, {p_spike}); "
+        f"got shape {arr.shape}."
+    )
+
+
+def cbm_gp_fisher_spectrum(
+    cbm: Any,
+    dataset: Any,
+    gp_or_field: Any,
+    *,
+    spike: Any | None = None,
+    spike_prior_precision: ArrayLike | None = None,
+    marginal_config: Any | None = None,
+    per_series_prior_sd: float | Literal["from_config"] | None = "from_config",
+    prior_sd: float | ArrayLike = 0.35,
+    parameterisation: Literal["log_rates"] = "log_rates",
+    n_grid: int = 56,
+    pad_years: float = 15.0,
+    q_std: float = DEFAULT_Q_STD,
+    alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    mass_fn: Callable[[Any], Any] | None = None,
+    flux_fn: Callable[[Any], Any] | None = None,
+) -> FisherSpectrumResult:
+    r"""Compute the GP- and offset-marginalized CBM Fisher eigenspectrum.
+
+    Builds the effective marginalized data covariance
+
+    .. math::
+
+        \Sigma_{\mathrm{eff}}
+        = \operatorname{diag}(\sigma_d^2)
+        + H_{\mathrm{GP}} H_{\mathrm{GP}}^\top
+        + X_{\mathrm{off}} \Sigma_{\mathrm{off}} X_{\mathrm{off}}^\top,
+
+    matching :func:`~ticktack.likelihood.marginal_log_likelihood` exactly, and
+    projects out any nonlinear :class:`~ticktack.production.MiyakeSpike` tangents
+    (and any uninformative infinite-variance offset columns) via the stabilized QR
+    Schur complement inside :func:`cbm_fisher_spectrum`. The returned
+    :class:`FisherSpectrumResult` can be passed directly to
+    :meth:`~ticktack.cbm.SubspaceCBM.from_fisher`.
+
+    Parameters
+    ----------
+    cbm : CarbonBoxModel
+        Reference carbon-box model (e.g. ``BalancedCBM``).
+    dataset : Dataset or TreeRingSeries
+        Observational dataset defining ring windows, uncertainties, and hemisphere routing.
+    gp_or_field : SpectralKernel, GaussianField, GPProduction, or None
+        Stochastic cosmic-ray production background specification. Accepts a
+        :class:`~ticktack.fields.SpectralKernel`, :class:`~ticktack.fields.GaussianField`,
+        :class:`~ticktack.production.GPProduction`, or ``None`` (white noise + offsets only).
+    spike : MiyakeSpike, optional
+        Parametric event pulse whose active parameters ``(t_start, duration, fluence)``
+        (and ``skewness`` for skew-Gaussian profiles) are projected out via the Schur
+        complement alongside ``SteadyProduction() + spike``.
+    spike_prior_precision : ArrayLike, optional
+        Optional Gaussian prior precision on the active spike parameters (scalar, 1D,
+        or 2D matrix); defaults to zero precision (uninformative).
+    marginal_config : LinearMarginalConfig, optional
+        Linear marginalization configuration; defaults to ``LinearMarginalConfig()``
+        (``offset_mode="hierarchical"`` with ``global_prior_sd=200.0`` and
+        ``lab_prior_sd=1.5``). Supports ``"hierarchical"``, ``"per_series"``,
+        ``"shared"``, and ``"none"``.
+    per_series_prior_sd : float, ``"from_config"``, or None, optional
+        Prior SD on per-series offsets when ``marginal_config.offset_mode == "per_series"``.
+        ``"from_config"`` (default) uses ``marginal_config.global_prior_sd``; passing
+        ``None`` or ``jnp.inf`` projects per-series indicator columns out via an
+        uninformative Schur complement.
+    prior_sd : float or ArrayLike, optional
+        Gaussian prior standard deviation on CBM log-rate parameters (default ``0.35``).
+    parameterisation : {"log_rates"}, optional
+        CBM parameterisation convention (default ``"log_rates"``).
+    n_grid : int, optional
+        Uniform DCT-II grid size used when ``gp_or_field`` is a :class:`SpectralKernel`
+        (default ``56``).
+    pad_years : float, optional
+        Pre-data spin-up padding (years) when ``gp_or_field`` is a :class:`SpectralKernel`
+        (default ``15.0``).
+    q_std, alpha_unit : float, optional
+        Reference steady-state production rate and unit conversion factor.
+    mass_fn, flux_fn : callable, optional
+        Optional physical observable maps passed to :func:`cbm_fisher_spectrum`.
+        ``mass_fn`` defaults to ``lambda m: m.reservoir_masses()`` when available.
+    """
+    from .data import Dataset, TreeRingSeries
+    from .fields import (
+        GaussianField,
+        SpectralKernel,
+        _safe_sqrt,
+        build_dct_response_operator,
+    )
+    from .likelihood import LinearMarginalConfig, _concat_padded_windows
+    from .linear import hierarchical_offset_design, project_causal_gp
+    from .model import RadiocarbonModel
+    from .production import GPProduction, MiyakeSpike, ProductionTerm, SteadyProduction
+
+    if parameterisation != "log_rates":
+        raise ValueError(
+            f"parameterisation must be 'log_rates'; got {parameterisation!r}."
+        )
+
+    if isinstance(dataset, TreeRingSeries):
+        ds = Dataset((dataset,), name=dataset.name)
+    elif isinstance(dataset, Dataset):
+        ds = dataset
+    else:
+        raise TypeError(
+            f"dataset must be a Dataset or TreeRingSeries; got {type(dataset).__name__}."
+        )
+
+    cfg = LinearMarginalConfig() if marginal_config is None else marginal_config
+    if not isinstance(cfg, LinearMarginalConfig):
+        raise TypeError(
+            "marginal_config must be a LinearMarginalConfig or None; "
+            f"got {type(cfg).__name__}."
+        )
+
+    if spike is not None and not isinstance(spike, ProductionTerm):
+        raise TypeError(
+            f"spike must be a MiyakeSpike / ProductionTerm or None; got {type(spike).__name__}."
+        )
+    if spike is not None and not isinstance(spike, MiyakeSpike):
+        warnings.warn(
+            f"spike is {type(spike).__name__} rather than MiyakeSpike; projecting all "
+            "floating-point leaves of spike as nuisance parameters.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    n_obs = ds.n_obs
+    n_series = ds.n_series
+    q_std_f = float(q_std)
+    alpha_unit_f = float(alpha_unit)
+
+    # Steady-state activity ratios for exact hierarchical/shared offset columns
+    y_ss = cbm.steady_state_c14(q_std=q_std_f, alpha_unit=alpha_unit_f)
+    trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
+    y_trop = jnp.sum(y_ss[trop_idx])
+    m_rel = cbm.relative_reservoir_masses()
+    r_ss_ratio = (y_ss / y_trop) / m_rel
+
+    ref_model = RadiocarbonModel(
+        cbm, SteadyProduction(q_std_f), q_std=q_std_f, alpha_unit=alpha_unit_f
+    )
+    box_indices_flat = jnp.array(
+        [
+            ref_model._box_index_for_series(s)
+            for s in ds.series
+            for _ in range(s.n_obs)
+        ],
+        dtype=jnp.int32,
+    )
+    obs_activity_ratios = r_ss_ratio[box_indices_flat]
+
+    # 1. GP / GaussianField forward covariance factor H_gp (n_obs, k_gp)
+    if gp_or_field is None:
+        h_gp = jnp.zeros((n_obs, 0), dtype=jnp.float64)
+    elif isinstance(gp_or_field, SpectralKernel):
+        op_gp = build_dct_response_operator(
+            cbm,
+            ds,
+            n_grid=int(n_grid),
+            pad_years=float(pad_years),
+            q_std=q_std_f,
+            alpha_unit=alpha_unit_f,
+        )
+        spec_gp = gp_or_field.spectrum(op_gp.n_grid, op_gp.dt)
+        h_gp = op_gp.w_dct * _safe_sqrt(spec_gp)[None, :]
+    elif isinstance(gp_or_field, GaussianField):
+        op_gp = build_dct_response_operator(
+            cbm,
+            ds,
+            t_start=gp_or_field.t_start,
+            t_end=gp_or_field.t_end,
+            n_grid=gp_or_field.n_grid,
+            q_std=q_std_f,
+            alpha_unit=alpha_unit_f,
+            template=gp_or_field.template,
+        )
+        h_gp = op_gp.w_dct * _safe_sqrt(gp_or_field.power_spectrum())[None, :]
+    elif isinstance(gp_or_field, GPProduction):
+        all_ts, all_te, all_w = _concat_padded_windows(ds)
+        all_obs_scale = 1000.0 / (y_trop * m_rel[box_indices_flat])
+        r_modes = gp_or_field.n_modes if cfg.n_gp_modes is None else cfg.n_gp_modes
+        a_arg = gp_or_field.domain[0] if gp_or_field.domain is not None else None
+        b_arg = gp_or_field.domain[1] if gp_or_field.domain is not None else None
+        proj = project_causal_gp(
+            A=cbm.matrix_A(),
+            b=cbm.production_vector(),
+            t_starts=all_ts,
+            t_ends=all_te,
+            sub_weights=all_w,
+            a=a_arg,
+            b_bound=b_arg,
+            pad=gp_or_field.pad_years,
+            n_modes=r_modes,
+            kernel=gp_or_field.kernel,
+            alpha_unit=alpha_unit_f,
+            box_indices=box_indices_flat,
+            obs_scale=all_obs_scale,
+            include_initial_cov=cfg.include_gp_initial_cov,
+            cbm=cbm,
+        )
+        assert proj.whitened_design is not None
+        h_gp = proj.whitened_design
+    else:
+        raise TypeError(
+            "gp_or_field must be a SpectralKernel, GaussianField, GPProduction, or None; "
+            f"got {type(gp_or_field).__name__}."
+        )
+
+    # 2. Offset covariance term (finite priors in Sigma_eff; infinite priors via Schur)
+    off_cov = jnp.zeros((n_obs, n_obs), dtype=jnp.float64)
+    h_uninf_cols: list[jax.Array] = []
+
+    if cfg.offset_mode == "hierarchical":
+        h_off, _, sd_off = hierarchical_offset_design(
+            ds.series_indices,
+            n_series=n_series,
+            box_activity_ratios=obs_activity_ratios,
+            global_prior_mean=cfg.global_prior_mean,
+            global_prior_sd=cfg.global_prior_sd,
+            lab_prior_sd=cfg.lab_prior_sd,
+        )
+        sd_off_np = onp.asarray(sd_off, dtype=onp.float64)
+        fin_mask = onp.isfinite(sd_off_np) & (sd_off_np > 0.0)
+        inf_mask = ~onp.isfinite(sd_off_np)
+        if onp.any(fin_mask):
+            idx_f = jnp.asarray(onp.flatnonzero(fin_mask), dtype=jnp.int32)
+            h_f = h_off[:, idx_f] * sd_off[idx_f][None, :]
+            off_cov = off_cov + h_f @ h_f.T
+        if onp.any(inf_mask):
+            idx_i = jnp.asarray(onp.flatnonzero(inf_mask), dtype=jnp.int32)
+            h_uninf_cols.append(h_off[:, idx_i])
+    elif cfg.offset_mode == "per_series":
+        if per_series_prior_sd == "from_config":
+            ps_sd = float(cfg.global_prior_sd)
+        elif per_series_prior_sd is None:
+            ps_sd = math.inf
+        else:
+            ps_sd = float(per_series_prior_sd)
+            if math.isnan(ps_sd) or ps_sd <= 0.0:
+                raise ValueError(
+                    f"per_series_prior_sd must be positive, +inf, or None; got {per_series_prior_sd!r}."
+                )
+        h_ps = ds.lab_offset_design_matrix()
+        if math.isfinite(ps_sd):
+            h_ps_scaled = h_ps * ps_sd
+            off_cov = off_cov + h_ps_scaled @ h_ps_scaled.T
+        else:
+            h_uninf_cols.append(h_ps)
+    elif cfg.offset_mode == "shared":
+        h_sh = obs_activity_ratios[:, None]
+        if math.isfinite(cfg.global_prior_sd):
+            h_sh_scaled = h_sh * float(cfg.global_prior_sd)
+            off_cov = off_cov + h_sh_scaled @ h_sh_scaled.T
+        else:
+            h_uninf_cols.append(h_sh)
+    elif cfg.offset_mode != "none":
+        raise ValueError(f"Unsupported offset_mode {cfg.offset_mode!r}.")
+
+    sigma_eff = jnp.diag(jnp.square(ds.sigma_flat)) + h_gp @ h_gp.T + off_cov
+    sigma_eff = 0.5 * (sigma_eff + sigma_eff.T)
+
+    h_uninf = (
+        jnp.concatenate(h_uninf_cols, axis=1)
+        if h_uninf_cols
+        else jnp.zeros((n_obs, 0), dtype=jnp.float64)
+    )
+    k_uninf = int(h_uninf.shape[1])
+
+    # 3. Assemble forward function and Schur nuisance tuple (spike, uninformative offsets)
+    steady_prod = SteadyProduction(q_std_f)
+    psi_nuisance: Any = None
+    prior_psi_prec: jax.Array | None = None
+
+    if spike is not None and k_uninf > 0:
+        flat_sp, _ = _partition_inexact(spike)
+        p_sp = int(flat_sp.shape[0])
+        sp_prec = _resolve_spike_prior_precision(p_sp, spike_prior_precision)
+        prior_psi_prec = jsl.block_diag(
+            sp_prec, jnp.zeros((k_uninf, k_uninf), dtype=jnp.float64)
+        )
+        psi_nuisance = (spike, jnp.zeros((k_uninf,), dtype=jnp.float64))
+
+        def _fwd(cbm_v: Any, psi: Any) -> jax.Array:
+            sp_v, off_v = psi
+            pred = RadiocarbonModel(
+                cbm_v, steady_prod + sp_v, q_std=q_std_f, alpha_unit=alpha_unit_f
+            ).predict_d14c(ds, concat=True)
+            return pred + h_uninf @ off_v
+
+    elif spike is not None:
+        flat_sp, _ = _partition_inexact(spike)
+        p_sp = int(flat_sp.shape[0])
+        prior_psi_prec = _resolve_spike_prior_precision(p_sp, spike_prior_precision)
+        psi_nuisance = spike
+
+        def _fwd(cbm_v: Any, sp_v: Any) -> jax.Array:
+            return RadiocarbonModel(
+                cbm_v, steady_prod + sp_v, q_std=q_std_f, alpha_unit=alpha_unit_f
+            ).predict_d14c(ds, concat=True)
+
+    elif k_uninf > 0:
+        prior_psi_prec = jnp.zeros((k_uninf, k_uninf), dtype=jnp.float64)
+        psi_nuisance = jnp.zeros((k_uninf,), dtype=jnp.float64)
+
+        def _fwd(cbm_v: Any, off_v: Any) -> jax.Array:
+            pred = RadiocarbonModel(
+                cbm_v, steady_prod, q_std=q_std_f, alpha_unit=alpha_unit_f
+            ).predict_d14c(ds, concat=True)
+            return pred + h_uninf @ off_v
+
+    else:
+        def _fwd(cbm_v: Any) -> jax.Array:
+            return RadiocarbonModel(
+                cbm_v, steady_prod, q_std=q_std_f, alpha_unit=alpha_unit_f
+            ).predict_d14c(ds, concat=True)
+
+    eff_mass_fn = (
+        mass_fn
+        if mass_fn is not None
+        else (
+            (lambda m: m.reservoir_masses())
+            if hasattr(cbm, "reservoir_masses")
+            else None
+        )
+    )
+
+    return cbm_fisher_spectrum(
+        _fwd,
+        cbm,
+        sigma_eff,
+        psi_nuisance=psi_nuisance,
+        prior_cbm_sd=prior_sd,
+        prior_psi_prec=prior_psi_prec,
+        mass_fn=eff_mass_fn,
+        flux_fn=flux_fn,
+        noise_kind="cov",
     )

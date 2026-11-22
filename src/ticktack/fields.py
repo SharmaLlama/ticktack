@@ -54,10 +54,11 @@ from scipy.linalg import solve_triangular as _scipy_solve_triangular
 from scipy.optimize import minimize as _scipy_minimize
 import zodiax as zdx
 
-from .cbm import CarbonBoxModel
+from .cbm import CarbonBoxModel, SubspaceCBM
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 from .data import Dataset, TreeRingSeries
 from .linear import (
+    LinearMarginal,
     hierarchical_offset_design,
     posterior as _linear_posterior_std,
     stationary_cbm_gp_cov,
@@ -88,7 +89,9 @@ __all__ = [
     "GaussianField",
     "LogGaussianField",
     "DCTResponseOperator",
+    "LinearizedDCTOperator",
     "build_dct_response_operator",
+    "build_linearized_dct_operator",
     "build_dct_response_matrix",
     "predict_field_d14c",
     "IFTFieldFitResult",
@@ -1610,6 +1613,231 @@ def build_dct_response_matrix(
         template=template,
     )
     return op if return_operator else op.w_dct
+
+
+class LinearizedDCTOperator(eqx.Module):
+    r"""First-order tangent-linear approximation of ``W_DCT(alpha)`` for :class:`SubspaceCBM`.
+
+    Evaluates the DCT-II forward response matrix of a :class:`GaussianField` around
+    a reference subspace coordinate ``alpha_ref`` (typically the exact MAP ``alpha_MAP``):
+
+    .. math::
+
+        W_{\mathrm{tan}}(\boldsymbol{\alpha})
+        = W_{\mathrm{DCT}}(\boldsymbol{\alpha}_{\mathrm{ref}})
+        + \sum_{k=1}^{m} (\alpha_k - \alpha_{\mathrm{ref}, k})\,
+          \left.\frac{\partial W_{\mathrm{DCT}}}{\partial \alpha_k}\right|_{\boldsymbol{\alpha}_{\mathrm{ref}}},
+
+    avoiding per-step matrix eigendecompositions inside NUTS/SMC while keeping
+    ``SteadyProduction + MiyakeSpike`` and steady-state offset ratios exact at ``alpha``.
+    """
+
+    alpha_ref: jax.Array
+    w_ref: jax.Array
+    dw_dalpha: jax.Array
+    t_grid: jax.Array
+    dt: float = eqx.field(static=True)
+    t_start: float = eqx.field(static=True)
+    t_end: float = eqx.field(static=True)
+    n_grid: int = eqx.field(static=True)
+    dataset_digest: str = eqx.field(static=True)
+    template_digest: str = eqx.field(static=True)
+
+    def __init__(
+        self,
+        alpha_ref: ArrayLike,
+        w_ref: ArrayLike,
+        dw_dalpha: ArrayLike,
+        t_grid: ArrayLike,
+        dt: float,
+        *,
+        t_start: float | None = None,
+        t_end: float | None = None,
+        n_grid: int | None = None,
+        dataset_digest: str = "",
+        template_digest: str = "none",
+    ) -> None:
+        a_ref = jnp.asarray(alpha_ref, dtype=jnp.float64).reshape(-1)
+        w_r = jnp.asarray(w_ref, dtype=jnp.float64)
+        dw = jnp.asarray(dw_dalpha, dtype=jnp.float64)
+        tg = jnp.asarray(t_grid, dtype=jnp.float64).reshape(-1)
+        if w_r.ndim != 2:
+            raise ValueError(f"w_ref must be 2D (n_obs, n_grid), got shape {w_r.shape}.")
+        n_obs, n_g = int(w_r.shape[0]), int(w_r.shape[1])
+        m_modes = int(a_ref.shape[0])
+        if dw.shape != (m_modes, n_obs, n_g):
+            raise ValueError(
+                f"dw_dalpha must have shape ({m_modes}, {n_obs}, {n_g}), got {dw.shape}."
+            )
+        if tg.shape != (n_g,):
+            raise ValueError(f"t_grid must have length {n_g}, got shape {tg.shape}.")
+
+        dt_f = float(dt)
+        if not (math.isfinite(dt_f) and dt_f > 0.0):
+            raise ValueError(f"dt must be finite and positive, got {dt}.")
+
+        t0 = float(tg[0]) if t_start is None else float(t_start)
+        t1 = float(tg[-1]) if t_end is None else float(t_end)
+        self.alpha_ref = a_ref
+        self.w_ref = w_r
+        self.dw_dalpha = dw
+        self.t_grid = tg
+        self.dt = dt_f
+        self.t_start = t0
+        self.t_end = t1
+        self.n_grid = n_g if n_grid is None else int(n_grid)
+        self.dataset_digest = str(dataset_digest)
+        self.template_digest = str(template_digest)
+
+    @property
+    def n_modes(self) -> int:
+        """Number of :class:`SubspaceCBM` modes ``m``."""
+        return int(self.alpha_ref.shape[0])
+
+    def evaluate_w_dct(self, alpha: ArrayLike) -> jax.Array:
+        """Evaluate tangent-linear ``W_tan(alpha)`` of shape ``(n_obs, n_grid)``."""
+        a = jnp.asarray(alpha, dtype=jnp.float64).reshape(-1)
+        if a.shape != self.alpha_ref.shape:
+            raise ValueError(
+                f"Expected alpha of shape {self.alpha_ref.shape}, got {a.shape}."
+            )
+        if self.alpha_ref.shape[0] == 0:
+            return self.w_ref
+        return self.w_ref + jnp.tensordot(a - self.alpha_ref, self.dw_dalpha, axes=([0], [0]))
+
+
+def build_linearized_dct_operator(
+    subspace_cbm: SubspaceCBM,
+    dataset: Dataset | TreeRingSeries,
+    *,
+    t_start: float | None = None,
+    t_end: float | None = None,
+    pad_years: float = 15.0,
+    n_grid: int | None = None,
+    dt_target: float = 1.0,
+    solver: Any | None = None,
+    q_std: ArrayLike = DEFAULT_Q_STD,
+    alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    template: ArrayLike | None = None,
+) -> LinearizedDCTOperator:
+    """Build a :class:`LinearizedDCTOperator` around ``subspace_cbm.alpha`` via ``m`` forward JVPs.
+
+    Parameters
+    ----------
+    subspace_cbm : SubspaceCBM
+        Reference subspace carbon-box model whose ``alpha`` serves as the linearization
+        centre (typically the exact MAP estimate).
+    dataset : Dataset or TreeRingSeries
+        Observational dataset defining ring quadrature windows and hemisphere routing.
+    t_start, t_end : float, optional
+        Field grid bounds (years CE). Defaults to ``(span_lo - pad_years, span_hi + 0.5)``.
+    pad_years : float, optional
+        Pre-data spin-up padding (years) when ``t_start`` is omitted (default ``15.0``).
+    n_grid : int, optional
+        Number of uniform DCT-II knots. When omitted, chosen from ``dt_target`` as
+        ``max(round((t_end - t_start) / dt_target) + 1, 2)``.
+    dt_target : float, optional
+        Target knot spacing in years used when ``n_grid is None`` (default ``1.0``).
+    solver : AbstractSolver, optional
+        Accepted for interface compatibility (exact analytical FOH integration is used).
+    q_std, alpha_unit : ArrayLike, optional
+        Reference production rate and unit conversion factor.
+    template : ArrayLike, optional
+        Optional temporal envelope of shape ``(n_grid,)``.
+    """
+    del solver
+    if not isinstance(subspace_cbm, SubspaceCBM):
+        raise TypeError(
+            "build_linearized_dct_operator requires a SubspaceCBM; "
+            f"got {type(subspace_cbm).__name__}."
+        )
+    ds = _as_dataset(dataset)
+    if t_start is None or t_end is None:
+        span_lo, span_hi = ds.time_span
+        t0 = float(span_lo - float(pad_years)) if t_start is None else float(t_start)
+        t1 = float(span_hi + 0.5) if t_end is None else float(t_end)
+    else:
+        t0 = float(t_start)
+        t1 = float(t_end)
+    if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
+        raise ValueError(f"Expected finite t_end > t_start, got [{t0}, {t1}].")
+
+    if n_grid is None:
+        dt_t = float(dt_target)
+        if not (math.isfinite(dt_t) and dt_t > 0.0):
+            raise ValueError(f"dt_target must be finite and positive, got {dt_target}.")
+        n_g = max(int(round((t1 - t0) / dt_t)) + 1, 2)
+    else:
+        n_g = int(n_grid)
+        if n_g < 2:
+            raise ValueError(f"n_grid must be >= 2, got {n_grid}.")
+
+    if template is not None:
+        tmpl_shape = np.shape(template)
+        if tmpl_shape != (n_g,):
+            raise ValueError(f"template shape {tmpl_shape} must be ({n_g},).")
+
+    ds_digest = _compute_dataset_digest(subspace_cbm, ds)
+    tmpl_digest = _compute_template_digest(template)
+    tmpl_arr = None if template is None else jnp.asarray(template, dtype=jnp.float64)
+    q_arr = jnp.asarray(q_std, dtype=jnp.float64).reshape(())
+    a_arr = jnp.asarray(alpha_unit, dtype=jnp.float64).reshape(())
+    flat_s, flat_e, specs = _pack_dataset_quadrature(subspace_cbm, ds)
+
+    alpha_ref = jnp.asarray(subspace_cbm.alpha, dtype=jnp.float64).reshape(-1)
+    m_modes = int(alpha_ref.shape[0])
+    dt_f = (t1 - t0) / float(n_g - 1)
+    t_grid = jnp.linspace(t0, t1, n_g, dtype=jnp.float64)
+
+    def _w_dct_of_alpha(alpha_vec: jax.Array) -> jax.Array:
+        cbm_a = eqx.tree_at(lambda c: c.alpha, subspace_cbm, alpha_vec)
+        return _compute_dct_operator_jit(
+            cbm_a,
+            q_arr,
+            a_arr,
+            t0,
+            t1,
+            n_g,
+            flat_s,
+            flat_e,
+            specs,
+            tmpl_arr,
+            ds_digest,
+            tmpl_digest,
+        ).w_dct
+
+    if m_modes == 0:
+        w_ref = _w_dct_of_alpha(alpha_ref)
+        dw_dalpha = jnp.zeros((0, w_ref.shape[0], n_g), dtype=jnp.float64)
+    elif _concrete_np(alpha_ref) is not None:
+        @jax.jit
+        def _jvp_one(a_val: jax.Array, tang: jax.Array) -> tuple[jax.Array, jax.Array]:
+            return jax.jvp(_w_dct_of_alpha, (a_val,), (tang,))
+
+        eye_m = jnp.eye(m_modes, dtype=jnp.float64)
+        w_ref, dw0 = _jvp_one(alpha_ref, eye_m[0])
+        dw_list = [dw0]
+        for k in range(1, m_modes):
+            _, dw_k = _jvp_one(alpha_ref, eye_m[k])
+            dw_list.append(dw_k)
+        dw_dalpha = jnp.stack(dw_list, axis=0)
+    else:
+        w_ref = _w_dct_of_alpha(alpha_ref)
+        jac = jax.jacfwd(_w_dct_of_alpha)(alpha_ref)  # (n_obs, n_grid, m_modes)
+        dw_dalpha = jnp.moveaxis(jac, -1, 0)
+
+    return LinearizedDCTOperator(
+        alpha_ref=alpha_ref,
+        w_ref=w_ref,
+        dw_dalpha=dw_dalpha,
+        t_grid=t_grid,
+        dt=dt_f,
+        t_start=t0,
+        t_end=t1,
+        n_grid=n_g,
+        dataset_digest=ds_digest,
+        template_digest=tmpl_digest,
+    )
 
 
 # =============================================================================
@@ -3724,6 +3952,13 @@ class OptimizedKernelResult(zdx.Base):
     bic: jax.Array
     n_hyperparams: int = eqx.field(static=True)
     converged: bool = eqx.field(static=True)
+    cbm_opt: CarbonBoxModel | None = None
+    alpha_opt: jax.Array | None = None
+
+    @property
+    def log_evidence_hyper(self) -> jax.Array:
+        """Alias for :attr:`log_hyper_evidence`."""
+        return self.log_hyper_evidence
 
 
 def _summarize_hyperparams(kernel: SpectralKernel) -> dict[str, float]:
@@ -4445,6 +4680,492 @@ def _optimize_single_kernel_precomputed(
     )
 
 
+def _extract_spike_from_extra(
+    extra_production: ProductionTerm | None,
+) -> tuple[MiyakeSpike | None, str | None]:
+    """Locate the first :class:`MiyakeSpike` in ``extra_production`` and its key name."""
+    if extra_production is None:
+        return None, None
+    if isinstance(extra_production, MiyakeSpike):
+        return extra_production, None
+    if isinstance(extra_production, ProductionSum):
+        for target_name, part in zip(extra_production.names, extra_production.parts):
+            if isinstance(part, MiyakeSpike):
+                return part, target_name
+    return None, None
+
+
+def _replace_spike_in_extra(
+    extra_production: ProductionTerm | None,
+    spike_name: str | None,
+    new_spike: MiyakeSpike | None,
+    q_std: float,
+) -> ProductionTerm:
+    """Return deterministic production term with ``new_spike`` substituted in."""
+    if extra_production is None:
+        return SteadyProduction(q_std)
+    if new_spike is None:
+        return extra_production
+    if isinstance(extra_production, MiyakeSpike):
+        return new_spike
+    if isinstance(extra_production, ProductionSum) and spike_name is not None:
+        new_parts = {
+            nm: (new_spike if nm == spike_name else pt)
+            for nm, pt in zip(extra_production.names, extra_production.parts)
+        }
+        return ProductionSum(new_parts)
+    return extra_production
+
+
+def _unpack_spike_from_vec(
+    sp_u: jax.Array,
+    spike_ref: MiyakeSpike | None,
+    *,
+    has_spike: bool,
+    opt_full_spike: bool,
+    t0: float,
+    t1: float,
+    clip_like: bool = True,
+) -> MiyakeSpike | None:
+    if not has_spike or spike_ref is None:
+        return None
+    if opt_full_spike:
+        ts_raw, ld_raw, lf_raw = sp_u[0], sp_u[1], sp_u[2]
+        if clip_like:
+            ts_v = jnp.clip(ts_raw, t0, t1)
+            dur_v = jnp.exp(jnp.clip(ld_raw, -8.0, 4.0))
+            fl_v = jnp.exp(jnp.clip(lf_raw, -12.0, 12.0))
+        else:
+            ts_v = ts_raw
+            dur_v = _safe_exp_hyper(ld_raw)
+            fl_v = _safe_exp_hyper(lf_raw)
+        sp_upd = eqx.tree_at(lambda s: s.t_start, spike_ref, ts_v)
+        sp_upd = eqx.tree_at(lambda s: s.duration, sp_upd, dur_v)
+        sp_upd = eqx.tree_at(lambda s: s.fluence, sp_upd, fl_v)
+        return sp_upd
+    lf_raw = sp_u[0]
+    fl_v = jnp.exp(jnp.clip(lf_raw, -12.0, 12.0)) if clip_like else _safe_exp_hyper(lf_raw)
+    return eqx.tree_at(lambda s: s.fluence, spike_ref, fl_v)
+
+
+@eqx.filter_jit
+def _cbm_amp_neg_log_evidence_vg(
+    amp: jax.Array,
+    alpha: jax.Array,
+    sp_u: jax.Array,
+    lin_op: LinearizedDCTOperator,
+    cbm_template: SubspaceCBM,
+    ds: Dataset,
+    extra_production: ProductionTerm | None,
+    spike_ref: MiyakeSpike | None,
+    x_off_base: jax.Array,
+    pm_all: jax.Array,
+    ps_all: jax.Array,
+    box_indices_flat: jax.Array,
+    trop_idx: jax.Array,
+    spike_name: str | None,
+    offset_mode: str,
+    has_spike: bool,
+    opt_full_spike: bool,
+    q_std: float,
+    t0: float,
+    t1: float,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
+    """Shared single-compile negative log-evidence + gradients w.r.t. ``(amp, alpha, sp_u)``."""
+    solver = ExactLinearSolver()
+
+    def _nll(amp_in: jax.Array, alpha_in: jax.Array, sp_in: jax.Array) -> jax.Array:
+        alpha_like = jnp.clip(alpha_in, -12.0, 12.0)
+        cbm_a = eqx.tree_at(lambda c: c.alpha, cbm_template, alpha_like)
+        sp_a = _unpack_spike_from_vec(
+            sp_in,
+            spike_ref,
+            has_spike=has_spike,
+            opt_full_spike=opt_full_spike,
+            t0=t0,
+            t1=t1,
+            clip_like=True,
+        )
+        det_prod = _replace_spike_in_extra(extra_production, spike_name, sp_a, q_std)
+        pred_det = RadiocarbonModel(
+            cbm_a, det_prod, solver, q_std=q_std
+        ).predict_d14c(ds, concat=True)
+        resid = ds.d14c_flat - pred_det
+
+        w_tan = lin_op.evaluate_w_dct(alpha_like)
+        h_gf = w_tan * amp_in[None, :]
+        if offset_mode == "hierarchical":
+            y_ss = cbm_a.steady_state_c14(
+                q_std=q_std, alpha_unit=ALPHA_ATOMS_CM2_S_TO_KG_YR
+            )
+            y_trop = jnp.sum(y_ss[trop_idx])
+            m_rel = cbm_a.relative_reservoir_masses()
+            r_ratio = (y_ss / y_trop) / m_rel
+            x_off = x_off_base.at[:, 0].set(r_ratio[box_indices_flat])
+            x_mat = jnp.concatenate([x_off, h_gf], axis=1)
+        else:
+            x_mat = h_gf
+
+        lm = LinearMarginal(x_mat, prior_mean=pm_all, prior_sd=ps_all, method="cholesky")
+        return -lm.loglike(resid, ds.sigma_flat)
+
+    return jax.value_and_grad(_nll, argnums=(0, 1, 2))(amp, alpha, sp_u)
+
+
+def _optimize_single_kernel_with_cbm(
+    label: str,
+    build_kernel_fn: Any,
+    prior_fn: Any,
+    phi0: jax.Array,
+    cbm: SubspaceCBM,
+    ds: Dataset,
+    lin_op: LinearizedDCTOperator,
+    *,
+    extra_production: ProductionTerm | None,
+    optimize_spike: bool,
+    spike_priors: Mapping[str, Any] | None,
+    spike_log_fluence_prior: tuple[float, float],
+    cbm_prior_sd: float,
+    offset_mode: Literal["hierarchical", "none"],
+    multi_start: int,
+    q_std: float,
+    rng_key: jax.Array,
+    alpha_init: jax.Array | None = None,
+    spike_init_term: MiyakeSpike | None = None,
+    prehistory_kernel: Any | None = None,
+    recenter_threshold: float = 0.25,
+) -> OptimizedKernelResult:
+    """Jointly optimize ``(phi, cbm.alpha[, spike])`` with tangent-linear ``W_DCT(alpha)``."""
+    n_k = int(phi0.shape[0])
+    m_modes = int(cbm.n_modes)
+    n_g = lin_op.n_grid
+    t0, t1 = lin_op.t_start, lin_op.t_end
+    dt_f = lin_op.dt
+    cbm_sd_f = float(cbm_prior_sd)
+    solver = ExactLinearSolver()
+
+    spike_orig, spike_name = _extract_spike_from_extra(extra_production)
+    spike_ref = spike_init_term if spike_init_term is not None else spike_orig
+    has_spike = spike_ref is not None
+    opt_full_spike = bool(has_spike and optimize_spike)
+
+    sp_means, sp_sds = _parse_spike_priors(spike_priors, t0, t1)
+    eff_fl_mu = float(spike_log_fluence_prior[0])
+    eff_fl_sd = float(spike_log_fluence_prior[1])
+    if (
+        spike_priors is not None
+        and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
+        and ("fluence" in spike_priors or "log_fluence" in spike_priors)
+    ):
+        eff_fl_mu = float(sp_means[2])
+        eff_fl_sd = float(sp_sds[2])
+
+    a0 = (
+        jnp.asarray(cbm.alpha, dtype=jnp.float64).reshape(m_modes)
+        if alpha_init is None
+        else jnp.asarray(alpha_init, dtype=jnp.float64).reshape(m_modes)
+    )
+    if opt_full_spike:
+        assert spike_ref is not None
+        sp_u0 = jnp.array(
+            [
+                float(spike_ref.t_start),
+                math.log(max(float(spike_ref.duration), 1e-3)),
+                math.log(max(float(spike_ref.fluence), 1e-3)),
+            ],
+            dtype=jnp.float64,
+        )
+        sp_prior_mu_vec = sp_means
+        sp_prior_sd_vec = sp_sds
+        u0 = jnp.concatenate([phi0, a0, sp_u0], axis=0)
+    elif has_spike:
+        assert spike_ref is not None
+        sp_u0 = jnp.array([math.log(max(float(spike_ref.fluence), 1e-3))], dtype=jnp.float64)
+        sp_prior_mu_vec = jnp.array([eff_fl_mu], dtype=jnp.float64)
+        sp_prior_sd_vec = jnp.array([eff_fl_sd], dtype=jnp.float64)
+        u0 = jnp.concatenate([phi0, a0, sp_u0], axis=0)
+    else:
+        sp_prior_mu_vec = jnp.zeros((0,), dtype=jnp.float64)
+        sp_prior_sd_vec = jnp.ones((0,), dtype=jnp.float64)
+        u0 = jnp.concatenate([phi0, a0], axis=0)
+
+    d_u = int(u0.shape[0])
+    n_starts = max(int(multi_start), 1)
+    if n_starts == 1:
+        starts = u0[None, :]
+    else:
+        pert = jax.random.normal(rng_key, (n_starts - 1, d_u), dtype=jnp.float64)
+        scale_vec = np.full(d_u, 0.35, dtype=np.float64)
+        scale_vec[n_k : n_k + m_modes] = 0.15
+        if opt_full_spike:
+            scale_vec[n_k + m_modes :] = np.array([0.1, 0.15, 0.15], dtype=np.float64)
+        elif has_spike:
+            scale_vec[n_k + m_modes :] = 0.15
+        starts = jnp.concatenate(
+            [u0[None, :], u0[None, :] + pert * jnp.asarray(scale_vec)[None, :]],
+            axis=0,
+        )
+
+    box_indices_flat = jnp.array(
+        [
+            int(cbm.box_index(s.box_name, hemisphere=s.hemisphere))
+            for s in ds.series
+            for _ in range(s.n_obs)
+        ],
+        dtype=jnp.int32,
+    )
+    trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
+    if offset_mode == "hierarchical":
+        x_off_base, pm_off, ps_off = hierarchical_offset_design(
+            ds.series_indices,
+            ds.n_series,
+            global_prior_mean=0.0,
+            global_prior_sd=200.0,
+            lab_prior_sd=1.5,
+        )
+        pm_all = jnp.concatenate([pm_off, jnp.zeros((n_g,), dtype=jnp.float64)], axis=0)
+        ps_all = jnp.concatenate([ps_off, jnp.ones((n_g,), dtype=jnp.float64)], axis=0)
+    elif offset_mode == "none":
+        x_off_base = jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
+        pm_all = jnp.zeros((n_g,), dtype=jnp.float64)
+        ps_all = jnp.ones((n_g,), dtype=jnp.float64)
+    else:
+        raise ValueError(
+            f"offset_mode must be 'hierarchical' or 'none', got {offset_mode!r}."
+        )
+
+    @jax.jit
+    def _phi_amp_and_prior(phi_vec: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        amp = _safe_sqrt(build_kernel_fn(jnp.clip(phi_vec, -20.0, 20.0)).spectrum(n_g, dt_f))
+        lp_phi, g_phi_lp = jax.value_and_grad(prior_fn)(phi_vec)
+        return amp, lp_phi, g_phi_lp
+
+    @jax.jit
+    def _phi_vjp_grad(phi_vec: jax.Array, g_amp: jax.Array) -> jax.Array:
+        _, vjp_fn = jax.vjp(
+            lambda p: _safe_sqrt(build_kernel_fn(jnp.clip(p, -20.0, 20.0)).spectrum(n_g, dt_f)),
+            phi_vec,
+        )
+        return vjp_fn(g_amp)[0]
+
+    def _prior_total(u_vec: jax.Array) -> jax.Array:
+        phi = u_vec[:n_k]
+        alpha = u_vec[n_k : n_k + m_modes]
+        sp_u = u_vec[n_k + m_modes :]
+        lp = prior_fn(phi) + jnp.sum(_normal_logpdf(alpha, 0.0, cbm_sd_f))
+        if has_spike:
+            lp = lp + jnp.sum(_normal_logpdf(sp_u, sp_prior_mu_vec, sp_prior_sd_vec))
+        return lp
+
+    def _eval_vg(u_np: np.ndarray, cur_lin_op: LinearizedDCTOperator) -> tuple[float, np.ndarray]:
+        u_j = jnp.asarray(u_np, dtype=jnp.float64)
+        phi_j = u_j[:n_k]
+        alpha_j = u_j[n_k : n_k + m_modes]
+        sp_j = u_j[n_k + m_modes :]
+
+        amp_j, lp_phi, g_phi_lp = _phi_amp_and_prior(phi_j)
+        nll, (g_amp, g_alpha_nll, g_sp_nll) = _cbm_amp_neg_log_evidence_vg(
+            amp_j,
+            alpha_j,
+            sp_j,
+            cur_lin_op,
+            cbm,
+            ds,
+            extra_production,
+            spike_ref,
+            x_off_base,
+            pm_all,
+            ps_all,
+            box_indices_flat,
+            trop_idx,
+            spike_name,
+            offset_mode,
+            has_spike,
+            opt_full_spike,
+            float(q_std),
+            float(t0),
+            float(t1),
+        )
+        g_phi_nll = _phi_vjp_grad(phi_j, g_amp)
+
+        lp_alpha = jnp.sum(_normal_logpdf(alpha_j, 0.0, cbm_sd_f))
+        g_alpha_lp = -alpha_j / (cbm_sd_f * cbm_sd_f)
+        if has_spike:
+            lp_sp = jnp.sum(_normal_logpdf(sp_j, sp_prior_mu_vec, sp_prior_sd_vec))
+            g_sp_lp = -(sp_j - sp_prior_mu_vec) / jnp.square(sp_prior_sd_vec)
+        else:
+            lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
+            g_sp_lp = jnp.zeros((0,), dtype=jnp.float64)
+
+        val_tot = float(nll - (lp_phi + lp_alpha + lp_sp))
+        g_tot = np.asarray(
+            jnp.concatenate(
+                [g_phi_nll - g_phi_lp, g_alpha_nll - g_alpha_lp, g_sp_nll - g_sp_lp],
+                axis=0,
+            ),
+            dtype=np.float64,
+        )
+        if not (math.isfinite(val_tot) and np.all(np.isfinite(g_tot))):
+            return 1e30, np.zeros_like(u_np)
+        return val_tot, g_tot
+
+    def _run_opt(
+        cur_lin_op: LinearizedDCTOperator, init_starts: jax.Array, maxiter: int = 160
+    ) -> tuple[np.ndarray, bool]:
+        def _obj_np(u_np: np.ndarray) -> tuple[float, np.ndarray]:
+            return _eval_vg(u_np, cur_lin_op)
+
+        best_val = float("inf")
+        best_x = np.asarray(init_starts[0], dtype=np.float64)
+        best_conv = False
+        for s_idx in range(int(init_starts.shape[0])):
+            res_s = _scipy_minimize(
+                _obj_np,
+                np.asarray(init_starts[s_idx], dtype=np.float64),
+                method="BFGS",
+                jac=True,
+                options={"gtol": 1e-5, "maxiter": maxiter},
+            )
+            if not res_s.success and int(getattr(res_s, "nit", maxiter)) < maxiter:
+                res_l = _scipy_minimize(
+                    _obj_np,
+                    np.asarray(res_s.x, dtype=np.float64),
+                    method="L-BFGS-B",
+                    jac=True,
+                    options={"ftol": 1e-12, "gtol": 1e-5, "maxiter": maxiter},
+                )
+                if math.isfinite(float(res_l.fun)) and float(res_l.fun) <= float(res_s.fun) + 1e-11:
+                    res_s = res_l
+            vf = float(res_s.fun)
+            cv = bool(res_s.success)
+            if math.isfinite(vf) and (
+                (cv and not best_conv) or (cv == best_conv and vf < best_val)
+            ):
+                best_val = vf
+                best_x = np.asarray(res_s.x, dtype=np.float64)
+                best_conv = cv
+        return best_x, best_conv
+
+    active_lin_op = lin_op
+    best_u_np, converged = _run_opt(active_lin_op, starts)
+
+    alpha_step = best_u_np[n_k : n_k + m_modes]
+    shift_norm = float(np.linalg.norm(alpha_step - np.asarray(active_lin_op.alpha_ref)))
+    if shift_norm > float(recenter_threshold):
+        cbm_mid = eqx.tree_at(
+            lambda c: c.alpha, cbm, jnp.asarray(alpha_step, dtype=jnp.float64)
+        )
+        active_lin_op = build_linearized_dct_operator(
+            cbm_mid,
+            ds,
+            t_start=t0,
+            t_end=t1,
+            n_grid=n_g,
+            q_std=q_std,
+        )
+        best_u_np, converged = _run_opt(
+            active_lin_op, jnp.asarray(best_u_np, dtype=jnp.float64)[None, :], maxiter=80
+        )
+
+    u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
+    phi_opt = u_opt[:n_k]
+    alpha_opt = u_opt[n_k : n_k + m_modes]
+    kern_opt = build_kernel_fn(phi_opt)
+    cbm_opt = eqx.tree_at(lambda c: c.alpha, cbm, alpha_opt)
+    sp_opt = _unpack_spike_from_vec(
+        u_opt[n_k + m_modes :],
+        spike_ref,
+        has_spike=has_spike,
+        opt_full_spike=opt_full_spike,
+        t0=t0,
+        t1=t1,
+        clip_like=False,
+    )
+    final_extra = (
+        None
+        if extra_production is None
+        else _replace_spike_in_extra(extra_production, spike_name, sp_opt, float(q_std))
+    )
+
+    # Exact DCT operator & closed-form Wiener fit at (cbm_opt, kern_opt, final_extra)
+    op_opt = build_dct_response_operator(
+        cbm_opt, ds, t_start=t0, t_end=t1, n_grid=n_g, q_std=q_std
+    )
+    gf_init = GaussianField(
+        jnp.zeros((n_g,), dtype=jnp.float64),
+        t0,
+        t1,
+        kernel=kern_opt,
+        zero_mode=getattr(kern_opt, "zero_mode", False),
+    )
+    prod_opt = gf_init if final_extra is None else (final_extra + gf_init)
+    fit_res = fit_ift_field(
+        RadiocarbonModel(cbm_opt, prod_opt, solver, q_std=q_std),
+        ds,
+        offset_mode=offset_mode,
+        operator=op_opt,
+        prehistory_kernel=prehistory_kernel,
+    )
+    ln_z_val = fit_res.log_evidence
+    gamma_val = fit_res.gamma
+
+    # Central finite-difference Hessian of exact first-order gradient at u_opt
+    def _grad_np(u_arr_np: np.ndarray) -> np.ndarray:
+        _, g_val = _eval_vg(u_arr_np, active_lin_op)
+        return g_val
+
+    hess_all = _finite_diff_hessian_from_grad(_grad_np, best_u_np, eps=1e-5)
+    hess_all_sym = 0.5 * (hess_all + hess_all.T)
+
+    # Schur-complement kernel hyperparameter Hessian block
+    if d_u > n_k:
+        h_pp = hess_all_sym[:n_k, :n_k]
+        h_pn = hess_all_sym[:n_k, n_k:]
+        h_nn = hess_all_sym[n_k:, n_k:]
+        evals_nn = jnp.linalg.eigvalsh(h_nn)
+        if bool(jnp.all(jnp.isfinite(evals_nn)) and jnp.all(evals_nn > 0.0)):
+            schur = h_pp - h_pn @ jnp.linalg.solve(h_nn, h_pn.T)
+            h_sym = 0.5 * (schur + schur.T)
+        else:
+            h_sym = h_pp
+    else:
+        h_sym = hess_all_sym
+
+    lp_val = _prior_total(u_opt)
+    ln_joint = ln_z_val + lp_val
+    evals_all = jnp.linalg.eigvalsh(hess_all_sym)
+    hess_is_pd = bool(jnp.all(jnp.isfinite(evals_all)) and jnp.all(evals_all > 0.0))
+    if converged and hess_is_pd and bool(jnp.isfinite(ln_joint)):
+        _, logdet_h_all = jnp.linalg.slogdet(hess_all_sym)
+        ln_hyper = ln_joint + 0.5 * d_u * math.log(2.0 * math.pi) - 0.5 * logdet_h_all
+    else:
+        converged = False
+        ln_hyper = jnp.asarray(-jnp.inf, dtype=jnp.float64)
+
+    aic_val = -2.0 * ln_z_val + 2.0 * d_u
+    bic_val = -2.0 * ln_z_val + float(d_u) * math.log(max(ds.n_obs, 1))
+
+    return OptimizedKernelResult(
+        name=label,
+        kernel=kern_opt,
+        fit=fit_res,
+        phi_map=phi_opt,
+        hyperparameters=_summarize_hyperparams(kern_opt),
+        log_evidence=ln_z_val,
+        log_hyperprior=lp_val,
+        log_joint_hyper=ln_joint,
+        log_hyper_evidence=ln_hyper,
+        hyper_hessian=h_sym,
+        gamma=gamma_val,
+        aic=aic_val,
+        bic=bic_val,
+        n_hyperparams=n_k + m_modes,
+        converged=converged,
+        cbm_opt=cbm_opt,
+        alpha_opt=alpha_opt,
+    )
+
+
 def optimize_gp_kernel(
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
@@ -4453,6 +5174,8 @@ def optimize_gp_kernel(
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
     optimize_spike: bool = False,
+    optimize_cbm: bool = False,
+    cbm_prior_sd: float = 1.0,
     spike_priors: Mapping[str, Any] | None = None,
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
@@ -4471,7 +5194,10 @@ def optimize_gp_kernel(
     When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
     first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
     :class:`GaussianField` using ``spike_priors`` before profiling ``fluence`` jointly with
-    each kernel's spectral hyperparameters.
+    each kernel's spectral hyperparameters. When ``optimize_cbm=True`` and ``cbm`` is a
+    :class:`SubspaceCBM`, jointly optimizes ``cbm.alpha`` under ``N(0, cbm_prior_sd^2 I)``
+    alongside kernel hyperparameters (and spike parameters) and includes the ``cbm.alpha``
+    prior and Laplace Occam determinant in ``log_hyper_evidence`` and ``n_hyperparams``.
 
     .. math::
 
@@ -4485,6 +5211,43 @@ def optimize_gp_kernel(
         kernel, zero_mode=zm, hyperprior_override=hyperprior
     )
     label = kernel if isinstance(kernel, str) else type(kernel).__name__
+
+    if optimize_cbm:
+        _check_positive_concrete("cbm_prior_sd", cbm_prior_sd)
+        if not isinstance(cbm, SubspaceCBM) or cbm.n_modes == 0:
+            warnings.warn(
+                "optimize_cbm=True requires a SubspaceCBM with n_modes > 0; "
+                "proceeding with fixed CBM.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            if field_kind != "gaussian":
+                raise NotImplementedError(
+                    "optimize_cbm=True is currently supported for field_kind='gaussian'."
+                )
+            lin_op0 = build_linearized_dct_operator(
+                cbm, ds, pad_years=pad_years, n_grid=n_grid, q_std=q_std
+            )
+            return _optimize_single_kernel_with_cbm(
+                label=label,
+                build_kernel_fn=build_fn,
+                prior_fn=prior_fn,
+                phi0=phi0,
+                cbm=cbm,
+                ds=ds,
+                lin_op=lin_op0,
+                extra_production=extra_production,
+                optimize_spike=optimize_spike,
+                spike_priors=spike_priors,
+                spike_log_fluence_prior=spike_log_fluence_prior,
+                cbm_prior_sd=float(cbm_prior_sd),
+                offset_mode=offset_mode,
+                multi_start=multi_start,
+                q_std=q_std,
+                rng_key=key,
+                prehistory_kernel=prehistory_kernel,
+            )
 
     op = build_dct_response_operator(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
@@ -4655,6 +5418,8 @@ def select_gp_kernel(
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
     optimize_spike: bool = False,
+    optimize_cbm: bool = False,
+    cbm_prior_sd: float = 1.0,
     spike_priors: Mapping[str, Any] | None = None,
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None = None,
@@ -4677,6 +5442,10 @@ def select_gp_kernel(
     When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
     first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
     :class:`GaussianField` using ``spike_priors`` before ranking all candidate kernels.
+    When ``optimize_cbm=True`` and ``cbm`` is a :class:`SubspaceCBM`, jointly optimizes
+    ``cbm.alpha`` under ``N(0, cbm_prior_sd^2 I)`` alongside each candidate kernel's
+    hyperparameters (and spike parameters) and includes the ``cbm.alpha`` prior and
+    Laplace Occam determinant in ``log_hyper_evidence`` and ``n_hyperparams``.
     """
     ds = _as_dataset(dataset)
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
@@ -4695,127 +5464,227 @@ def select_gp_kernel(
     if not cand_items:
         raise ValueError("candidates must contain at least one kernel.")
 
-    op = build_dct_response_operator(
-        cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
-    )
-    root_y0 = _resolve_prehistory_root_y0(
-        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
-    )
-    eff_fluence_prior = spike_log_fluence_prior
-    if (
-        spike_priors is not None
-        and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
-        and ("fluence" in spike_priors or "log_fluence" in spike_priors)
-    ):
-        sp_m, sp_s = _parse_spike_priors(spike_priors, op.t_start, op.t_end)
-        eff_fluence_prior = (float(sp_m[2]), float(sp_s[2]))
-
-    if extra_production is not None:
-        upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
-            cbm,
-            ds,
-            extra_production,
-            op,
-            offset_mode,
-            q_std,
-            optimize_spike=optimize_spike,
-            spike_priors=spike_priors,
-            prehistory_root_y0=root_y0,
-        )
-    else:
-        upd_extra = None
-        fixed_exc = jnp.zeros((ds.n_obs,), dtype=jnp.float64)
-        unit_sp = None
-        sp_fl = 0.0
-
-    x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
-        ds,
-        op.box_activity_ratios,
-        offset_mode=offset_mode,
-        global_offset_prior_sd=200.0,
-        lab_offset_prior_sd=1.5,
-        prehistory_root_y0=root_y0,
-        init_state_basis=op.init_state_basis,
-    )
-    inv_sig = 1.0 / ds.sigma_flat
-    log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
-    nuis_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
-    x_raw_base = inv_sig * (ds.d14c_flat - op.ss_d14c - fixed_exc - nuis_shift)
-    w_dct_scaled = inv_sig[:, None] * op.w_dct
-    w_grid_scaled = inv_sig[:, None] * op.w_grid
-    n_g = op.n_grid
-
-    if unit_sp is not None:
-        aug_mat = jnp.concatenate(
-            [w_dct_scaled, w_grid_scaled, (inv_sig * unit_sp)[:, None]], axis=1
-        )
-        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, aug_mat, u_nuis
-        )
-        w_dct_eff = aug_eff[:, :n_g]
-        w_grid_eff = aug_eff[:, n_g : 2 * n_g]
-        unit_sp_eff: jax.Array | None = aug_eff[:, -1]
-    else:
-        aug_mat = jnp.concatenate([w_dct_scaled, w_grid_scaled], axis=1)
-        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-            x_raw_base, aug_mat, u_nuis
-        )
-        w_dct_eff = aug_eff[:, :n_g]
-        w_grid_eff = aug_eff[:, n_g:]
-        unit_sp_eff = None
-
-    subkeys = jax.random.split(key, len(cand_items) + 1)
-    sample_key = subkeys[-1]
-
-    results: list[OptimizedKernelResult] = []
-    for idx, (label, spec_item) in enumerate(cand_items):
-        hp_override = (
-            hyperpriors[label]
-            if hyperpriors is not None and label in hyperpriors
-            else hyperprior
-        )
-        try:
-            build_fn, prior_fn, _, phi0, cache_tag = _kernel_builders_from_spec(
-                spec_item, zero_mode=zm, hyperprior_override=hp_override
+    use_cbm_opt = False
+    if optimize_cbm:
+        _check_positive_concrete("cbm_prior_sd", cbm_prior_sd)
+        if not isinstance(cbm, SubspaceCBM) or cbm.n_modes == 0:
+            warnings.warn(
+                "optimize_cbm=True requires a SubspaceCBM with n_modes > 0; "
+                "proceeding with fixed CBM.",
+                UserWarning,
+                stacklevel=2,
             )
-        except TypeError as exc:
-            raise TypeError(
-                f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
-            ) from exc
+        else:
+            if field_kind != "gaussian":
+                raise NotImplementedError(
+                    "optimize_cbm=True is currently supported for field_kind='gaussian'."
+                )
+            use_cbm_opt = True
 
-        res_k = _optimize_single_kernel_precomputed(
-            label=label,
-            cache_tag=cache_tag,
-            build_kernel_fn=build_fn,
-            prior_fn=prior_fn,
-            phi0=phi0,
+    subkeys = jax.random.split(key, len(cand_items) + 2)
+    ref_key = subkeys[-2]
+    sample_key = subkeys[-1]
+    results: list[OptimizedKernelResult] = []
+
+    if use_cbm_opt:
+        assert isinstance(cbm, SubspaceCBM)
+        lin_op0 = build_linearized_dct_operator(
+            cbm, ds, pad_years=pad_years, n_grid=n_grid, q_std=q_std
+        )
+        # Warm-start alpha_ref and spike_ref once using a smooth Matern-3/2 reference
+        ref_build, ref_prior, _, ref_phi0, _ = _kernel_builders_from_spec(
+            "matern32", zero_mode=False
+        )
+        ref_res = _optimize_single_kernel_with_cbm(
+            label="_ref_matern32",
+            build_kernel_fn=ref_build,
+            prior_fn=ref_prior,
+            phi0=ref_phi0,
             cbm=cbm,
             ds=ds,
-            op=op,
-            x_eff_base=x_eff_base,
-            w_dct_eff=w_dct_eff,
-            w_grid_eff=w_grid_eff,
-            unit_spike_eff=unit_sp_eff,
-            fixed_exc=fixed_exc,
-            unit_sp_raw=unit_sp,
-            x_nuis=x_nuis,
-            mu_nuis=mu_nuis,
-            root_nuis=root_nuis,
-            u_nuis=u_nuis,
-            spike_fluence_init=sp_fl,
-            spike_log_fluence_prior=eff_fluence_prior,
-            updated_extra=upd_extra,
-            log_norm_d=log_norm_d,
-            half_logdet_nuis=half_logdet_nuis,
-            field_kind=field_kind,
+            lin_op=lin_op0,
+            extra_production=extra_production,
+            optimize_spike=optimize_spike,
+            spike_priors=spike_priors,
+            spike_log_fluence_prior=spike_log_fluence_prior,
+            cbm_prior_sd=float(cbm_prior_sd),
             offset_mode=offset_mode,
-            multi_start=multi_start,
+            multi_start=1,
             q_std=q_std,
-            rng_key=subkeys[idx],
-            prehistory_root_y0=root_y0,
+            rng_key=ref_key,
             prehistory_kernel=prehistory_kernel,
+            recenter_threshold=1e9,
         )
-        results.append(res_k)
+        alpha_ref_shared = ref_res.alpha_opt
+        assert alpha_ref_shared is not None
+        cbm_ref_shared = eqx.tree_at(lambda c: c.alpha, cbm, alpha_ref_shared)
+        lin_op_shared = build_linearized_dct_operator(
+            cbm_ref_shared,
+            ds,
+            t_start=lin_op0.t_start,
+            t_end=lin_op0.t_end,
+            n_grid=lin_op0.n_grid,
+            q_std=q_std,
+        )
+        spike_ref_shared, _ = _extract_spike_from_extra(ref_res.fit.model.production)
+        t_grid_out = lin_op_shared.t_grid
+
+        for idx, (label, spec_item) in enumerate(cand_items):
+            hp_override = (
+                hyperpriors[label]
+                if hyperpriors is not None and label in hyperpriors
+                else hyperprior
+            )
+            try:
+                build_fn, prior_fn, _, phi0, _ = _kernel_builders_from_spec(
+                    spec_item, zero_mode=False, hyperprior_override=hp_override
+                )
+            except TypeError as exc:
+                raise TypeError(
+                    f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
+                ) from exc
+
+            res_k = _optimize_single_kernel_with_cbm(
+                label=label,
+                build_kernel_fn=build_fn,
+                prior_fn=prior_fn,
+                phi0=phi0,
+                cbm=cbm,
+                ds=ds,
+                lin_op=lin_op_shared,
+                extra_production=extra_production,
+                optimize_spike=optimize_spike,
+                spike_priors=spike_priors,
+                spike_log_fluence_prior=spike_log_fluence_prior,
+                cbm_prior_sd=float(cbm_prior_sd),
+                offset_mode=offset_mode,
+                multi_start=multi_start,
+                q_std=q_std,
+                rng_key=subkeys[idx],
+                alpha_init=alpha_ref_shared,
+                spike_init_term=spike_ref_shared,
+                prehistory_kernel=prehistory_kernel,
+            )
+            results.append(res_k)
+    else:
+        op = build_dct_response_operator(
+            cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
+        )
+        t_grid_out = op.t_grid
+        root_y0 = _resolve_prehistory_root_y0(
+            cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
+        )
+        eff_fluence_prior = spike_log_fluence_prior
+        if (
+            spike_priors is not None
+            and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
+            and ("fluence" in spike_priors or "log_fluence" in spike_priors)
+        ):
+            sp_m, sp_s = _parse_spike_priors(spike_priors, op.t_start, op.t_end)
+            eff_fluence_prior = (float(sp_m[2]), float(sp_s[2]))
+
+        if extra_production is not None:
+            upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
+                cbm,
+                ds,
+                extra_production,
+                op,
+                offset_mode,
+                q_std,
+                optimize_spike=optimize_spike,
+                spike_priors=spike_priors,
+                prehistory_root_y0=root_y0,
+            )
+        else:
+            upd_extra = None
+            fixed_exc = jnp.zeros((ds.n_obs,), dtype=jnp.float64)
+            unit_sp = None
+            sp_fl = 0.0
+
+        x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
+            ds,
+            op.box_activity_ratios,
+            offset_mode=offset_mode,
+            global_offset_prior_sd=200.0,
+            lab_offset_prior_sd=1.5,
+            prehistory_root_y0=root_y0,
+            init_state_basis=op.init_state_basis,
+        )
+        inv_sig = 1.0 / ds.sigma_flat
+        log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
+        nuis_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
+        x_raw_base = inv_sig * (ds.d14c_flat - op.ss_d14c - fixed_exc - nuis_shift)
+        w_dct_scaled = inv_sig[:, None] * op.w_dct
+        w_grid_scaled = inv_sig[:, None] * op.w_grid
+        n_g = op.n_grid
+
+        if unit_sp is not None:
+            aug_mat = jnp.concatenate(
+                [w_dct_scaled, w_grid_scaled, (inv_sig * unit_sp)[:, None]], axis=1
+            )
+            x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+                x_raw_base, aug_mat, u_nuis
+            )
+            w_dct_eff = aug_eff[:, :n_g]
+            w_grid_eff = aug_eff[:, n_g : 2 * n_g]
+            unit_sp_eff: jax.Array | None = aug_eff[:, -1]
+        else:
+            aug_mat = jnp.concatenate([w_dct_scaled, w_grid_scaled], axis=1)
+            x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+                x_raw_base, aug_mat, u_nuis
+            )
+            w_dct_eff = aug_eff[:, :n_g]
+            w_grid_eff = aug_eff[:, n_g:]
+            unit_sp_eff = None
+
+        for idx, (label, spec_item) in enumerate(cand_items):
+            hp_override = (
+                hyperpriors[label]
+                if hyperpriors is not None and label in hyperpriors
+                else hyperprior
+            )
+            try:
+                build_fn, prior_fn, _, phi0, cache_tag = _kernel_builders_from_spec(
+                    spec_item, zero_mode=zm, hyperprior_override=hp_override
+                )
+            except TypeError as exc:
+                raise TypeError(
+                    f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
+                ) from exc
+
+            res_k = _optimize_single_kernel_precomputed(
+                label=label,
+                cache_tag=cache_tag,
+                build_kernel_fn=build_fn,
+                prior_fn=prior_fn,
+                phi0=phi0,
+                cbm=cbm,
+                ds=ds,
+                op=op,
+                x_eff_base=x_eff_base,
+                w_dct_eff=w_dct_eff,
+                w_grid_eff=w_grid_eff,
+                unit_spike_eff=unit_sp_eff,
+                fixed_exc=fixed_exc,
+                unit_sp_raw=unit_sp,
+                x_nuis=x_nuis,
+                mu_nuis=mu_nuis,
+                root_nuis=root_nuis,
+                u_nuis=u_nuis,
+                spike_fluence_init=sp_fl,
+                spike_log_fluence_prior=eff_fluence_prior,
+                updated_extra=upd_extra,
+                log_norm_d=log_norm_d,
+                half_logdet_nuis=half_logdet_nuis,
+                field_kind=field_kind,
+                offset_mode=offset_mode,
+                multi_start=multi_start,
+                q_std=q_std,
+                rng_key=subkeys[idx],
+                prehistory_root_y0=root_y0,
+                prehistory_kernel=prehistory_kernel,
+            )
+            results.append(res_k)
 
     ranked = tuple(
         sorted(
@@ -4894,7 +5763,7 @@ def select_gp_kernel(
         posterior_latents=draws["latents"],
         posterior_q=draws["q"],
         posterior_spectrum=post_spec,
-        t_grid=op.t_grid,
+        t_grid=t_grid_out,
         error_scale_global=s_glob,
         error_scale_by_series=s_by_ser,
     )

@@ -31,14 +31,17 @@ import numpyro
 import numpyro.distributions as dist
 import numpyro.distributions.distribution as _np_dist_mod
 import optax
+import xarray as xr
 
 if not hasattr(dist, "distribution"):
     dist.distribution = _np_dist_mod
 from jax.typing import ArrayLike
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO, autoguide
 
+from .cbm import SubspaceCBM
 from .data import Dataset
-from .fitting import _laplace_covariance, fit_map
+from .fields import LinearizedDCTOperator, build_linearized_dct_operator
+from .fitting import MAPResult, _laplace_covariance, fit_map
 from .likelihood import (
     FastLogLikeSpec,
     LinearMarginalConfig,
@@ -62,9 +65,12 @@ from .solvers import ModaxSolver
 __all__ = [
     "SVIResult",
     "SMCResult",
+    "SubspaceGPFitResult",
     "sample_nuts",
     "fit_svi",
     "sample_smc",
+    "reweight_exact_marginal",
+    "fit_subspace_cbm_gp",
 ]
 
 
@@ -128,6 +134,8 @@ def _vmap_fast_lk_jit(
     fast_lk_spec: FastLogLikeSpec,
     u_batch: jax.Array,
 ) -> jax.Array:
+    if fast_lk_spec.mode == "dynamic":
+        return jax.lax.map(fast_lk_spec, u_batch, batch_size=4)
     return jax.vmap(fast_lk_spec)(u_batch)
 
 
@@ -136,6 +144,8 @@ def _vmap_fast_resid_jit(
     fast_lk_spec: FastLogLikeSpec,
     u_batch: jax.Array,
 ) -> jax.Array:
+    if fast_lk_spec.mode == "dynamic":
+        return jax.lax.map(fast_lk_spec.nonlinear_residual_from_u, u_batch, batch_size=4)
     return jax.vmap(fast_lk_spec.nonlinear_residual_from_u)(u_batch)
 
 
@@ -297,6 +307,10 @@ def sample_nuts(
     max_tree_depth: int = 10,
     init_map: bool = True,
     dense_mass: bool = True,
+    adapt_mass_matrix: bool = True,
+    init_u: ArrayLike | None = None,
+    init_cov_u: ArrayLike | None = None,
+    chain_method: Literal["auto", "vectorized", "sequential", "parallel"] = "auto",
     reconstruct_linear: bool = True,
     t_fine: ArrayLike | None = None,
     rng_key: jax.Array | None = None,
@@ -319,7 +333,18 @@ def sample_nuts(
     if d > 0:
         z_center: jax.Array | None = None
         cov_u: jax.Array | None = None
-        if init_map:
+        if init_u is not None:
+            u_in = jnp.asarray(init_u, dtype=jnp.float64).reshape(d)
+            z_cand = (u_in - prior_means) / prior_sds
+            if bool(jnp.all(jnp.isfinite(z_cand))):
+                z_center = z_cand
+            if init_cov_u is not None:
+                cov_u = jnp.asarray(init_cov_u, dtype=jnp.float64).reshape(d, d)
+            elif d <= 16 and not isinstance(model.solver, ModaxSolver):
+                cov_u = _laplace_covariance(
+                    u_in, model, dataset, parameter_space, cfg, sigma_jitter
+                )
+        elif init_map:
             rng_key, map_key = jax.random.split(rng_key)
             try:
                 map_result = fit_map(
@@ -394,8 +419,9 @@ def sample_nuts(
                 shape=(num_chains, d),
                 dtype=jnp.float64,
             )
+            step_scale = 0.05 if init_u is not None else 0.15
             perturb = (
-                0.15 * (raw_eps @ L_z.T) if L_z is not None else 0.05 * raw_eps
+                step_scale * (raw_eps @ L_z.T) if L_z is not None else 0.05 * raw_eps
             )
             z_starts = z_center[None, :] + perturb
             init_params = {"z": z_starts[0] if num_chains == 1 else z_starts}
@@ -403,19 +429,28 @@ def sample_nuts(
     numpyro_model_fn = _make_numpyro_model(
         model, dataset, parameter_space, cfg, sigma_jitter
     )
-    nuts_kernel = NUTS(
-        numpyro_model_fn,
-        target_accept_prob=target_accept_prob,
-        dense_mass=dense_mass,
-        max_tree_depth=max_tree_depth,
-        inverse_mass_matrix=inv_mass_init,
+    nuts_kwargs: dict[str, Any] = {
+        "target_accept_prob": target_accept_prob,
+        "dense_mass": dense_mass,
+        "adapt_mass_matrix": bool(adapt_mass_matrix),
+        "max_tree_depth": max_tree_depth,
+        "inverse_mass_matrix": inv_mass_init,
+    }
+    if init_cov_u is not None and inv_mass_init is not None:
+        nuts_kwargs["step_size"] = 0.5
+        nuts_kwargs["find_heuristic_step_size"] = False
+    nuts_kernel = NUTS(numpyro_model_fn, **nuts_kwargs)
+    eff_chain_method = (
+        ("vectorized" if num_chains > 1 else "sequential")
+        if chain_method == "auto"
+        else chain_method
     )
     mcmc = MCMC(
         nuts_kernel,
         num_warmup=num_warmup,
         num_samples=num_samples,
         num_chains=num_chains,
-        chain_method="vectorized" if num_chains > 1 else "sequential",
+        chain_method=eff_chain_method,
         progress_bar=progress_bar,
     )
 
@@ -1108,4 +1143,403 @@ def sample_smc(
         ess_history=jnp.asarray(ess_list, dtype=jnp.float64),
         root_ess=jnp.asarray(root_ess_val, dtype=jnp.float64),
         mean_accept_prob=jnp.asarray(mean_acc_val, dtype=jnp.float64),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. Two-stage SubspaceCBM + marginalized GP sampling & exact IS reweighting
+# ---------------------------------------------------------------------------
+
+
+class SubspaceGPFitResult(NamedTuple):
+    """Results from :func:`fit_subspace_cbm_gp`.
+
+    Supports both attribute access (``res.idata``, ``res.map_result``, ``res.lin_op``,
+    ``res.diagnostics``) and 4-tuple unpacking
+    ``idata, map_result, lin_op, diagnostics = fit_subspace_cbm_gp(...)``.
+    """
+
+    idata: az.InferenceData
+    """Posterior ``arviz.InferenceData`` (with ``sample_stats['log_weight_is']`` when reweighted)."""
+
+    map_result: MAPResult
+    """Stage-1 exact MAP estimate and regularized Laplace covariance."""
+
+    lin_op: LinearizedDCTOperator
+    """MAP-centred :class:`~ticktack.fields.LinearizedDCTOperator` used in Stage 2."""
+
+    diagnostics: dict[str, Any]
+    """Dictionary of sampler and exact importance-sampling diagnostics."""
+
+    @property
+    def smc_result(self) -> SMCResult | None:
+        """Underlying :class:`SMCResult` when ``sampler='smc'``, else ``None``."""
+        return self.diagnostics.get("smc_result")
+
+    @property
+    def kish_ess_ratio(self) -> float | None:
+        """Kish effective sample size fraction ``ESS_IS / S`` when reweighted."""
+        return self.diagnostics.get("kish_ess_ratio")
+
+
+def _pack_unconstrained_from_idata(
+    idata: az.InferenceData,
+    parameter_space: ParameterSpace,
+) -> tuple[np.ndarray, int, int]:
+    """Recover ``(n_chains, n_draws, d)`` unconstrained ``u`` vectors from ``idata.posterior``."""
+    post = idata.posterior
+    n_chains = int(post.sizes["chain"])
+    n_draws = int(post.sizes["draw"])
+    d = parameter_space.n_params
+    if d == 0:
+        return np.zeros((n_chains, n_draws, 0), dtype=np.float64), n_chains, n_draws
+
+    parts: list[np.ndarray] = []
+    for spec, shape, (start, stop) in zip(
+        parameter_space.specs,
+        parameter_space.leaf_shapes,
+        parameter_space.spec_slices,
+    ):
+        if stop == start:
+            continue
+        param_name = spec.path.replace(".", "__")
+        if param_name not in post:
+            raise KeyError(
+                f"Parameter {param_name!r} (from spec {spec.path!r}) not found in idata.posterior."
+            )
+        theta_vals = jnp.asarray(post[param_name].values, dtype=jnp.float64)
+        u_leaf = np.asarray(spec.unconstrain(theta_vals), dtype=np.float64)
+        parts.append(u_leaf.reshape(n_chains, n_draws, stop - start))
+    return np.concatenate(parts, axis=-1), n_chains, n_draws
+
+
+@eqx.filter_jit
+def _eval_marginal_ll_one(
+    u_vec: jax.Array,
+    model_template: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    cfg: LinearMarginalConfig,
+    sigma_jitter_arr: jax.Array | None,
+) -> jax.Array:
+    """Evaluate marginal log-likelihood at one unconstrained draw with bounded XLA RAM."""
+    m = parameter_space.constrain(u_vec, model_template)
+    return marginal_log_likelihood(m, dataset, cfg, sigma_jitter=sigma_jitter_arr)
+
+
+def reweight_exact_marginal(
+    idata: az.InferenceData,
+    model_template: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    marginal_config_exact: LinearMarginalConfig,
+    marginal_config_tan: LinearMarginalConfig,
+    *,
+    is_max_draws: int | None = 250,
+    sigma_jitter: ArrayLike | None = None,
+) -> tuple[az.InferenceData, dict[str, Any]]:
+    r"""Compute exact importance-sampling weights ``ln L_exact(u_s) - ln L_tan(u_s)``.
+
+    Evaluates the discrepancy between the exact marginalized log-likelihood and the
+    MAP-centred tangent-linear surrogate across posterior draws (all draws when
+    ``S_total <= is_max_draws`` or ``is_max_draws is None``, otherwise ``is_max_draws``
+    evenly spaced draws), attaches ``log_weight_is`` to ``idata.sample_stats``, and
+    returns normalized importance weights and Kish effective sample size diagnostics.
+    """
+    u_chains, n_chains, n_draws = _pack_unconstrained_from_idata(idata, parameter_space)
+    s_total = n_chains * n_draws
+    d = parameter_space.n_params
+    u_flat = u_chains.reshape(s_total, d)
+
+    if is_max_draws is not None and int(is_max_draws) < 1:
+        raise ValueError(f"is_max_draws must be >= 1 or None; got {is_max_draws}.")
+
+    if is_max_draws is None or s_total <= int(is_max_draws):
+        eval_idx = np.arange(s_total, dtype=np.int64)
+    else:
+        eval_idx = np.linspace(0, s_total - 1, int(is_max_draws), dtype=np.int64)
+
+    jit_arr = (
+        jnp.asarray(sigma_jitter, dtype=jnp.float64)
+        if sigma_jitter is not None
+        else None
+    )
+
+    log_w_eval = np.empty((eval_idx.shape[0],), dtype=np.float64)
+    for out_i, draw_i in enumerate(eval_idx):
+        u_i = jnp.asarray(u_flat[draw_i], dtype=jnp.float64)
+        ll_ex = float(
+            _eval_marginal_ll_one(
+                u_i,
+                model_template,
+                dataset,
+                parameter_space,
+                marginal_config_exact,
+                jit_arr,
+            )
+        )
+        ll_tn = float(
+            _eval_marginal_ll_one(
+                u_i,
+                model_template,
+                dataset,
+                parameter_space,
+                marginal_config_tan,
+                jit_arr,
+            )
+        )
+        log_w_eval[out_i] = ll_ex - ll_tn
+
+    finite = np.isfinite(log_w_eval)
+    if np.any(finite):
+        lw_max = float(np.max(log_w_eval[finite]))
+        w_unnorm = np.where(finite, np.exp(np.where(finite, log_w_eval - lw_max, -np.inf)), 0.0)
+        w_sum = float(np.sum(w_unnorm))
+        w_is = w_unnorm / max(w_sum, 1e-300)
+        kish_ess = float((np.sum(w_is) ** 2) / max(float(np.sum(w_is**2)), 1e-300))
+        kish_ess_ratio = float(kish_ess / max(len(w_is), 1))
+        log_z_corr = float(lw_max + math.log(max(w_sum, 1e-300)) - math.log(len(w_is)))
+        abs_lw = np.abs(log_w_eval[finite])
+        med_abs = float(np.median(abs_lw))
+        max_abs = float(np.max(abs_lw))
+    else:
+        w_is = np.full_like(log_w_eval, np.nan)
+        kish_ess = 0.0
+        kish_ess_ratio = 0.0
+        log_z_corr = float("nan")
+        med_abs = float("nan")
+        max_abs = float("nan")
+
+    log_w_full = np.full((s_total,), np.nan, dtype=np.float64)
+    log_w_full[eval_idx] = log_w_eval
+
+    idata_out = idata.copy()
+    coords = {
+        "chain": idata.posterior.coords["chain"],
+        "draw": idata.posterior.coords["draw"],
+    }
+    da_lw = xr.DataArray(
+        log_w_full.reshape(n_chains, n_draws),
+        dims=("chain", "draw"),
+        coords=coords,
+    )
+    has_ss = hasattr(idata_out, "sample_stats") and idata_out.sample_stats is not None
+    if has_ss:
+        ss_obj = idata_out.sample_stats
+        ds_ss = ss_obj.to_dataset() if hasattr(ss_obj, "to_dataset") else ss_obj
+        ds_ss = ds_ss.assign(log_weight_is=da_lw)
+        if hasattr(xr, "DataTree") and isinstance(idata_out, xr.DataTree):
+            idata_out["sample_stats"] = xr.DataTree(ds_ss)
+        else:
+            idata_out.sample_stats = ds_ss
+    else:
+        ds_new = xr.Dataset({"log_weight_is": da_lw})
+        if hasattr(xr, "DataTree") and isinstance(idata_out, xr.DataTree):
+            idata_out["sample_stats"] = xr.DataTree(ds_new)
+        else:
+            idata_out.add_groups({"sample_stats": ds_new})
+
+    diagnostics: dict[str, Any] = {
+        "log_weight_is": log_w_eval,
+        "weights_is": w_is,
+        "eval_indices": eval_idx,
+        "n_eval": int(eval_idx.shape[0]),
+        "n_total": int(s_total),
+        "kish_ess": kish_ess,
+        "kish_ess_ratio": kish_ess_ratio,
+        "median_abs_dlnL": med_abs,
+        "max_abs_dlnL": max_abs,
+        "log_z_correction": log_z_corr,
+    }
+    return idata_out, diagnostics
+
+
+def fit_subspace_cbm_gp(
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    marginal_config: LinearMarginalConfig | None = None,
+    *,
+    sampler: Literal["nuts", "smc", "laplace"] = "nuts",
+    reweight_exact: bool = True,
+    is_max_draws: int | None = 200,
+    rng_key: jax.Array | None = None,
+    sigma_jitter: ArrayLike | None = None,
+    **sampler_kwargs: Any,
+) -> SubspaceGPFitResult:
+    """Two-stage MAP-centred tangent-linear sampler + exact IS reweighting for ``SubspaceCBM``.
+
+    Stage 1 runs exact :func:`~ticktack.fitting.fit_map` under ``marginal_log_posterior``,
+    builds a MAP-centred :class:`~ticktack.fields.LinearizedDCTOperator` around
+    ``map_result.model.cbm``, and computes the regularized Laplace covariance.
+    Stage 2 samples with :func:`sample_nuts` (preconditioned by the Stage-1 Laplace dense
+    mass matrix), :func:`sample_smc`, or Gaussian Laplace draws using
+    ``marginal_config_tan = eqx.tree_at(lambda c: c.dct_operator, cfg_exact, lin_op)``
+    while keeping ``SteadyProduction + MiyakeSpike``, hierarchical offset ratios, and
+    any sampled GP kernel hyperparameters (``production.field.kernel.*``) exact at every step.
+    Stage 3 (when ``reweight_exact=True``) applies :func:`reweight_exact_marginal` to
+    attach exact importance-sampling weights and Kish ESS diagnostics.
+    """
+    if not isinstance(model.cbm, SubspaceCBM):
+        raise TypeError(
+            "fit_subspace_cbm_gp requires model.cbm to be a SubspaceCBM; "
+            f"got {type(model.cbm).__name__}."
+        )
+    if sampler not in ("nuts", "smc", "laplace"):
+        raise ValueError(
+            f"sampler must be 'nuts', 'smc', or 'laplace'; got {sampler!r}."
+        )
+
+    cfg_in = LinearMarginalConfig() if marginal_config is None else marginal_config
+    cfg_exact = (
+        eqx.tree_at(lambda c: c.dct_operator, cfg_in, None)
+        if cfg_in.dct_operator is not None
+        else cfg_in
+    )
+
+    _, _, _, _, field_terms = _partition_terms_for_cfg(model.production, cfg_exact)
+    if len(field_terms) != 1:
+        raise ValueError(
+            "fit_subspace_cbm_gp requires exactly one marginalized GaussianField in "
+            f"model.production; found {len(field_terms)}."
+        )
+    gf = field_terms[0]
+
+    key = jax.random.PRNGKey(0) if rng_key is None else rng_key
+    key, map_key, samp_key = jax.random.split(key, 3)
+
+    skw = dict(sampler_kwargs)
+    map_method = skw.pop("map_method", "BFGS")
+    map_max_steps = int(skw.pop("map_max_steps", 500))
+    map_tol = float(skw.pop("map_tol", 1e-6))
+
+    # --- Stage 1: Exact MAP + MAP-centred LinearizedDCTOperator + Laplace cov ---
+    map_result = fit_map(
+        model,
+        dataset,
+        parameter_space,
+        cfg_exact,
+        method=map_method,
+        max_steps=map_max_steps,
+        tol=map_tol,
+        rng_key=map_key,
+        sigma_jitter=sigma_jitter,
+        compute_laplace=False,
+        compute_linear_posterior=False,
+    )
+    assert isinstance(map_result.model.cbm, SubspaceCBM)
+    lin_op = build_linearized_dct_operator(
+        map_result.model.cbm,
+        dataset,
+        t_start=gf.t_start,
+        t_end=gf.t_end,
+        n_grid=gf.n_grid,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
+        template=gf.template,
+    )
+    cfg_tan = eqx.tree_at(
+        lambda c: c.dct_operator,
+        cfg_exact,
+        lin_op,
+        is_leaf=lambda x: x is None,
+    )
+    laplace_cov = _laplace_covariance(
+        map_result.u_map,
+        model,
+        dataset,
+        parameter_space,
+        cfg_tan,
+        sigma_jitter,
+    )
+    map_result = map_result._replace(laplace_cov=laplace_cov)
+
+    diagnostics: dict[str, Any] = {
+        "sampler": sampler,
+        "reweight_exact": bool(reweight_exact),
+        "map_converged": bool(map_result.converged),
+        "map_log_posterior": float(map_result.log_posterior),
+        "map_log_likelihood": float(map_result.log_likelihood),
+    }
+
+    # --- Stage 2: Sampling under MAP-centred tangent-linear operator ---
+    if sampler == "nuts":
+        num_warmup = int(skw.pop("num_warmup", 200))
+        adapt_mm = skw.pop("adapt_mass_matrix", num_warmup >= 150)
+        skw.pop("init_map", None)
+        skw.pop("init_u", None)
+        skw.pop("init_cov_u", None)
+        idata = sample_nuts(
+            model,
+            dataset,
+            parameter_space,
+            cfg_tan,
+            num_warmup=num_warmup,
+            init_map=False,
+            init_u=map_result.u_map,
+            init_cov_u=map_result.laplace_cov,
+            adapt_mass_matrix=bool(adapt_mm),
+            rng_key=samp_key,
+            sigma_jitter=sigma_jitter,
+            **skw,
+        )
+    elif sampler == "smc":
+        smc_res = sample_smc(
+            model,
+            dataset,
+            parameter_space,
+            cfg_tan,
+            rng_key=samp_key,
+            sigma_jitter=sigma_jitter,
+            **skw,
+        )
+        idata = smc_res.idata
+        diagnostics["smc_result"] = smc_res
+        diagnostics["log_evidence_tan"] = float(smc_res.log_evidence)
+        diagnostics["log_evidence_err"] = float(smc_res.log_evidence_err)
+    else:
+        num_samples = int(skw.pop("num_samples", 200))
+        d = parameter_space.n_params
+        cov_u = 0.5 * (map_result.laplace_cov + map_result.laplace_cov.T)
+        ev, evec = jnp.linalg.eigh(cov_u)
+        cov_spd = (evec * jnp.maximum(ev, 1e-12)[None, :]) @ evec.T
+        L_u = jnp.linalg.cholesky(0.5 * (cov_spd + cov_spd.T))
+        z_draw = jax.random.normal(samp_key, (1, num_samples, d), dtype=jnp.float64)
+        u_draws = map_result.u_map[None, None, :] + z_draw @ L_u.T
+        post_dict = _unpack_constrained_samples(parameter_space, u_draws)
+        idata = az.from_dict({"posterior": post_dict})
+
+    # --- Stage 3: Exact importance-sampling reweighting ---
+    if reweight_exact:
+        idata, is_diag = reweight_exact_marginal(
+            idata,
+            model,
+            dataset,
+            parameter_space,
+            cfg_exact,
+            cfg_tan,
+            is_max_draws=is_max_draws,
+            sigma_jitter=sigma_jitter,
+        )
+        diagnostics.update(is_diag)
+        if sampler == "smc" and "log_evidence_tan" in diagnostics:
+            diagnostics["log_evidence_exact"] = (
+                float(diagnostics["log_evidence_tan"])
+                + float(is_diag["log_z_correction"])
+            )
+        if math.isfinite(is_diag["kish_ess_ratio"]) and is_diag["kish_ess_ratio"] < 0.85:
+            warnings.warn(
+                f"fit_subspace_cbm_gp exact IS efficiency is low "
+                f"(kish_ess_ratio={is_diag['kish_ess_ratio']:.3f} < 0.85, "
+                f"max|ΔlnL|={is_diag['max_abs_dlnL']:.3f} nats); consider checking "
+                "posterior multimodality or sampling with exact marginal_log_likelihood.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    return SubspaceGPFitResult(
+        idata=idata,
+        map_result=map_result,
+        lin_op=lin_op,
+        diagnostics=diagnostics,
     )
