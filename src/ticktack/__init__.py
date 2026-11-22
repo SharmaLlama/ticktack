@@ -177,6 +177,7 @@ from .sampling import (  # noqa: E402
 
 # Plotting
 from .plotting import (  # noqa: E402
+    RingdownDiagnosticResult,
     plot_cbm_eigenmodes,
     plot_cbm_mode_impulse_responses,
     plot_cbm_tikz_modes,
@@ -188,6 +189,8 @@ from .plotting import (  # noqa: E402
     plot_fisher_spectrum,
     plot_production_posterior,
     plot_residual_map,
+    plot_ringdown_comparison,
+    ringdown_diagnostic,
 )
 
 # Information Field Theory (IFT) fields, MacKay evidence, and GP kernel selection
@@ -328,6 +331,7 @@ __all__ = [
     "sample_nuts",
     "sample_smc",
     # plotting
+    "RingdownDiagnosticResult",
     "plot_cbm_eigenmodes",
     "plot_cbm_mode_impulse_responses",
     "plot_cbm_tikz_modes",
@@ -339,6 +343,8 @@ __all__ = [
     "plot_fisher_spectrum",
     "plot_production_posterior",
     "plot_residual_map",
+    "plot_ringdown_comparison",
+    "ringdown_diagnostic",
     # fields (IFT)
     "CorrelatedFieldSpectrum",
     "DCTResponseOperator",

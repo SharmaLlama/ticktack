@@ -148,3 +148,40 @@ $$
 $$
 
 On the 774 CE compilation (see [Tutorial 2](tutorials.md)), $\ln \widehat{Z}_K$ rises sharply from $K = 1$ to $K = 2$ and $K = 3$, then plateaus or declines for $K \ge 4$ due to the automatic Occam penalty on unconstrained slow-exchange parameters – matching the $d_{\text{eff}} \approx 2$–$3$ prediction of `cbm_fisher_spectrum`.
+
+---
+
+## 6. GP-Marginalized Fisher Geometry & Fast Tangent-Linear `SubspaceCBM` Inference
+
+When cosmic-ray production $Q(t)$ is modelled as an unknown Gaussian process (`GaussianField` or `GPProduction`) marginalized analytically alongside hierarchical or per-series laboratory offsets, any CBM perturbation whose $\Delta^{14}\text{C}$ signature can be mimicked by a smooth global $\delta Q(t)$ fluctuation loses Fisher information.
+
+### GP- and Offset-Marginalized Fisher Spectrum (`cbm_gp_fisher_spectrum`)
+
+`cbm_gp_fisher_spectrum(cbm, dataset, gp_or_field, *, spike=None, marginal_config=None, prior_sd=0.35)` replaces the diagonal noise matrix inside `cbm_fisher_spectrum` with the exact marginalized data covariance matching `marginal_log_likelihood`:
+
+$$
+\Sigma_{\mathrm{eff}}
+= \operatorname{diag}(\sigma_d^2)
++ H_{\mathrm{GP}} H_{\mathrm{GP}}^\top
++ X_{\mathrm{off}} \Sigma_{\mathrm{off}} X_{\mathrm{off}}^\top,
+$$
+
+and projects out nonlinear `MiyakeSpike` tangents `(t_start, duration, fluence)` (and any uninformative infinite-variance offsets) via the QR-stabilized Schur complement. Evaluating `cbm_gp_fisher_spectrum` across NH-only versus two-hemisphere `760–800 CE` compilations (see [Tutorial 6](tutorials.md)) reveals two key regimes:
+
+- **Single-hemisphere collapse ($d_{\mathrm{eff}} < 1$)**: With Northern Hemisphere rings alone, an unpinned global GP background $\delta Q(t)$ is nearly collinear with every symmetric carbon-cycle mode ($d_{\mathrm{eff}} = 0.59$ on real `775CE` NH series under `sho_solar`).
+- **Two-hemisphere rescue ($d_{\mathrm{eff}} \approx 3.6\text{–}4.5$)**: Because cosmic-ray modulation is globally shared across hemispheres whereas exchange modes alter NH–SH stratosphere–troposphere partitioning and inter-hemispheric mixing asymmetrically, pairing NH and SH chronologies rescues $3\text{–}5$ identifiable modes on a single Miyake event (`SubspaceCBM.from_fisher(cbm, spec_gp, n_modes=m)`).
+
+### MAP-Centred `LinearizedDCTOperator` & Exact IS Reweighting (`fit_subspace_cbm_gp`)
+
+When `SubspaceCBM.alpha` varies inside NUTS or SMC, rebuilding the exact DCT response operator requires an eigendecomposition at every leapfrog step. Because $W_{\mathrm{DCT}}(\boldsymbol{\alpha})$ multiplies only the $\sim 1\text{‰}$ background GP fluctuations while `SteadyProduction + MiyakeSpike` and steady-state `y_ss` offset ratios are still solved **exactly** at every $\boldsymbol{\alpha}$, `fit_subspace_cbm_gp` runs a three-stage workflow:
+
+1. **Stage 1 (Exact MAP & Tangent Precomputation)**: Maximizes the exact `marginal_log_posterior` via `fit_map`, constructs a MAP-centred `LinearizedDCTOperator` (`build_linearized_dct_operator`) via $m$ forward-mode `jax.jvp` calls:
+   $$
+   W_{\mathrm{tan}}(\boldsymbol{\alpha})
+   = W_{\mathrm{DCT}}(\widehat{\boldsymbol{\alpha}}_{\mathrm{MAP}})
+   + \sum_{k=1}^{m} \left(\alpha_k - \widehat{\alpha}_{\mathrm{MAP},k}\right)
+   \left.\frac{\partial W_{\mathrm{DCT}}}{\partial \alpha_k}\right|_{\widehat{\boldsymbol{\alpha}}_{\mathrm{MAP}}},
+   $$
+   and computes the regularized Laplace covariance at $\widehat{\mathbf{u}}_{\mathrm{MAP}}$.
+2. **Stage 2 (Preconditioned Sampling)**: Runs `sample_nuts` (preconditioned by the Stage-1 dense Laplace mass matrix), `sample_smc`, or Gaussian Laplace sampling with `LinearMarginalConfig(dct_operator=lin_op)`, keeping the spike trajectory, steady-state offset ratios, and any sampled GP kernel hyperparameters exact.
+3. **Stage 3 (Exact Importance-Sampling Reweighting)**: Evaluates `reweight_exact_marginal`, attaching exact log importance weights $\ln w_s = \ln\mathcal{L}_{\mathrm{exact}}(\mathbf{u}_s) - \ln\mathcal{L}_{\mathrm{tan}}(\mathbf{u}_s)$ to `idata.sample_stats["log_weight_is"]` and reporting the Kish effective sample size fraction (`kish_ess_ratio`, typically $> 0.99$ across posterior balls).

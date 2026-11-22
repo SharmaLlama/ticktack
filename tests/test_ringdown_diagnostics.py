@@ -158,7 +158,10 @@ def test_ringdown_diagnostic_pytree_spike_subtraction_and_metrics(synthetic_prob
         q_true_fine=q_true_fine,
     )
 
-    # 1. Frozen dataclass & JAX PyTree checks
+    # 1. Frozen dataclass, JAX PyTree & top-level export checks
+    assert tt.RingdownDiagnosticResult is RingdownDiagnosticResult
+    assert tt.ringdown_diagnostic is ringdown_diagnostic
+    assert tt.plot_ringdown_comparison is plot_ringdown_comparison
     assert isinstance(diag, RingdownDiagnosticResult)
     assert dataclasses.is_dataclass(diag)
     with pytest.raises((dataclasses.FrozenInstanceError, AttributeError, TypeError)):

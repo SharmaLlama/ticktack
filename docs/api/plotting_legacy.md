@@ -14,6 +14,7 @@ Every diagnostic helper in `ticktack.plotting` is strictly stateless (never muta
 - `plot_production_posterior` – continuous cosmic-ray production $Q(t)$ credible bands, spaghetti draws, and optional injected truth overlay.
 - `plot_fisher_spectrum` & `plot_cbm_eigenmodes` – prior-whitened carbon-cycle Fisher information scree and leading collective reservoir eigenmodes.
 - `plot_field_draws` & `plot_evidence_grid` – Information Field Theory (DCT-II) realization galleries and 2D MacKay log-evidence landscapes (re-exported from `ticktack.fields`).
+- `ringdown_diagnostic` & `plot_ringdown_comparison` – post-spike GP ringdown quantification (`RingdownDiagnosticResult`) and stateless 4-panel comparison figure contrasting fixed-CBM (`m = 0`) vs joint `SubspaceCBM(m)` background $Q_{\mathrm{field}}(t)$ recovery, signed difference or truth error, and paired NH/SH `RdBu_r` z-score residual heatmaps with grey hatched `NaN` masking (returns `matplotlib.figure.Figure`).
 
 ::: ticktack.plotting
     options:
@@ -59,6 +60,35 @@ def plot_corner(
 ```
 
   Uses Okabe–Ito colours by default, marks optional `truth` values (e.g. MAP estimates), suppresses `chainconsumer` and `matplotlib.font_manager` log warnings, and restores `matplotlib.rcParams` identically on exit.
+- **`ringdown_diagnostic(...)` & `plot_ringdown_comparison(...)`**: Quantify and visualize post-spike GP ringdown between a fixed-CBM (`m = 0`) baseline and a joint `SubspaceCBM` model (or posterior ensemble `subspace_models`):
+
+```python
+def ringdown_diagnostic(
+    model_m0: RadiocarbonModel,
+    model_subspace: RadiocarbonModel,
+    dataset: Dataset,
+    marginal_config_m0: LinearMarginalConfig | None = None,
+    marginal_config_subspace: LinearMarginalConfig | None = None,
+    *,
+    pre_window: tuple[float, float] = (760.0, 773.0),
+    post_window: tuple[float, float] = (775.0, 792.0),
+    t_fine: Any | None = None,
+    n_draws: int = 100,
+    rng_key: Any | None = None,
+    q_true_fine: Any | None = None,
+) -> RingdownDiagnosticResult
+
+def plot_ringdown_comparison(
+    diag: RingdownDiagnosticResult,
+    dataset: Dataset,
+    *,
+    spike_window: tuple[float, float] | None = None,
+    q_true_fine: Any | None = None,
+    title: str | None = None,
+) -> Figure
+```
+
+  Subtracts parametric `MiyakeSpike.delta_q(t_fine)` cleanly from `linear_posterior` trajectories, computes raw unrescaled $\chi^2 / N$, per-observation z-score residuals $(d - m) / \sigma$, pre-/post-spike RMS background excursions (`rms_pre`, `rms_post`, excitation ratio `rms_post / rms_pre`), and optional synthetic truth RMSE metrics, and renders the 4-panel diagnostic figure with paired NH (top) / SH (bottom) `RdBu_r` residual heatmaps and grey hatched missing-year cells.
 
 ---
 
