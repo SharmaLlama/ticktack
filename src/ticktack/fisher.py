@@ -1425,24 +1425,46 @@ def cbm_gp_fisher_spectrum(
     pad_years: float = 15.0,
     q_std: float = DEFAULT_Q_STD,
     alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    include_covariance_fisher: bool = True,
     mass_fn: Callable[[Any], Any] | None = None,
     flux_fn: Callable[[Any], Any] | None = None,
 ) -> FisherSpectrumResult:
     r"""Compute the GP- and offset-marginalized CBM Fisher eigenspectrum.
 
-    Builds the effective marginalized data covariance
+    Evaluates the exact expected Fisher information matrix of the Gaussian
+    marginalized likelihood :func:`~ticktack.likelihood.marginal_log_likelihood`
+    with mean :math:`\mu(\theta, \psi)` (including any finite-prior global offset
+    prior mean ``cfg.global_prior_mean * r_ss_ratio(cbm)``) and parameter-dependent
+    effective data covariance
 
     .. math::
 
-        \Sigma_{\mathrm{eff}}
+        \Sigma_{\mathrm{eff}}(\theta)
         = \operatorname{diag}(\sigma_d^2)
-        + H_{\mathrm{GP}} H_{\mathrm{GP}}^\top
-        + X_{\mathrm{off}} \Sigma_{\mathrm{off}} X_{\mathrm{off}}^\top,
+        + H_{\mathrm{GP}}(\theta) H_{\mathrm{GP}}(\theta)^\top
+        + X_{\mathrm{off}}(\theta) \Sigma_{\mathrm{off}} X_{\mathrm{off}}(\theta)^\top.
 
-    matching :func:`~ticktack.likelihood.marginal_log_likelihood` exactly, and
-    projects out any nonlinear :class:`~ticktack.production.MiyakeSpike` tangents
-    (and any uninformative infinite-variance offset columns) via the stabilized QR
-    Schur complement inside :func:`cbm_fisher_spectrum`. The returned
+    By the Slepian--Bangs formula for a multivariate normal with parameter-dependent
+    mean and covariance,
+
+    .. math::
+
+        F_{ij}(\theta)
+        = \frac{\partial \mu^\top}{\partial \theta_i}\,\Sigma_{\mathrm{eff}}^{-1}\,
+          \frac{\partial \mu}{\partial \theta_j}
+        + \frac{1}{2}\operatorname{tr}\!\left(
+            \Sigma_{\mathrm{eff}}^{-1}\,\frac{\partial \Sigma_{\mathrm{eff}}}{\partial \theta_i}\,
+            \Sigma_{\mathrm{eff}}^{-1}\,\frac{\partial \Sigma_{\mathrm{eff}}}{\partial \theta_j}
+          \right).
+
+    When ``include_covariance_fisher=True`` (default), the covariance-sensitivity term
+    is stacked directly into the whitened Jacobian via an exact reduced-QR factorization
+    of ``L_eff^{-1} H_cov(cbm0)`` without squaring condition numbers or forming
+    ``O(N^2)`` tensors, then nonlinear :class:`~ticktack.production.MiyakeSpike` tangents
+    (and any uninformative infinite-variance offset columns) are projected out via the
+    stabilized QR Schur complement inside :func:`cbm_fisher_spectrum`. Setting
+    ``include_covariance_fisher=False`` selects the faster mean-only Gauss--Newton
+    approximation with ``Sigma_eff`` frozen at the reference ``cbm``. The returned
     :class:`FisherSpectrumResult` can be passed directly to
     :meth:`~ticktack.cbm.SubspaceCBM.from_fisher`.
 
@@ -1485,6 +1507,10 @@ def cbm_gp_fisher_spectrum(
         (default ``15.0``).
     q_std, alpha_unit : float, optional
         Reference steady-state production rate and unit conversion factor.
+    include_covariance_fisher : bool, optional
+        If ``True`` (default), include the exact Slepian--Bangs covariance-sensitivity
+        term from ``dH_GP/dtheta`` and ``dX_off/dtheta``; if ``False``, compute the
+        mean-only approximation with ``Sigma_eff`` frozen at ``cbm``.
     mass_fn, flux_fn : callable, optional
         Optional physical observable maps passed to :func:`cbm_fisher_spectrum`.
         ``mass_fn`` defaults to ``lambda m: m.reservoir_masses()`` when available.
@@ -1493,8 +1519,9 @@ def cbm_gp_fisher_spectrum(
     from .fields import (
         GaussianField,
         SpectralKernel,
+        _compute_dct_operator_jit,
+        _pack_dataset_quadrature,
         _safe_sqrt,
-        build_dct_response_operator,
     )
     from .likelihood import LinearMarginalConfig, _concat_padded_windows
     from .linear import hierarchical_offset_design, project_causal_gp
@@ -1538,13 +1565,9 @@ def cbm_gp_fisher_spectrum(
     n_series = ds.n_series
     q_std_f = float(q_std)
     alpha_unit_f = float(alpha_unit)
-
-    # Steady-state activity ratios for exact hierarchical/shared offset columns
-    y_ss = cbm.steady_state_c14(q_std=q_std_f, alpha_unit=alpha_unit_f)
+    q_arr = jnp.asarray(q_std_f, dtype=jnp.float64).reshape(())
+    a_arr = jnp.asarray(alpha_unit_f, dtype=jnp.float64).reshape(())
     trop_idx = jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)
-    y_trop = jnp.sum(y_ss[trop_idx])
-    m_rel = cbm.relative_reservoir_masses()
-    r_ss_ratio = (y_ss / y_trop) / m_rel
 
     ref_model = RadiocarbonModel(
         cbm, SteadyProduction(q_std_f), q_std=q_std_f, alpha_unit=alpha_unit_f
@@ -1557,88 +1580,137 @@ def cbm_gp_fisher_spectrum(
         ],
         dtype=jnp.int32,
     )
-    obs_activity_ratios = r_ss_ratio[box_indices_flat]
 
-    # 1. GP / GaussianField forward covariance factor H_gp (n_obs, k_gp)
+    def _obs_activity_ratios_for(cbm_v: Any) -> jax.Array:
+        y_ss_v = cbm_v.steady_state_c14(q_std=q_std_f, alpha_unit=alpha_unit_f)
+        y_trop_v = jnp.sum(y_ss_v[trop_idx])
+        m_rel_v = cbm_v.relative_reservoir_masses()
+        r_ss_v = (y_ss_v / y_trop_v) / m_rel_v
+        return r_ss_v[box_indices_flat]
+
+    obs_activity_ratios_0 = _obs_activity_ratios_for(cbm)
+
+    # 1. Parameter-dependent GP covariance factor H_gp(cbm_v) (n_obs, k_gp)
     if gp_or_field is None:
-        h_gp = jnp.zeros((n_obs, 0), dtype=jnp.float64)
+        def _h_gp_for(_cbm_v: Any) -> jax.Array:
+            return jnp.zeros((n_obs, 0), dtype=jnp.float64)
+
     elif isinstance(gp_or_field, SpectralKernel):
-        op_gp = build_dct_response_operator(
-            cbm,
-            ds,
-            n_grid=int(n_grid),
-            pad_years=float(pad_years),
-            q_std=q_std_f,
-            alpha_unit=alpha_unit_f,
-        )
-        spec_gp = gp_or_field.spectrum(op_gp.n_grid, op_gp.dt)
-        h_gp = op_gp.w_dct * _safe_sqrt(spec_gp)[None, :]
+        span_lo, span_hi = ds.time_span
+        t0_gp = float(span_lo - float(pad_years))
+        t1_gp = float(span_hi + 0.5)
+        n_g_gp = int(n_grid)
+        dt_gp = (t1_gp - t0_gp) / float(n_g_gp - 1)
+        sqrt_spec_gp = _safe_sqrt(gp_or_field.spectrum(n_g_gp, dt_gp))
+        flat_s, flat_e, specs_gp = _pack_dataset_quadrature(cbm, ds)
+
+        def _h_gp_for(cbm_v: Any) -> jax.Array:
+            op_v = _compute_dct_operator_jit(
+                cbm_v, q_arr, a_arr, t0_gp, t1_gp, n_g_gp, flat_s, flat_e, specs_gp, None
+            )
+            return op_v.w_dct * sqrt_spec_gp[None, :]
+
     elif isinstance(gp_or_field, GaussianField):
-        op_gp = build_dct_response_operator(
-            cbm,
-            ds,
-            t_start=gp_or_field.t_start,
-            t_end=gp_or_field.t_end,
-            n_grid=gp_or_field.n_grid,
-            q_std=q_std_f,
-            alpha_unit=alpha_unit_f,
-            template=gp_or_field.template,
-        )
-        h_gp = op_gp.w_dct * _safe_sqrt(gp_or_field.power_spectrum())[None, :]
+        t0_gp = float(gp_or_field.t_start)
+        t1_gp = float(gp_or_field.t_end)
+        n_g_gp = int(gp_or_field.n_grid)
+        tmpl_gp = gp_or_field.template
+        sqrt_spec_gp = _safe_sqrt(gp_or_field.power_spectrum())
+        flat_s, flat_e, specs_gp = _pack_dataset_quadrature(cbm, ds)
+
+        def _h_gp_for(cbm_v: Any) -> jax.Array:
+            op_v = _compute_dct_operator_jit(
+                cbm_v, q_arr, a_arr, t0_gp, t1_gp, n_g_gp, flat_s, flat_e, specs_gp, tmpl_gp
+            )
+            return op_v.w_dct * sqrt_spec_gp[None, :]
+
     elif isinstance(gp_or_field, GPProduction):
         all_ts, all_te, all_w = _concat_padded_windows(ds)
-        all_obs_scale = 1000.0 / (y_trop * m_rel[box_indices_flat])
         r_modes = gp_or_field.n_modes if cfg.n_gp_modes is None else cfg.n_gp_modes
         a_arg = gp_or_field.domain[0] if gp_or_field.domain is not None else None
         b_arg = gp_or_field.domain[1] if gp_or_field.domain is not None else None
-        proj = project_causal_gp(
-            A=cbm.matrix_A(),
-            b=cbm.production_vector(),
-            t_starts=all_ts,
-            t_ends=all_te,
-            sub_weights=all_w,
-            a=a_arg,
-            b_bound=b_arg,
-            pad=gp_or_field.pad_years,
-            n_modes=r_modes,
-            kernel=gp_or_field.kernel,
-            alpha_unit=alpha_unit_f,
-            box_indices=box_indices_flat,
-            obs_scale=all_obs_scale,
-            include_initial_cov=cfg.include_gp_initial_cov,
-            cbm=cbm,
-        )
-        assert proj.whitened_design is not None
-        h_gp = proj.whitened_design
+
+        def _h_gp_for(cbm_v: Any) -> jax.Array:
+            y_ss_v = cbm_v.steady_state_c14(q_std=q_std_f, alpha_unit=alpha_unit_f)
+            y_trop_v = jnp.sum(y_ss_v[trop_idx])
+            m_rel_v = cbm_v.relative_reservoir_masses()
+            obs_scale_v = 1000.0 / (y_trop_v * m_rel_v[box_indices_flat])
+            proj_v = project_causal_gp(
+                A=cbm_v.matrix_A(),
+                b=cbm_v.production_vector(),
+                t_starts=all_ts,
+                t_ends=all_te,
+                sub_weights=all_w,
+                a=a_arg,
+                b_bound=b_arg,
+                pad=gp_or_field.pad_years,
+                n_modes=r_modes,
+                kernel=gp_or_field.kernel,
+                alpha_unit=alpha_unit_f,
+                box_indices=box_indices_flat,
+                obs_scale=obs_scale_v,
+                include_initial_cov=cfg.include_gp_initial_cov,
+                cbm=cbm_v,
+            )
+            assert proj_v.whitened_design is not None
+            return proj_v.whitened_design
+
     else:
         raise TypeError(
             "gp_or_field must be a SpectralKernel, GaussianField, GPProduction, or None; "
             f"got {type(gp_or_field).__name__}."
         )
 
-    # 2. Offset covariance term (finite priors in Sigma_eff; infinite priors via Schur)
-    off_cov = jnp.zeros((n_obs, n_obs), dtype=jnp.float64)
+    # 2. Offset covariance factors (finite priors in H_cov(cbm_v); infinite priors via Schur)
     h_uninf_cols: list[jax.Array] = []
+    add_global_prior_mean = False
 
     if cfg.offset_mode == "hierarchical":
-        h_off, _, sd_off = hierarchical_offset_design(
+        h_off_0, _, sd_off = hierarchical_offset_design(
             ds.series_indices,
             n_series=n_series,
-            box_activity_ratios=obs_activity_ratios,
+            box_activity_ratios=obs_activity_ratios_0,
             global_prior_mean=cfg.global_prior_mean,
             global_prior_sd=cfg.global_prior_sd,
             lab_prior_sd=cfg.lab_prior_sd,
         )
         sd_off_np = onp.asarray(sd_off, dtype=onp.float64)
-        fin_mask = onp.isfinite(sd_off_np) & (sd_off_np > 0.0)
-        inf_mask = ~onp.isfinite(sd_off_np)
-        if onp.any(fin_mask):
-            idx_f = jnp.asarray(onp.flatnonzero(fin_mask), dtype=jnp.int32)
-            h_f = h_off[:, idx_f] * sd_off[idx_f][None, :]
-            off_cov = off_cov + h_f @ h_f.T
-        if onp.any(inf_mask):
-            idx_i = jnp.asarray(onp.flatnonzero(inf_mask), dtype=jnp.int32)
-            h_uninf_cols.append(h_off[:, idx_i])
+        global_fin = bool(onp.isfinite(sd_off_np[0]) and sd_off_np[0] > 0.0)
+        global_inf = bool(not onp.isfinite(sd_off_np[0]))
+        if global_fin:
+            add_global_prior_mean = float(cfg.global_prior_mean) != 0.0
+        if global_inf:
+            h_uninf_cols.append(h_off_0[:, :1])
+        lab_fin_idx = (
+            onp.flatnonzero(onp.isfinite(sd_off_np[1:]) & (sd_off_np[1:] > 0.0)) + 1
+            if sd_off_np.size > 1
+            else onp.array([], dtype=onp.int64)
+        )
+        lab_inf_idx = (
+            onp.flatnonzero(~onp.isfinite(sd_off_np[1:])) + 1
+            if sd_off_np.size > 1
+            else onp.array([], dtype=onp.int64)
+        )
+        if lab_inf_idx.size > 0:
+            h_uninf_cols.append(h_off_0[:, jnp.asarray(lab_inf_idx, dtype=jnp.int32)])
+        h_lab_fin = (
+            h_off_0[:, jnp.asarray(lab_fin_idx, dtype=jnp.int32)]
+            * sd_off[jnp.asarray(lab_fin_idx, dtype=jnp.int32)][None, :]
+            if lab_fin_idx.size > 0
+            else jnp.zeros((n_obs, 0), dtype=jnp.float64)
+        )
+        g_sd_f = float(sd_off_np[0]) if global_fin else 0.0
+
+        def _h_off_fin_for(cbm_v: Any) -> jax.Array:
+            parts: list[jax.Array] = []
+            if global_fin:
+                parts.append(_obs_activity_ratios_for(cbm_v)[:, None] * g_sd_f)
+            if h_lab_fin.shape[1] > 0:
+                parts.append(h_lab_fin)
+            if not parts:
+                return jnp.zeros((n_obs, 0), dtype=jnp.float64)
+            return parts[0] if len(parts) == 1 else jnp.concatenate(parts, axis=1)
+
     elif cfg.offset_mode == "per_series":
         if per_series_prior_sd == "from_config":
             ps_sd = float(cfg.global_prior_sd)
@@ -1653,21 +1725,67 @@ def cbm_gp_fisher_spectrum(
         h_ps = ds.lab_offset_design_matrix()
         if math.isfinite(ps_sd):
             h_ps_scaled = h_ps * ps_sd
-            off_cov = off_cov + h_ps_scaled @ h_ps_scaled.T
+
+            def _h_off_fin_for(_cbm_v: Any) -> jax.Array:
+                return h_ps_scaled
         else:
             h_uninf_cols.append(h_ps)
+
+            def _h_off_fin_for(_cbm_v: Any) -> jax.Array:
+                return jnp.zeros((n_obs, 0), dtype=jnp.float64)
+
     elif cfg.offset_mode == "shared":
-        h_sh = obs_activity_ratios[:, None]
         if math.isfinite(cfg.global_prior_sd):
-            h_sh_scaled = h_sh * float(cfg.global_prior_sd)
-            off_cov = off_cov + h_sh_scaled @ h_sh_scaled.T
+            g_sd_f = float(cfg.global_prior_sd)
+            add_global_prior_mean = float(cfg.global_prior_mean) != 0.0
+
+            def _h_off_fin_for(cbm_v: Any) -> jax.Array:
+                return _obs_activity_ratios_for(cbm_v)[:, None] * g_sd_f
         else:
-            h_uninf_cols.append(h_sh)
-    elif cfg.offset_mode != "none":
+            h_uninf_cols.append(obs_activity_ratios_0[:, None])
+
+            def _h_off_fin_for(_cbm_v: Any) -> jax.Array:
+                return jnp.zeros((n_obs, 0), dtype=jnp.float64)
+
+    elif cfg.offset_mode == "none":
+        def _h_off_fin_for(_cbm_v: Any) -> jax.Array:
+            return jnp.zeros((n_obs, 0), dtype=jnp.float64)
+
+    else:
         raise ValueError(f"Unsupported offset_mode {cfg.offset_mode!r}.")
 
-    sigma_eff = jnp.diag(jnp.square(ds.sigma_flat)) + h_gp @ h_gp.T + off_cov
-    sigma_eff = 0.5 * (sigma_eff + sigma_eff.T)
+    def _h_cov_for(cbm_v: Any) -> jax.Array:
+        hg = _h_gp_for(cbm_v)
+        ho = _h_off_fin_for(cbm_v)
+        if hg.shape[1] == 0:
+            return ho
+        if ho.shape[1] == 0:
+            return hg
+        return jnp.concatenate([hg, ho], axis=1)
+
+    h_cov_0 = _h_cov_for(cbm)
+    sigma_eff_0 = jnp.diag(jnp.square(ds.sigma_flat)) + h_cov_0 @ h_cov_0.T
+    sigma_eff_0 = 0.5 * (sigma_eff_0 + sigma_eff_0.T)
+    chol_eff = jnp.linalg.cholesky(sigma_eff_0)
+
+    use_sb_cov = bool(include_covariance_fisher and h_cov_0.shape[1] > 0)
+    if use_sb_cov:
+        u_0 = jsl.solve_triangular(chol_eff, h_cov_0, lower=True)
+        q_0, r_0 = jnp.linalg.qr(u_0, mode="reduced")
+        r_rank = int(q_0.shape[1])
+        tril_i, tril_j = onp.tril_indices(r_rank, k=-1)
+        inv_sqrt2 = 1.0 / math.sqrt(2.0)
+
+        def _sb_cov_rows(cbm_v: Any) -> jax.Array:
+            """Exact packed square-root Slepian--Bangs covariance sensitivity vector."""
+            u_v = jsl.solve_triangular(chol_eff, _h_cov_for(cbm_v), lower=True)
+            x_v = q_0.T @ u_v
+            y_v = u_v - q_0 @ x_v
+            s_v = x_v @ r_0.T + r_0 @ x_v.T
+            diag_part = inv_sqrt2 * jnp.diag(s_v)
+            tril_part = s_v[tril_i, tril_j]
+            orth_part = (y_v @ r_0.T).reshape(-1)
+            return jnp.concatenate([diag_part, tril_part, orth_part], axis=0)
 
     h_uninf = (
         jnp.concatenate(h_uninf_cols, axis=1)
@@ -1676,10 +1794,28 @@ def cbm_gp_fisher_spectrum(
     )
     k_uninf = int(h_uninf.shape[1])
 
-    # 3. Assemble forward function and Schur nuisance tuple (spike, uninformative offsets)
+    # 3. Assemble whitened forward function (mean + optional Slepian--Bangs cov rows)
     steady_prod = SteadyProduction(q_std_f)
+    g_mean_f = float(cfg.global_prior_mean)
     psi_nuisance: Any = None
     prior_psi_prec: jax.Array | None = None
+
+    def _mean_pred(cbm_v: Any, sp_v: Any | None, off_v: jax.Array | None) -> jax.Array:
+        prod = steady_prod if sp_v is None else (steady_prod + sp_v)
+        pred = RadiocarbonModel(
+            cbm_v, prod, q_std=q_std_f, alpha_unit=alpha_unit_f
+        ).predict_d14c(ds, concat=True)
+        if add_global_prior_mean:
+            pred = pred + g_mean_f * _obs_activity_ratios_for(cbm_v)
+        if off_v is not None:
+            pred = pred + h_uninf @ off_v
+        return pred
+
+    def _pack_whitened(cbm_v: Any, pred: jax.Array) -> jax.Array:
+        w_mean = jsl.solve_triangular(chol_eff, pred, lower=True)
+        if use_sb_cov:
+            return jnp.concatenate([w_mean, _sb_cov_rows(cbm_v)], axis=0)
+        return w_mean
 
     if spike is not None and k_uninf > 0:
         flat_sp, _ = _partition_inexact(spike)
@@ -1692,10 +1828,7 @@ def cbm_gp_fisher_spectrum(
 
         def _fwd(cbm_v: Any, psi: Any) -> jax.Array:
             sp_v, off_v = psi
-            pred = RadiocarbonModel(
-                cbm_v, steady_prod + sp_v, q_std=q_std_f, alpha_unit=alpha_unit_f
-            ).predict_d14c(ds, concat=True)
-            return pred + h_uninf @ off_v
+            return _pack_whitened(cbm_v, _mean_pred(cbm_v, sp_v, off_v))
 
     elif spike is not None:
         flat_sp, _ = _partition_inexact(spike)
@@ -1704,25 +1837,18 @@ def cbm_gp_fisher_spectrum(
         psi_nuisance = spike
 
         def _fwd(cbm_v: Any, sp_v: Any) -> jax.Array:
-            return RadiocarbonModel(
-                cbm_v, steady_prod + sp_v, q_std=q_std_f, alpha_unit=alpha_unit_f
-            ).predict_d14c(ds, concat=True)
+            return _pack_whitened(cbm_v, _mean_pred(cbm_v, sp_v, None))
 
     elif k_uninf > 0:
         prior_psi_prec = jnp.zeros((k_uninf, k_uninf), dtype=jnp.float64)
         psi_nuisance = jnp.zeros((k_uninf,), dtype=jnp.float64)
 
         def _fwd(cbm_v: Any, off_v: Any) -> jax.Array:
-            pred = RadiocarbonModel(
-                cbm_v, steady_prod, q_std=q_std_f, alpha_unit=alpha_unit_f
-            ).predict_d14c(ds, concat=True)
-            return pred + h_uninf @ off_v
+            return _pack_whitened(cbm_v, _mean_pred(cbm_v, None, off_v))
 
     else:
         def _fwd(cbm_v: Any) -> jax.Array:
-            return RadiocarbonModel(
-                cbm_v, steady_prod, q_std=q_std_f, alpha_unit=alpha_unit_f
-            ).predict_d14c(ds, concat=True)
+            return _pack_whitened(cbm_v, _mean_pred(cbm_v, None, None))
 
     eff_mass_fn = (
         mass_fn
@@ -1737,11 +1863,11 @@ def cbm_gp_fisher_spectrum(
     return cbm_fisher_spectrum(
         _fwd,
         cbm,
-        sigma_eff,
+        1.0,
         psi_nuisance=psi_nuisance,
         prior_cbm_sd=prior_sd,
         prior_psi_prec=prior_psi_prec,
         mass_fn=eff_mass_fn,
         flux_fn=flux_fn,
-        noise_kind="cov",
+        noise_kind="sigma",
     )
