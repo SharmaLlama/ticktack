@@ -316,8 +316,120 @@ def test_multi_event_fisher_additivity_and_monotonic_deff(_shared_compact_events
     assert cbm_sub.n_modes == 3
     cbm_pert = cbm_sub.set("alpha", jnp.array([1.0, -0.8, 0.5]))
     assert float(jnp.max(jnp.abs(cbm_pert.kirchhoff_residual()))) < 1e-10
+
+    # Default mass_loadings populated even when mass_fn is not passed explicitly
+    assert res1.mass_loadings is not None
+    assert res1.mass_loadings.shape[0] == cbm0.n_boxes
     assert res12.mass_loadings is not None
     assert res12.mass_loadings.shape[0] == cbm0.n_boxes
+
+    # Block-arrow joint_fisher parity for E=1 and E=2
+    p_full = int(act.shape[0])
+    p_psi_1 = int(res1.joint_fisher.shape[0]) - p_full
+    p_psi_2 = int(res2.joint_fisher.shape[0]) - p_full
+    assert p_psi_1 > 0 and p_psi_2 > 0
+    assert res12.joint_fisher.shape == (p_full + p_psi_1 + p_psi_2, p_full + p_psi_1 + p_psi_2)
+    jf1 = np.asarray(res1.joint_fisher)
+    jf2 = np.asarray(res2.joint_fisher)
+    jf12 = np.asarray(res12.joint_fisher)
+    np.testing.assert_allclose(jf12[:p_full, :p_full], jf1[:p_full, :p_full] + jf2[:p_full, :p_full], rtol=1e-11, atol=1e-11)
+    # Cross-event nuisance block is identically zero
+    np.testing.assert_allclose(
+        jf12[p_full : p_full + p_psi_1, p_full + p_psi_1 :],
+        0.0,
+        atol=1e-14,
+    )
+    # Schur complement of block-arrow joint_fisher matches marginal_fisher
+    f_tt = jf12[:p_full, :p_full]
+    f_tp = jf12[:p_full, p_full:]
+    f_pp = jf12[p_full:, p_full:]
+    schur = f_tt - f_tp @ np.linalg.pinv(f_pp, rcond=1e-12) @ f_tp.T
+    np.testing.assert_allclose(schur, np.asarray(res12.marginal_fisher), rtol=1e-6, atol=1e-7)
+
+
+def test_single_event_general_fisher_parity_and_multi_spike(_shared_compact_events) -> None:
+    jax.clear_caches()
+    cbm0, prior_sd, _n_grid, ev1, _ev2, _ev3, res1, _res2, _res12, _res123 = _shared_compact_events
+    act = np.asarray(res1.active_mask, dtype=bool)
+    p_full = int(act.shape[0])
+
+    # 1. Exact parity between general fallback (via prior_cbm_prec / prior_cbm_cov) and cbm_gp_fisher_spectrum
+    prior_prec_diag = np.where(act, 1.0 / (prior_sd**2), 0.0)
+    res_gen = multi_event_cbm_gp_fisher_spectrum(
+        cbm0, MultiEventDataset((ev1,)), prior_cbm_prec=np.diag(prior_prec_diag)
+    )
+    np.testing.assert_allclose(
+        np.asarray(res_gen.marginal_fisher), np.asarray(res1.marginal_fisher), rtol=1e-9, atol=1e-10
+    )
+    np.testing.assert_allclose(
+        np.asarray(res_gen.whitened_fisher), np.asarray(res1.whitened_fisher), rtol=1e-9, atol=1e-10
+    )
+    np.testing.assert_allclose(
+        np.asarray(res_gen.joint_fisher), np.asarray(res1.joint_fisher), rtol=1e-9, atol=1e-10
+    )
+    assert float(res_gen.d_eff) == pytest.approx(float(res1.d_eff), rel=1e-8)
+
+    prior_cov = (prior_sd**2) * np.eye(p_full, dtype=np.float64)
+    res_cov = multi_event_cbm_gp_fisher_spectrum(
+        cbm0, MultiEventDataset((ev1,)), prior_cbm_cov=prior_cov
+    )
+    np.testing.assert_allclose(
+        np.asarray(res_cov.marginal_fisher), np.asarray(res1.marginal_fisher), rtol=1e-9, atol=1e-10
+    )
+    assert float(res_cov.d_eff) == pytest.approx(float(res1.d_eff), rel=1e-8)
+
+    # 2. Composite marginalized terms (HarmonicSolar + LinearTrend) and raw parameterisation
+    prod_comp = tt.ProductionSum(
+        steady=tt.SteadyProduction(),
+        field=ev1.production.field,
+        solar=tt.HarmonicSolar(),
+        trend=tt.LinearTrend(),
+        spike=ev1.production.spike,
+    )
+    cfg_comp = tt.LinearMarginalConfig(
+        offset_mode="hierarchical",
+        marginalize_field=True,
+        marginalize_solar=True,
+        marginalize_trend=True,
+    )
+    ev_comp = EventWindow("e774_comp", ev1.dataset, prod_comp, cfg_comp)
+    res_comp = multi_event_cbm_gp_fisher_spectrum(
+        cbm0, MultiEventDataset((ev_comp,)), prior_sd=prior_sd
+    )
+    assert math.isfinite(float(res_comp.d_eff)) and float(res_comp.d_eff) > 0.0
+    # Marginalizing extra solar+trend modes cannot increase constrained Fisher information
+    assert float(res_comp.d_eff) <= float(res1.d_eff) + 1e-6
+
+    res_raw = multi_event_cbm_gp_fisher_spectrum(
+        cbm0, MultiEventDataset((ev1,)), prior_sd=prior_sd, parameterisation="raw"
+    )
+    assert math.isfinite(float(res_raw.d_eff)) and float(res_raw.d_eff) > 0.0
+
+    # 3. Multi-spike target resolution by spike_path (not first MiyakeSpike)
+    sp_a = tt.MiyakeSpike(t_start=770.2, duration=0.5, fluence=2.0, profile="boxcar")
+    sp_b = tt.MiyakeSpike(t_start=774.25, duration=0.75, fluence=6.4, profile="boxcar")
+    prod_2sp = tt.ProductionSum(
+        steady=tt.SteadyProduction(),
+        field=ev1.production.field,
+        spike_a=sp_a,
+        spike_b=sp_b,
+    )
+    ev_target_a = EventWindow("e_sp_a", ev1.dataset, prod_2sp, ev1.marginal_config, spike_path="spike_a")
+    ev_target_b = EventWindow("e_sp_b", ev1.dataset, prod_2sp, ev1.marginal_config, spike_path="spike_b")
+    res_a = multi_event_cbm_gp_fisher_spectrum(
+        cbm0, MultiEventDataset((ev_target_a,)), prior_cbm_prec=np.diag(prior_prec_diag)
+    )
+    res_b = multi_event_cbm_gp_fisher_spectrum(
+        cbm0, MultiEventDataset((ev_target_b,)), prior_cbm_prec=np.diag(prior_prec_diag)
+    )
+    assert not np.allclose(np.asarray(res_a.marginal_fisher), np.asarray(res_b.marginal_fisher))
+
+    # 4. Flat prior on data-sensitive CBM coordinates raises ValueError
+    with pytest.raises(ValueError):
+        multi_event_cbm_gp_fisher_spectrum(
+            cbm0, MultiEventDataset((ev1,)), prior_sd=np.inf
+        )
+    jax.clear_caches()
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +543,7 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
     assert fit_lap_1.idata is None
     assert fit_lap_1.map_converged
 
-    # Joint 2-event NUTS + exact IS reweighting
+    # Joint 2-event NUTS + exact IS reweighting (default is_max_draws=None evaluates all draws)
     fit_joint = fit_multi_event_subspace_cbm(
         model_init,
         mds_obs,
@@ -439,7 +551,6 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
         sampler="nuts",
         reweight_exact=True,
         use_linearized_dct=True,
-        is_max_draws=70,
         num_warmup=50,
         num_samples=35,
         num_chains=2,
@@ -453,7 +564,15 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
     assert "events__e774__spike__fluence" in fit_joint.idata.posterior
     assert "events__e993__spike__fluence" in fit_joint.idata.posterior
     assert "log_weight_is" in fit_joint.idata.sample_stats
+    assert fit_joint.idata.sample_stats["log_weight_is"].shape == (2, 35)
+    assert np.all(np.isfinite(np.asarray(fit_joint.idata.sample_stats["log_weight_is"])))
     assert fit_joint.diagnostics["n_divergences"] == 0
+    assert fit_joint.diagnostics["all_draws_evaluated"] is True
+    assert fit_joint.diagnostics["n_eval"] == 70
+    assert fit_joint.diagnostics["laplace_mass_fallback"] is False
+    assert math.isfinite(fit_joint.diagnostics["log_z_correction"])
+    assert math.isfinite(fit_joint.diagnostics["max_rhat"])
+    assert math.isfinite(fit_joint.diagnostics["min_ess_bulk"])
 
     # Pooling 2 events tightens Laplace posterior variance on shared alpha
     sd_alpha_1 = np.sqrt(np.diag(np.asarray(fit_lap_1.laplace_cov))[:2])
@@ -464,10 +583,15 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
     assert fit_joint.kish_ess_ratio is not None and fit_joint.kish_ess_ratio > 0.90
     assert fit_joint.median_abs_dlnL is not None and fit_joint.median_abs_dlnL < 0.15
 
-    # Posterior recovery of shared alpha and both events' spike parameters within 3 sigma
+    # IS-weighted posterior recovery of shared alpha and both events' spike parameters within 3 sigma
+    assert fit_joint.weights_is is not None
+    w_is = np.asarray(fit_joint.weights_is, dtype=np.float64)
+    assert w_is.shape == (70,)
+    assert float(np.sum(w_is)) == pytest.approx(1.0, abs=1e-12)
+
     alpha_draws = np.asarray(fit_joint.idata.posterior["cbm__alpha"]).reshape(-1, 2)
-    alpha_mean = np.mean(alpha_draws, axis=0)
-    alpha_sd = np.std(alpha_draws, axis=0, ddof=1)
+    alpha_mean = np.sum(w_is[:, None] * alpha_draws, axis=0)
+    alpha_sd = np.sqrt(np.sum(w_is[:, None] * (alpha_draws - alpha_mean[None, :]) ** 2, axis=0))
     assert np.all(np.abs(alpha_mean - np.asarray(alpha_true)) < 3.0 * alpha_sd)
 
     for ev_name, sp_true in true_spikes.items():
@@ -477,8 +601,62 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
         ts_draws = np.asarray(
             fit_joint.idata.posterior[f"events__{ev_name}__spike__t_start"]
         ).reshape(-1)
-        assert abs(float(np.mean(fl_draws)) - float(sp_true.fluence)) < 3.0 * float(np.std(fl_draws, ddof=1))
-        assert abs(float(np.mean(ts_draws)) - float(sp_true.t_start)) < 3.0 * float(np.std(ts_draws, ddof=1))
+        fl_mean = float(np.sum(w_is * fl_draws))
+        fl_sd = float(np.sqrt(np.sum(w_is * (fl_draws - fl_mean) ** 2)))
+        ts_mean = float(np.sum(w_is * ts_draws))
+        ts_sd = float(np.sqrt(np.sum(w_is * (ts_draws - ts_mean) ** 2)))
+        assert abs(fl_mean - float(sp_true.fluence)) < 3.0 * fl_sd
+        assert abs(ts_mean - float(sp_true.t_start)) < 3.0 * ts_sd
+
+    # Subsampled IS contract (is_max_draws < num_chains * num_samples) populates sample_stats + eval_indices
+    fit_sub = fit_multi_event_subspace_cbm(
+        model_init,
+        mds_obs,
+        ps_joint,
+        sampler="nuts",
+        reweight_exact=True,
+        use_linearized_dct=True,
+        is_max_draws=12,
+        num_warmup=50,
+        num_samples=15,
+        num_chains=2,
+        max_tree_depth=6,
+        compute_linear_posterior=False,
+        rng_key=jax.random.PRNGKey(101),
+    )
+    assert fit_sub.idata is not None
+    assert "log_weight_is" in fit_sub.idata.sample_stats
+    lw_ss = np.asarray(fit_sub.idata.sample_stats["log_weight_is"])
+    assert lw_ss.shape == (2, 15)
+    assert int(np.sum(np.isfinite(lw_ss))) == 12
+    assert int(np.sum(np.isnan(lw_ss))) == 18
+    assert fit_sub.diagnostics["all_draws_evaluated"] is False
+    assert fit_sub.diagnostics["n_eval"] == 12
+    assert len(fit_sub.diagnostics["eval_indices"]) == 12
+    assert fit_sub.weights_is is not None and fit_sub.weights_is.shape == (12,)
+
+    # Validation guards: max_draws < 1 raises ValueError; mismatched lin_op bounds raises ValueError
+    with pytest.raises(ValueError, match="max_draws"):
+        reweight_multi_event_exact(
+            jnp.broadcast_to(fit_joint.u_map[None, :], (2, ps_joint.n_params)),
+            model_init,
+            mds_obs,
+            ps_joint,
+            fit_joint.dct_operators,
+            max_draws=0,
+        )
+    with pytest.raises(ValueError, match="is_max_draws"):
+        fit_multi_event_subspace_cbm(
+            model_init, mds_obs, ps_joint, sampler="laplace", is_max_draws=0
+        )
+    from ticktack.multievent import _multi_event_tan_log_likelihood
+
+    with pytest.raises(ValueError, match="LinearizedDCTOperator geometry"):
+        _multi_event_tan_log_likelihood(
+            fit_joint.model,
+            mds_obs,
+            {"e774": fit_joint.dct_operators["e993"]},
+        )
 
     # Raw chi2 / N reasonable on both events (noting GP effective DoF on N=50)
     for ev_name, chi2_n in fit_joint.diagnostics["per_event_chi2_per_n"].items():
@@ -500,6 +678,17 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
     )
     ll_tan_cfg = multi_event_marginal_log_likelihood(fit_joint.model, mds_tan)
     assert float(ll_tan_cfg - ll_ex_map) == pytest.approx(0.0, abs=1e-10)
+    # Passing pre-attached tangent operators into Stage-1 MAP still strips them for exact MAP
+    fit_lap_preattached = fit_multi_event_subspace_cbm(
+        fit_joint.model,
+        mds_tan,
+        ps_joint,
+        sampler="laplace",
+        map_max_steps=5,
+        compute_linear_posterior=False,
+    )
+    assert float(fit_lap_preattached.log_likelihood_map) == pytest.approx(float(ll_ex_map), abs=1e-6)
+
     is_at_map = reweight_multi_event_exact(
         jnp.broadcast_to(fit_joint.u_map[None, :], (2, ps_joint.n_params)),
         model_init,
