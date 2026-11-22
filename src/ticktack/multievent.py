@@ -19,9 +19,9 @@ offsets:
    :class:`~ticktack.likelihood.ParameterSpace` string paths such as
    ``"cbm.alpha"`` and ``"events.775CE.spike.fluence"`` address leaves
    natively.
-3. :func:`multi_event_cbm_gp_fisher_spectrum`: sums per-event GP-, offset-, and
-   spike-Schur-marginalized CBM Fisher information matrices across all events
-   (whitening by the shared CBM prior exactly once) and returns a
+3. :func:`multi_event_cbm_gp_fisher_spectrum`: sums per-event
+   :func:`~ticktack.fisher.cbm_gp_fisher_spectrum` information matrices across
+   all events (whitening by the shared CBM prior exactly once) and returns a
    :class:`~ticktack.fisher.FisherSpectrumResult` directly compatible with
    :meth:`~ticktack.cbm.SubspaceCBM.from_fisher`.
 4. :func:`multi_event_marginal_log_likelihood`,
@@ -29,8 +29,8 @@ offsets:
    :func:`reweight_multi_event_exact`, and :func:`fit_multi_event_subspace_cbm`:
    block-diagonal Woodbury marginalization in ``O(sum_e N_e r_e^2)`` time,
    exact joint L-BFGS MAP + Laplace preconditioning, per-event MAP-centred
-   tangent-linear DCT operators for fast NUTS sampling, and exact multi-event
-   importance-sampling reweighting.
+   :class:`~ticktack.fields.LinearizedDCTOperator`s for fast NUTS sampling, and
+   exact multi-event importance-sampling reweighting.
 """
 
 from __future__ import annotations
@@ -44,13 +44,13 @@ import arviz as az
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from jax.typing import ArrayLike
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
 import numpyro.distributions.distribution as _np_dist_mod
 from numpyro.infer import MCMC, NUTS
 from scipy.optimize import minimize as _scipy_minimize
-from jax.typing import ArrayLike
 import zodiax as zdx
 
 if not hasattr(dist, "distribution"):
@@ -60,9 +60,9 @@ from .cbm import BalancedCBM, CarbonBoxModel, FixedCBM, SubspaceCBM
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 from .data import Dataset, TreeRingSeries
 from .fields import (
-    GaussianField,
+    LinearizedDCTOperator,
     _safe_sqrt,
-    build_dct_response_operator,
+    build_linearized_dct_operator,
 )
 from .fisher import (
     FisherSpectrumResult,
@@ -70,6 +70,7 @@ from .fisher import (
     _partition_inexact,
     _resolve_cbm_prior_root,
     cbm_fisher_spectrum,
+    cbm_gp_fisher_spectrum,
 )
 from .fitting import _regularize_hessian_to_cov
 from .likelihood import (
@@ -209,9 +210,7 @@ class EventWindow(eqx.Module):
     def with_marginal_config(self, cfg: LinearMarginalConfig) -> EventWindow:
         """Return a copy of this event window with an updated ``marginal_config``."""
         if not isinstance(cfg, LinearMarginalConfig):
-            raise TypeError(
-                f"Expected LinearMarginalConfig, got {type(cfg)!r}."
-            )
+            raise TypeError(f"Expected LinearMarginalConfig, got {type(cfg)!r}.")
         return eqx.tree_at(lambda ev: ev.marginal_config, self, cfg)
 
 
@@ -458,7 +457,7 @@ def _resolve_fisher_cbm(
     return cbm
 
 
-def _single_event_gp_fisher(
+def _single_event_general_fisher(
     cbm: CarbonBoxModel,
     event: EventWindow,
     *,
@@ -471,7 +470,7 @@ def _single_event_gp_fisher(
     alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
     solver: AbstractSolver | None = None,
 ) -> FisherSpectrumResult:
-    """Compute one event's GP-, offset-, and spike-Schur-marginalized CBM Fisher spectrum."""
+    """Fallback single-event Fisher for custom priors, solvers, or composite marginalized terms."""
     solver_eff = ExactLinearSolver() if solver is None else solver
     cfg = event.marginal_config
     model_e = RadiocarbonModel(
@@ -494,11 +493,10 @@ def _single_event_gp_fisher(
         sigma_eff = sigma_eff + h_fin @ h_fin.T
     sigma_eff = 0.5 * (sigma_eff + sigma_eff.T)
 
-    # Unmarginalized deterministic prediction parts (e.g. SteadyProduction + MiyakeSpike)
     unmarg_parts, _, _, _, _ = _partition_terms_for_cfg(event.production, cfg)
-    base_prod = _build_base_production(unmarg_parts, jnp.asarray(q_std, dtype=jnp.float64))
-
-    # Locate spike inside base_prod if present
+    base_prod = _build_base_production(
+        unmarg_parts, jnp.asarray(q_std, dtype=jnp.float64)
+    )
     spike_obj = event.get_spike(event.production)
     spike_in_base_path: str | None = None
     if spike_obj is not None:
@@ -506,14 +504,9 @@ def _single_event_gp_fisher(
             spike_in_base_path = ""
         elif isinstance(base_prod, ProductionSum):
             for pname, part in zip(base_prod.names, base_prod.parts):
-                if isinstance(part, MiyakeSpike) and part is spike_obj:
+                if isinstance(part, MiyakeSpike):
                     spike_in_base_path = pname
                     break
-            if spike_in_base_path is None:
-                for pname, part in zip(base_prod.names, base_prod.parts):
-                    if isinstance(part, MiyakeSpike):
-                        spike_in_base_path = pname
-                        break
 
     has_inf_lin = bool(np.any(inf_mask))
     inf_cols = (
@@ -523,33 +516,22 @@ def _single_event_gp_fisher(
     )
     n_inf = int(inf_cols.shape[1])
 
-    delta_glob_prior = (
-        cfg.global_prior_mean
-        if cfg.offset_mode in ("hierarchical", "shared")
-        else 0.0
-    )
-
     if spike_obj is not None and spike_in_base_path is not None and has_inf_lin:
-        psi_init: Any = {
-            "spike": spike_obj,
-            "inf_lin": jnp.zeros((n_inf,), dtype=jnp.float64),
-        }
+        psi_init: Any = (spike_obj, jnp.zeros((n_inf,), dtype=jnp.float64))
 
-        def fwd_fn(cbm_arg: CarbonBoxModel, psi_arg: dict[str, Any]) -> jax.Array:
+        def fwd_fn(cbm_arg: CarbonBoxModel, psi_arg: tuple[Any, jax.Array]) -> jax.Array:
+            sp_v, inf_v = psi_arg
             prod_eval = (
-                psi_arg["spike"]
+                sp_v
                 if spike_in_base_path == ""
-                else base_prod.set(spike_in_base_path, psi_arg["spike"])
+                else base_prod.set(spike_in_base_path, sp_v)
             )
             pred = RadiocarbonModel(
-                cbm_arg,
-                prod_eval,
-                solver=solver_eff,
-                q_std=q_std,
-                alpha_unit=alpha_unit,
-            ).predict_d14c(event.dataset, concat=True, delta_global=delta_glob_prior)
-            return pred + inf_cols @ psi_arg["inf_lin"]
+                cbm_arg, prod_eval, solver=solver_eff, q_std=q_std, alpha_unit=alpha_unit
+            ).predict_d14c(event.dataset, concat=True)
+            return pred + inf_cols @ inf_v
 
+        full_psi_prec = None
         if spike_prior_precision is not None:
             flat_sp, _ = _partition_inexact(spike_obj)
             p_sp = int(flat_sp.shape[0])
@@ -559,28 +541,21 @@ def _single_event_gp_fisher(
             elif sp_prec.ndim == 1:
                 sp_prec = jnp.diag(sp_prec)
             full_psi_prec = jnp.zeros((p_sp + n_inf, p_sp + n_inf), dtype=jnp.float64)
-            # Dict key order in JAX pytrees is sorted alphabetically: "inf_lin" before "spike"
-            full_psi_prec = full_psi_prec.at[n_inf:, n_inf:].set(sp_prec)
-        else:
-            full_psi_prec = None
-
+            full_psi_prec = full_psi_prec.at[:p_sp, :p_sp].set(sp_prec)
     elif spike_obj is not None and spike_in_base_path is not None:
         psi_init = spike_obj
 
-        def fwd_fn(cbm_arg: CarbonBoxModel, psi_arg: MiyakeSpike) -> jax.Array:
+        def fwd_fn(cbm_arg: CarbonBoxModel, sp_v: MiyakeSpike) -> jax.Array:
             prod_eval = (
-                psi_arg
+                sp_v
                 if spike_in_base_path == ""
-                else base_prod.set(spike_in_base_path, psi_arg)
+                else base_prod.set(spike_in_base_path, sp_v)
             )
             return RadiocarbonModel(
-                cbm_arg,
-                prod_eval,
-                solver=solver_eff,
-                q_std=q_std,
-                alpha_unit=alpha_unit,
-            ).predict_d14c(event.dataset, concat=True, delta_global=delta_glob_prior)
+                cbm_arg, prod_eval, solver=solver_eff, q_std=q_std, alpha_unit=alpha_unit
+            ).predict_d14c(event.dataset, concat=True)
 
+        full_psi_prec = None
         if spike_prior_precision is not None:
             flat_sp, _ = _partition_inexact(spike_obj)
             p_sp = int(flat_sp.shape[0])
@@ -591,35 +566,23 @@ def _single_event_gp_fisher(
                 full_psi_prec = jnp.diag(sp_prec)
             else:
                 full_psi_prec = sp_prec
-        else:
-            full_psi_prec = None
-
     elif has_inf_lin:
         psi_init = jnp.zeros((n_inf,), dtype=jnp.float64)
 
-        def fwd_fn(cbm_arg: CarbonBoxModel, psi_arg: jax.Array) -> jax.Array:
+        def fwd_fn(cbm_arg: CarbonBoxModel, inf_v: jax.Array) -> jax.Array:
             pred = RadiocarbonModel(
-                cbm_arg,
-                base_prod,
-                solver=solver_eff,
-                q_std=q_std,
-                alpha_unit=alpha_unit,
-            ).predict_d14c(event.dataset, concat=True, delta_global=delta_glob_prior)
-            return pred + inf_cols @ psi_arg
+                cbm_arg, base_prod, solver=solver_eff, q_std=q_std, alpha_unit=alpha_unit
+            ).predict_d14c(event.dataset, concat=True)
+            return pred + inf_cols @ inf_v
 
         full_psi_prec = None
-
     else:
         psi_init = None
 
         def fwd_fn(cbm_arg: CarbonBoxModel) -> jax.Array:
             return RadiocarbonModel(
-                cbm_arg,
-                base_prod,
-                solver=solver_eff,
-                q_std=q_std,
-                alpha_unit=alpha_unit,
-            ).predict_d14c(event.dataset, concat=True, delta_global=delta_glob_prior)
+                cbm_arg, base_prod, solver=solver_eff, q_std=q_std, alpha_unit=alpha_unit
+            ).predict_d14c(event.dataset, concat=True)
 
         full_psi_prec = None
 
@@ -656,10 +619,9 @@ def multi_event_cbm_gp_fisher_spectrum(
 ) -> FisherSpectrumResult:
     """Compute the pooled multi-event GP-, offset-, and spike-marginalized CBM Fisher spectrum.
 
-    Because per-event cosmic-ray GP fluctuations, laboratory offsets, and spike
-    parameters are conditionally independent across disjoint event windows given
-    the shared :class:`~ticktack.cbm.CarbonBoxModel`, the Schur-marginalized CBM
-    Fisher information matrices sum linearly across events:
+    Delegates each standard event window to :func:`~ticktack.fisher.cbm_gp_fisher_spectrum`
+    and sums the Schur-marginalized CBM Fisher information matrices linearly across
+    conditionally independent events:
 
     .. math::
 
@@ -667,9 +629,8 @@ def multi_event_cbm_gp_fisher_spectrum(
         = \\sum_{e=1}^{E} \\tilde{F}_{e}
         = L_\\Pi^\\top \\left(\\sum_{e=1}^{E} F_{\\mathrm{CBM},e}^{\\mathrm{marg}}\\right) L_\\Pi,
 
-    and the shared CBM prior precision ``I`` enters the joint posterior
-    covariance and information gain exactly once (never double-counted across
-    events). The returned :class:`~ticktack.fisher.FisherSpectrumResult` is
+    applying the shared CBM prior precision ``I`` exactly once (never double-counted
+    across events). The returned :class:`~ticktack.fisher.FisherSpectrumResult` is
     directly compatible with :meth:`~ticktack.cbm.SubspaceCBM.from_fisher`.
     """
     if isinstance(multi_dataset, MultiEventDataset):
@@ -683,25 +644,62 @@ def multi_event_cbm_gp_fisher_spectrum(
         if (prior_cbm_cov is None and prior_cbm_prec is None and prior_cbm_root is None)
         else None
     )
+    can_use_core_gp_fisher = (
+        parameterisation == "log_rates"
+        and prior_cbm_cov is None
+        and prior_cbm_prec is None
+        and prior_cbm_root is None
+        and solver is None
+    )
 
     per_event_results: list[FisherSpectrumResult] = []
     for ev in mds.events:
-        if isinstance(spike_prior_precision, Mapping):
-            sp_prec_e = spike_prior_precision.get(ev.name, None)
-        else:
-            sp_prec_e = spike_prior_precision
-        res_e = _single_event_gp_fisher(
-            cbm_eval,
-            ev,
-            prior_cbm_sd=use_prior_sd,
-            prior_cbm_cov=prior_cbm_cov,
-            prior_cbm_prec=prior_cbm_prec,
-            prior_cbm_root=prior_cbm_root,
-            spike_prior_precision=sp_prec_e,
-            q_std=q_std,
-            alpha_unit=alpha_unit,
-            solver=solver,
+        sp_prec_e = (
+            spike_prior_precision.get(ev.name, None)
+            if isinstance(spike_prior_precision, Mapping)
+            else spike_prior_precision
         )
+        unmarg, solar_t, trend_t, gp_t, field_t = _partition_terms_for_cfg(
+            ev.production, ev.marginal_config
+        )
+        spike_obj = ev.get_spike(ev.production)
+        non_steady_unmarg = [
+            t for t in unmarg if not isinstance(t, (MiyakeSpike,))
+            and type(t).__name__ != "SteadyProduction"
+        ]
+        if (
+            can_use_core_gp_fisher
+            and not solar_t
+            and not trend_t
+            and not non_steady_unmarg
+            and (len(gp_t) + len(field_t)) <= 1
+        ):
+            gp_or_field = field_t[0] if field_t else (gp_t[0] if gp_t else None)
+            res_e = cbm_gp_fisher_spectrum(
+                cbm_eval,
+                ev.dataset,
+                gp_or_field,
+                spike=spike_obj,
+                spike_prior_precision=sp_prec_e,
+                marginal_config=ev.marginal_config,
+                prior_sd=use_prior_sd,
+                parameterisation="log_rates",
+                q_std=float(q_std),
+                alpha_unit=float(alpha_unit),
+            )
+        else:
+            res_e = _single_event_general_fisher(
+                cbm_eval,
+                ev,
+                prior_cbm_sd=use_prior_sd,
+                prior_cbm_cov=prior_cbm_cov,
+                prior_cbm_prec=prior_cbm_prec,
+                prior_cbm_root=prior_cbm_root,
+                spike_prior_precision=sp_prec_e,
+                q_std=q_std,
+                alpha_unit=alpha_unit,
+                solver=solver,
+            )
         per_event_results.append(res_e)
 
     active_mask = per_event_results[0].active_mask
@@ -710,7 +708,7 @@ def multi_event_cbm_gp_fisher_spectrum(
     p_full = int(c_mask.shape[0])
     p_act = int(active_idx.shape[0])
 
-    # Exact additivity of Schur-marginalized CBM Fisher information across events
+    # Exact linear additivity of Schur-marginalized CBM Fisher information across events
     marginal_fisher = jnp.zeros((p_full, p_full), dtype=jnp.float64)
     whitened_fisher = jnp.zeros((p_act, p_act), dtype=jnp.float64)
     for res_e in per_event_results:
@@ -720,7 +718,7 @@ def multi_event_cbm_gp_fisher_spectrum(
     marginal_fisher = 0.5 * (marginal_fisher + marginal_fisher.T)
     whitened_fisher = 0.5 * (whitened_fisher + whitened_fisher.T)
 
-    # Recover shared prior covariance root L_Pi once (identical across all events)
+    # Shared prior covariance root L_Pi applied exactly once
     l_pi, _ = _resolve_cbm_prior_root(
         p_full,
         active_cbm_mask=c_mask,
@@ -818,7 +816,9 @@ def multi_event_marginal_log_likelihood(
 
     Sums per-event :func:`~ticktack.likelihood.marginal_log_likelihood` values
     across all :class:`EventWindow` entries in ``O(sum_e N_e r_e^2)`` time
-    without forming any cross-event dense covariance matrix.
+    without forming any cross-event dense covariance matrix. Each event window
+    may independently carry a precomputed :class:`~ticktack.fields.LinearizedDCTOperator`
+    in ``ev.marginal_config.dct_operator``.
     """
     total = jnp.asarray(0.0, dtype=jnp.float64)
     for ev in multi_dataset.events:
@@ -856,100 +856,8 @@ def multi_event_marginal_log_posterior(
 
 
 # ---------------------------------------------------------------------------
-# 4. Per-event MAP-centred tangent-linear DCT operator & exact IS reweighting
+# 4. Shared-modal tangent evaluation & exact multi-event IS reweighting
 # ---------------------------------------------------------------------------
-
-
-class _TangentDCTOperator(eqx.Module):
-    """Internal Phase-A tangent-linear DCT operator (replaced by PR 1's LinearizedDCTOperator in Phase B)."""
-
-    alpha_ref: jax.Array
-    w_ref: jax.Array
-    dw_dalpha: jax.Array
-    t_start: float = eqx.field(static=True)
-    t_end: float = eqx.field(static=True)
-    n_grid: int = eqx.field(static=True)
-    dt: float = eqx.field(static=True)
-
-    def evaluate_w_dct(self, alpha: ArrayLike) -> jax.Array:
-        da = jnp.asarray(alpha, dtype=jnp.float64) - self.alpha_ref
-        return self.w_ref + jnp.tensordot(da, self.dw_dalpha, axes=([0], [0]))
-
-
-@eqx.filter_jit
-def _jvp_w_dct_jit(
-    subspace_cbm: SubspaceCBM,
-    dataset: Dataset,
-    gf: GaussianField,
-    q_std: jax.Array,
-    alpha_unit: jax.Array,
-    alpha_ref: jax.Array,
-    tang: jax.Array,
-) -> jax.Array:
-    def _w_of_alpha(alpha: jax.Array) -> jax.Array:
-        cbm_a = subspace_cbm.set("alpha", alpha)
-        op = build_dct_response_operator(
-            cbm_a,
-            dataset,
-            t_start=gf.t_start,
-            t_end=gf.t_end,
-            n_grid=gf.n_grid,
-            q_std=q_std,
-            alpha_unit=alpha_unit,
-            template=gf.template,
-        )
-        return op.w_dct
-
-    return jax.jvp(_w_of_alpha, (alpha_ref,), (tang,))[1]
-
-
-def _build_tangent_dct_operator_for_event(
-    subspace_cbm: SubspaceCBM,
-    dataset: Dataset,
-    gf: GaussianField,
-    *,
-    q_std: ArrayLike,
-    alpha_unit: ArrayLike,
-) -> _TangentDCTOperator:
-    alpha_ref = jnp.asarray(subspace_cbm.alpha, dtype=jnp.float64)
-    q_arr = jnp.asarray(q_std, dtype=jnp.float64).reshape(())
-    a_arr = jnp.asarray(alpha_unit, dtype=jnp.float64).reshape(())
-    m = int(alpha_ref.shape[0])
-
-    op_ref = build_dct_response_operator(
-        subspace_cbm.set("alpha", alpha_ref),
-        dataset,
-        t_start=gf.t_start,
-        t_end=gf.t_end,
-        n_grid=gf.n_grid,
-        q_std=q_arr,
-        alpha_unit=a_arr,
-        template=gf.template,
-    )
-    w_ref = op_ref.w_dct
-    if m > 0:
-        eye_m = jnp.eye(m, dtype=jnp.float64)
-        dw = jnp.stack(
-            [
-                _jvp_w_dct_jit(
-                    subspace_cbm, dataset, gf, q_arr, a_arr, alpha_ref, eye_m[k]
-                )
-                for k in range(m)
-            ],
-            axis=0,
-        )
-    else:
-        dw = jnp.zeros((0,) + w_ref.shape, dtype=jnp.float64)
-
-    return _TangentDCTOperator(
-        alpha_ref=alpha_ref,
-        w_ref=w_ref,
-        dw_dalpha=dw,
-        t_start=float(gf.t_start),
-        t_end=float(gf.t_end),
-        n_grid=int(gf.n_grid),
-        dt=float(gf.dt),
-    )
 
 
 def _shared_cbm_context(
@@ -1035,11 +943,11 @@ def _fast_exact_nonlinear_residual(
     return dataset.d14c_flat - pred_flat
 
 
-def _event_marginal_log_likelihood_with_tan_op(
+def _event_tan_log_likelihood_shared(
     model_e: RadiocarbonModel,
     dataset: Dataset,
     cfg: LinearMarginalConfig,
-    tan_op: Any | None,
+    lin_op: LinearizedDCTOperator | None,
     *,
     sigma_jitter: ArrayLike | None = None,
     shared_ctx: tuple[
@@ -1050,14 +958,13 @@ def _event_marginal_log_likelihood_with_tan_op(
     ]
     | None = None,
 ) -> jax.Array:
-    """Evaluate single-event marginal log-likelihood using tangent ``W_DCT(alpha)`` when supplied.
+    """Evaluate single-event tangent log-likelihood reusing the shared CBM modal context.
 
-    Crucially, ``SteadyProduction + MiyakeSpike`` trajectories and ``y_ss``
-    steady-state hierarchical offset ratios are always evaluated **exactly** at
-    ``model_e.cbm``; only the background ``GaussianField`` transfer matrix
-    ``W_DCT(alpha)`` uses the MAP-centred tangent expansion.
+    ``SteadyProduction + MiyakeSpike`` trajectories and ``y_ss`` steady-state
+    hierarchical offset ratios are evaluated **exactly** at ``model_e.cbm``;
+    only ``W_DCT(alpha)`` uses ``lin_op.evaluate_w_dct(model_e.cbm.alpha)``.
     """
-    if tan_op is None or not isinstance(model_e.cbm, SubspaceCBM):
+    if lin_op is None or not isinstance(model_e.cbm, SubspaceCBM):
         return marginal_log_likelihood(
             model_e, dataset, cfg, sigma_jitter=sigma_jitter
         )
@@ -1079,8 +986,11 @@ def _event_marginal_log_likelihood_with_tan_op(
         or gp_terms
         or dataset.n_obs == 0
     ):
+        cfg_tan = eqx.tree_at(
+            lambda c: c.dct_operator, cfg, lin_op, is_leaf=lambda x: x is None
+        )
         return marginal_log_likelihood(
-            model_e, dataset, cfg, sigma_jitter=sigma_jitter
+            model_e, dataset, cfg_tan, sigma_jitter=sigma_jitter
         )
 
     gf = field_terms[0]
@@ -1139,7 +1049,7 @@ def _event_marginal_log_likelihood_with_tan_op(
         pmean_parts.append(jnp.array([cfg.global_prior_mean], dtype=jnp.float64))
         psd_parts.append(jnp.array([cfg.global_prior_sd], dtype=jnp.float64))
 
-    w_tan = tan_op.evaluate_w_dct(cbm.alpha)
+    w_tan = lin_op.evaluate_w_dct(cbm.alpha)
     h_gf = w_tan * _safe_sqrt(gf.power_spectrum())[None, :]
     design_cols.append(h_gf)
     pmean_parts.append(jnp.zeros((gf.n_grid,), dtype=jnp.float64))
@@ -1155,7 +1065,7 @@ def _event_marginal_log_likelihood_with_tan_op(
 def _multi_event_tan_log_likelihood(
     model: MultiEventModel,
     multi_dataset: MultiEventDataset,
-    tan_ops: Mapping[str, Any],
+    tan_ops: Mapping[str, LinearizedDCTOperator],
     *,
     sigma_jitter: Mapping[str, ArrayLike] | ArrayLike | None = None,
 ) -> jax.Array:
@@ -1165,7 +1075,7 @@ def _multi_event_tan_log_likelihood(
         m_e = model.event_model(ev.name)
         jit_e = _resolve_event_sigma_jitter(sigma_jitter, ev.name)
         op_e = tan_ops.get(ev.name, None)
-        total = total + _event_marginal_log_likelihood_with_tan_op(
+        total = total + _event_tan_log_likelihood_shared(
             m_e,
             ev.dataset,
             ev.marginal_config,
@@ -1182,20 +1092,22 @@ def _single_event_dlnl_one_jit(
     model_template: MultiEventModel,
     ev: EventWindow,
     parameter_space: ParameterSpace,
-    tan_op_e: Any,
+    cfg_tan_e: LinearMarginalConfig,
     sigma_jitter_e: Any,
 ) -> jax.Array:
     m_one = parameter_space.constrain(u_one, model_template)
     m_e = m_one.event_model(ev.name)
-    ll_ex = marginal_log_likelihood(
-        m_e, ev.dataset, ev.marginal_config, sigma_jitter=sigma_jitter_e
-    )
-    ll_tan = _event_marginal_log_likelihood_with_tan_op(
-        m_e,
-        ev.dataset,
+    cfg_exact_e = eqx.tree_at(
+        lambda c: c.dct_operator,
         ev.marginal_config,
-        tan_op_e,
-        sigma_jitter=sigma_jitter_e,
+        None,
+        is_leaf=lambda x: x is None,
+    )
+    ll_ex = marginal_log_likelihood(
+        m_e, ev.dataset, cfg_exact_e, sigma_jitter=sigma_jitter_e
+    )
+    ll_tan = marginal_log_likelihood(
+        m_e, ev.dataset, cfg_tan_e, sigma_jitter=sigma_jitter_e
     )
     return ll_ex - ll_tan
 
@@ -1235,11 +1147,11 @@ def _multi_neg_log_post_vg(
     parameter_space: ParameterSpace,
     sigma_jitter: Mapping[str, ArrayLike] | ArrayLike | None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Evaluate exact ``(-ln p(u | d), grad)`` by accumulating one event at a time.
+    """Evaluate exact ``(-ln p(u | d), grad)`` accumulating one event at a time.
 
     Accumulating per-event ``value_and_grad`` keeps XLA compilation memory
     ``O(1)`` in the number of events ``E`` rather than inlining ``E`` full
-    DCT response operators into a single monolithic reverse-mode graph.
+    DCT response operators into a single reverse-mode graph.
     """
     lp_val, lp_grad = _prior_vg_jit(u, parameter_space)
     total_val = lp_val
@@ -1257,14 +1169,14 @@ def reweight_multi_event_exact(
     model_template: MultiEventModel,
     multi_dataset: MultiEventDataset,
     parameter_space: ParameterSpace,
-    tan_ops: Mapping[str, Any],
+    tan_ops: Mapping[str, LinearizedDCTOperator],
     *,
     max_draws: int | None = 200,
     sigma_jitter: Mapping[str, ArrayLike] | ArrayLike | None = None,
 ) -> dict[str, Any]:
     """Compute exact multi-event importance-sampling weights ``log_w = sum_e (ln L_exact,e - ln L_tan,e)``.
 
-    Evaluates exact vs tangent-linear marginal log-likelihoods across
+    Evaluates exact versus tangent-linear marginal log-likelihoods across
     unconstrained posterior draws ``u_samples`` of shape ``(..., d)`` and
     returns normalized importance weights, Kish effective sample size ratio
     ``ESS_IS / S``, and ``|Δln L|`` accuracy diagnostics.
@@ -1298,6 +1210,12 @@ def reweight_multi_event_exact(
         op_e = tan_ops.get(ev.name, None)
         if op_e is None:
             continue
+        cfg_tan_e = eqx.tree_at(
+            lambda c: c.dct_operator,
+            ev.marginal_config,
+            op_e,
+            is_leaf=lambda x: x is None,
+        )
         jit_e = _resolve_event_sigma_jitter(sigma_jitter, ev.name)
         for s_idx in range(int(u_eval.shape[0])):
             log_w_np[s_idx] += float(
@@ -1306,7 +1224,7 @@ def reweight_multi_event_exact(
                     model_template,
                     ev,
                     parameter_space,
-                    op_e,
+                    cfg_tan_e,
                     jit_e,
                 )
             )
@@ -1367,8 +1285,8 @@ class MultiEventFitResult(NamedTuple):
     parameter_space: ParameterSpace
     """Joint parameter space over shared CBM and per-event parameters."""
 
-    dct_operators: dict[str, Any]
-    """Per-event MAP-centred tangent-linear DCT operators keyed by event name."""
+    dct_operators: dict[str, LinearizedDCTOperator]
+    """Per-event MAP-centred :class:`~ticktack.fields.LinearizedDCTOperator`s keyed by event name."""
 
     log_weights_is: jax.Array | None
     """Exact importance-sampling log-weights ``sum_e (ln L_exact,e - ln L_tan,e)``."""
@@ -1421,17 +1339,21 @@ def fit_multi_event_subspace_cbm(
     Runs a three-stage exact/asymptotically-exact workflow:
 
     1. **Exact joint MAP + Laplace covariance**: maximizes
-       :func:`multi_event_marginal_log_posterior` using ``optimistix.BFGS`` and
-       computes the regularized inverse-Hessian covariance at ``u_map``.
-    2. **MAP-centred per-event tangent DCT + Laplace-preconditioned NUTS**
-       (when ``sampler="nuts"``): builds each event's tangent-linear DCT
-       operator around ``alpha_MAP`` while keeping ``SteadyProduction +
-       MiyakeSpike`` and steady-state ``y_ss`` offset ratios **exact**, and
-       samples the joint posterior in non-centred coordinates preconditioned by
-       the Laplace covariance.
+       :func:`multi_event_marginal_log_posterior` using L-BFGS-B with per-event
+       gradient accumulation and computes the regularized inverse-Hessian
+       covariance at ``u_map``.
+    2. **MAP-centred per-event :class:`~ticktack.fields.LinearizedDCTOperator` +
+       Laplace-preconditioned NUTS** (when ``sampler="nuts"``): builds each
+       event's tangent-linear DCT operator via
+       :func:`~ticktack.fields.build_linearized_dct_operator` around
+       ``alpha_MAP`` while keeping ``SteadyProduction + MiyakeSpike`` and
+       steady-state ``y_ss`` offset ratios **exact**, and samples the joint
+       posterior in non-centred coordinates preconditioned by the Laplace
+       covariance.
     3. **Exact multi-event IS reweighting** (when ``reweight_exact=True``):
        evaluates ``log_w = sum_e (ln L_exact,e - ln L_tan,e)`` across posterior
-       draws to compute exact importance weights and Kish ESS efficiency.
+       draws via :func:`reweight_multi_event_exact` to compute exact importance
+       weights and Kish ESS efficiency.
     """
     if sampler not in ("nuts", "laplace"):
         raise ValueError(f"sampler must be 'nuts' or 'laplace'; got {sampler!r}.")
@@ -1443,9 +1365,6 @@ def fit_multi_event_subspace_cbm(
 
     # ------------------------------------------------------------------
     # Stage 1: Exact joint MAP & central-diff Laplace covariance
-    # (Reuses a single module-level compiled exact value_and_grad kernel
-    # for both L-BFGS-B optimization and Hessian estimation to keep XLA
-    # compile time and memory compact on multi-event 22-box Brehm21 models.)
     # ------------------------------------------------------------------
     if d > 0:
         def _scipy_obj(x_np: np.ndarray) -> tuple[float, np.ndarray]:
@@ -1500,7 +1419,6 @@ def fit_multi_event_subspace_cbm(
         log_post_map = -neg_lp_map
         log_lk_map = log_post_map - parameter_space.log_prior_unconstrained(u_map)
 
-        # Exact central-difference Hessian of the already-compiled exact gradient
         u_map_np = np.asarray(u_map, dtype=np.float64)
         h_step = 1e-5
         hess_cols = np.empty((d, d), dtype=np.float64)
@@ -1580,21 +1498,31 @@ def fit_multi_event_subspace_cbm(
         )
 
     # ------------------------------------------------------------------
-    # Stage 2: Per-event MAP-centred tangent DCT + Laplace-preconditioned NUTS
+    # Stage 2: Per-event MAP-centred LinearizedDCTOperator + NUTS
     # ------------------------------------------------------------------
-    tan_ops: dict[str, Any] = {}
+    tan_ops: dict[str, LinearizedDCTOperator] = {}
     if use_linearized_dct and isinstance(model_map.cbm, SubspaceCBM):
         for ev in multi_dataset.events:
             _, solar_t, trend_t, gp_t, field_t = _partition_terms_for_cfg(
                 model_map.events[ev.name], ev.marginal_config
             )
-            if len(field_t) == 1 and not solar_t and not trend_t and not gp_t and ev.n_obs > 0:
-                tan_ops[ev.name] = _build_tangent_dct_operator_for_event(
+            if (
+                len(field_t) == 1
+                and not solar_t
+                and not trend_t
+                and not gp_t
+                and ev.n_obs > 0
+            ):
+                gf = field_t[0]
+                tan_ops[ev.name] = build_linearized_dct_operator(
                     model_map.cbm,
                     ev.dataset,
-                    field_t[0],
+                    t_start=gf.t_start,
+                    t_end=gf.t_end,
+                    n_grid=gf.n_grid,
                     q_std=model_map.q_std,
                     alpha_unit=model_map.alpha_unit,
+                    template=gf.template,
                 )
 
     prior_means = parameter_space.prior_means

@@ -113,6 +113,20 @@ def _make_event_window(
 
 
 def test_event_window_and_multi_event_dataset_validation() -> None:
+    # Verify top-level ticktack exports
+    for sym in (
+        "EventWindow",
+        "MultiEventDataset",
+        "MultiEventFitResult",
+        "MultiEventModel",
+        "multi_event_cbm_gp_fisher_spectrum",
+        "multi_event_marginal_log_likelihood",
+        "multi_event_marginal_log_posterior",
+        "reweight_multi_event_exact",
+        "fit_multi_event_subspace_cbm",
+    ):
+        assert hasattr(tt, sym), f"Missing top-level export ticktack.{sym}"
+
     ev1 = _make_event_window("e774", 774.25, 6.4)
     ev2 = _make_event_window("e993", 993.3, 4.0)
     ev3 = _make_event_window("e660bce", -663.2, 5.2)
@@ -470,9 +484,22 @@ def test_fit_multi_event_subspace_cbm_map_nuts_and_is_recovery(_shared_compact_e
     for ev_name, chi2_n in fit_joint.diagnostics["per_event_chi2_per_n"].items():
         assert 0.25 < chi2_n < 1.6, f"Unexpected raw chi2/N={chi2_n} on {ev_name}"
 
-    # Verify exact IS weight sign & zero error at alpha_MAP (no extra batch-size recompile)
+    # Verify exact IS weight sign & zero error at alpha_MAP and PR 1 LinearizedDCTOperator parity
+    assert all(isinstance(op, tt.LinearizedDCTOperator) for op in fit_joint.dct_operators.values())
     ll_ex_map = multi_event_marginal_log_likelihood(fit_joint.model, mds_obs)
     assert float(ll_ex_map - fit_joint.log_likelihood_map) == pytest.approx(0.0, abs=1e-10)
+    mds_tan = mds_obs.with_marginal_configs(
+        {
+            ev.name: tt.LinearMarginalConfig(
+                offset_mode=ev.marginal_config.offset_mode,
+                marginalize_field=True,
+                dct_operator=fit_joint.dct_operators[ev.name],
+            )
+            for ev in mds_obs.events
+        }
+    )
+    ll_tan_cfg = multi_event_marginal_log_likelihood(fit_joint.model, mds_tan)
+    assert float(ll_tan_cfg - ll_ex_map) == pytest.approx(0.0, abs=1e-10)
     is_at_map = reweight_multi_event_exact(
         jnp.broadcast_to(fit_joint.u_map[None, :], (2, ps_joint.n_params)),
         model_init,
