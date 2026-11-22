@@ -61,3 +61,11 @@ Evaluates the nominal tropospheric $\Delta^{14}\text{C}$ impulse response $h_{\t
 
 - **`fit_subspace_cbm_gp(model, dataset, parameter_space, marginal_config=None, *, sampler="nuts", reweight_exact=True, ...)`**: Runs Stage-1 exact `fit_map`, constructs a MAP-centred `LinearizedDCTOperator` (`LinearMarginalConfig(dct_operator=lin_op)`) and regularized Laplace covariance, runs Laplace-preconditioned `sample_nuts`, `sample_smc`, or Gaussian Laplace draws, and (when `reweight_exact=True`) calls `reweight_exact_marginal` to attach exact log importance weights `log_weight_is` to `idata.sample_stats` alongside `kish_ess_ratio`, returning a `SubspaceGPFitResult`.
 - **`reweight_exact_marginal(idata, model_template, dataset, parameter_space, marginal_config_exact, marginal_config_tan, ...)`**: Evaluates $\ln\mathcal{L}_{\mathrm{exact}}(\mathbf{u}_s) - \ln\mathcal{L}_{\mathrm{tan}}(\mathbf{u}_s)$ across posterior draws and returns `(idata_reweighted, diagnostics)` with `kish_ess`, `kish_ess_ratio`, `median_abs_dlnL`, `max_abs_dlnL`, and `log_z_correction`.
+
+---
+
+## `ticktack.multievent`
+
+::: ticktack.multievent
+    options:
+      show_root_heading: false

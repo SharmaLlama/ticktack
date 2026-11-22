@@ -229,6 +229,19 @@ from .fields import (  # noqa: E402
     select_gp_kernel,
 )
 
+# Multi-event shared-CBM pooling
+from .multievent import (  # noqa: E402
+    EventWindow,
+    MultiEventDataset,
+    MultiEventFitResult,
+    MultiEventModel,
+    fit_multi_event_subspace_cbm,
+    multi_event_cbm_gp_fisher_spectrum,
+    multi_event_marginal_log_likelihood,
+    multi_event_marginal_log_posterior,
+    reweight_multi_event_exact,
+)
+
 __all__ = [
     # version
     "__version__",
@@ -378,4 +391,14 @@ __all__ = [
     "optimize_gp_kernel",
     "predict_field_d14c",
     "select_gp_kernel",
+    # multi-event pooling
+    "EventWindow",
+    "MultiEventDataset",
+    "MultiEventFitResult",
+    "MultiEventModel",
+    "fit_multi_event_subspace_cbm",
+    "multi_event_cbm_gp_fisher_spectrum",
+    "multi_event_marginal_log_likelihood",
+    "multi_event_marginal_log_posterior",
+    "reweight_multi_event_exact",
 ]

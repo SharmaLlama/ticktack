@@ -185,3 +185,19 @@ When `SubspaceCBM.alpha` varies inside NUTS or SMC, rebuilding the exact DCT res
    and computes the regularized Laplace covariance at $\widehat{\mathbf{u}}_{\mathrm{MAP}}$.
 2. **Stage 2 (Preconditioned Sampling)**: Runs `sample_nuts` (preconditioned by the Stage-1 dense Laplace mass matrix), `sample_smc`, or Gaussian Laplace sampling with `LinearMarginalConfig(dct_operator=lin_op)`, keeping the spike trajectory, steady-state offset ratios, and any sampled GP kernel hyperparameters exact.
 3. **Stage 3 (Exact Importance-Sampling Reweighting)**: Evaluates `reweight_exact_marginal`, attaching exact log importance weights $\ln w_s = \ln\mathcal{L}_{\mathrm{exact}}(\mathbf{u}_s) - \ln\mathcal{L}_{\mathrm{tan}}(\mathbf{u}_s)$ to `idata.sample_stats["log_weight_is"]` and reporting the Kish effective sample size fraction (`kish_ess_ratio`, typically $> 0.99$ across posterior balls).
+
+---
+
+## 7. Multi-Event Shared-`SubspaceCBM` Pooling (`ticktack.multievent`)
+
+Historical Holocene Miyake events (`775CE`, `993CE`, `660BCE`, `5259BCE`, `5410BCE`) are separated by centuries, so their background cosmic-ray GP realizations $\delta Q_e(t)$, inter-laboratory baseline offsets $\boldsymbol{\delta}_e$, and spike parameters $(t_{0,e}, \tau_e, \Phi_e)$ are conditionally independent given a single shared carbon-box model (`BalancedCBM` or `SubspaceCBM`).
+
+- **Container & model PyTrees (`EventWindow`, `MultiEventDataset`, `MultiEventModel`)**: Each `EventWindow` bundles `(name, dataset, production, marginal_config, spike_path)`. `MultiEventDataset` validates unique names and disjoint chronological windows, while `MultiEventModel(cbm, events)` subclasses `zodiax.Base` so `ParameterSpace` addresses shared and per-event leaves natively (`"cbm.alpha"`, `"events.775CE.spike.fluence"`, `"events.993CE.spike.fluence"`).
+- **Additive multi-event Fisher spectrum (`multi_event_cbm_gp_fisher_spectrum`)**: Sums the per-event GP-, offset-, and spike-Schur-marginalized Fisher matrices linearly across all $E$ events:
+  $$
+  \widetilde{F}_{\mathrm{tot}} = \sum_{e=1}^{E} \widetilde{F}_e,
+  \qquad
+  \Sigma_{\mathrm{post}} = L_\Pi \left(\widetilde{F}_{\mathrm{tot}} + I\right)^{-1} L_\Pi^\top,
+  $$
+  applying the shared CBM prior precision $I$ exactly once and returning a `FisherSpectrumResult` directly compatible with `SubspaceCBM.from_fisher`. Pooling `775CE + 993CE + 660BCE + 5259BCE` on 22-box `Brehm21` (`prior_sd = 0.35`, `sho_solar` GP, including Slepian–Bangs covariance-sensitivity Fisher rows) lifts constrained dimensionality from $d_{\mathrm{eff}} = 4.02$ ($8.38\text{ bits}$) to $4.72$ ($9.94\text{ bits}$), boosting Mode 3 posterior precision by $1.83\times$ ($+0.44\text{ bits}$) and lifting Mode 5 across the prior threshold ($0.62 \to 1.62$, posterior precision $1.62\times$; see [Tutorial 7](tutorials.md)).
+- **Block-diagonal marginalization & joint inference (`multi_event_marginal_log_likelihood`, `multi_event_marginal_log_posterior`, `fit_multi_event_subspace_cbm`, `reweight_multi_event_exact`)**: Evaluates the joint marginal likelihood as $\sum_{e=1}^{E} \ln\mathcal{L}_e$ in $\mathcal{O}(\sum_e N_e r_e^2)$ time (zero cross-event dense covariance) while evaluating the shared CBM prior exactly once. `fit_multi_event_subspace_cbm` runs exact L-BFGS MAP with per-event gradient accumulation, builds per-event MAP-centred `LinearizedDCTOperator`s and a joint Laplace mass matrix, samples via NUTS (or returns MAP + Laplace), and computes exact multi-event importance weights $\ln w_s = \sum_e [\ln\mathcal{L}_{\mathrm{exact},e} - \ln\mathcal{L}_{\mathrm{tan},e}]$.

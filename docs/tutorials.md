@@ -2,7 +2,7 @@
 
 `ticktack 2.0` ships with two complementary suites of self-contained, pre-executed minimal-working-example (MWE) Jupyter notebooks under [`notebooks/v2/`](https://github.com/SharmaLlama/ticktack/tree/main/notebooks/v2):
 
-1. **Core `v2` Pillar Walkthroughs (`notebooks/v2/01..06_*.ipynb`)** – end-to-end demonstrations of semiparametric event inference, Fisher information & tempered SMC, causal POD vs log-GP reconstruction, Information Field Theory kernel discovery, multi-event Miyake reanalysis, and joint `SubspaceCBM` + marginalized-GP ringdown diagnostics.
+1. **Core `v2` Pillar Walkthroughs (`notebooks/v2/01..07_*.ipynb`)** – end-to-end demonstrations of semiparametric event inference, Fisher information & tempered SMC, causal POD vs log-GP reconstruction, Information Field Theory kernel discovery, multi-event Miyake reanalysis, joint `SubspaceCBM` + marginalized-GP ringdown diagnostics, and multi-event shared-`SubspaceCBM` pooling.
 2. **`v1` → `v2` Reproduction & Benchmark Suite (`notebooks/v2/docs_examples/01..06_*.ipynb`)** – direct head-to-head reproductions of every `ticktack 1.x` documentation tutorial (`docs/notebooks/01..05_*.ipynb`) with cold-JIT and warm wall-clock benchmarks, plus direct Bayesian inference of carbon-box transfer coefficients (`06_direct_cbm_inference.ipynb`).
 
 ---
@@ -71,6 +71,16 @@ Disentangles carbon-box model misspecification artefacts from genuine post-event
 
 - **Synthetic benchmark (`760–800 CE`, `5 NH + 3 SH`)**: Demonstrates GP-marginalized NH-only identifiability collapse ($d_{\mathrm{eff}} = 1.42$) versus NH + SH rescue ($d_{\mathrm{eff}} = 5.12$), shows how freezing a misspecified `Brehm21` (`m = 0`) creates spurious post-spike $Q_{\mathrm{field}}(t)$ ringdown and coherent NH/SH z-score residual dipoles, and verifies joint `SubspaceCBM(m = 5)` recovery via `fit_subspace_cbm_gp` with exact IS reweighting (`is_max_draws=None`) and an IS-weighted `ChainConsumer` `plot_corner` overlay.
 - **Real 32-series `774 CE` (`760–800 CE`) reanalysis**: Computes GP-marginalized vs white-noise Fisher spectra ($d_{\mathrm{eff}} = 1.21$ NH-only vs $4.23$ NH + SH), scans Laplace evidence across $m = 0\text{..}5$ (peaking at $m^\star = 4$, $\Delta\ln Z = +4.24\text{ nats}$, raw $\chi^2 / N = 1.06 \to 1.01$), runs `select_gp_kernel(..., optimize_spike=True, optimize_cbm=True, spike_priors=...)` ($\Delta\ln\mathcal{Z}_{\mathrm{hyper}} = +4.73\text{ nats}$, `sho_solar` weight `0.667`) and IS-weighted `fit_subspace_cbm_gp` NUTS at $m^\star = 4$, and shows via `plot_ringdown_comparison` that `SubspaceCBM` absorbs a modest symmetric uptake shift ($\alpha_3 \approx +1.4$, $\alpha_4 \approx -1.0$) while the post-774 CE `sho_solar` oscillation persists as genuine solar modulation.
+
+---
+
+### 7. Multi-Event Shared-`SubspaceCBM` Pooling Across Holocene Miyake Events
+**Notebook:** [`notebooks/v2/07_multi_event_effective_cbm.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/07_multi_event_effective_cbm.ipynb)
+
+Pools multiple bundled Holocene Miyake events under a single shared `Brehm21` `SubspaceCBM` while retaining independent per-event `MiyakeSpike` parameters, marginalized `sho_solar` `GaussianField` backgrounds, and hierarchical laboratory offsets (`EventWindow`, `MultiEventDataset`, `MultiEventModel`, `multi_event_cbm_gp_fisher_spectrum`, and `fit_multi_event_subspace_cbm`):
+
+- **Multi-event GP-marginalized Fisher progression (`775CE` → `+993CE` → `+660BCE` → `+5259BCE`)**: Demonstrates exact linear Fisher additivity ($\widetilde{F}_{\mathrm{tot}} = \sum_e \widetilde{F}_e$) on a fixed 4-event pooled eigenbasis (stacked per-event Rayleigh bar chart), lifting `Brehm21` constrained dimensionality from $d_{\mathrm{eff}} = 4.02$ ($8.38\text{ bits}$) to $4.72$ ($9.94\text{ bits}$), boosting Mode 3 posterior precision by $1.83\times$ ($+0.44\text{ bits}$), and lifting Mode 5 across the prior threshold ($0.62 \to 1.62$, posterior precision $1.62\times$).
+- **Joint `775CE + 993CE` `SubspaceCBM(m = 3)` IS-NUTS inference**: Runs `fit_multi_event_subspace_cbm(..., reweight_exact=True, is_max_draws=None)` with per-event MAP-centred `LinearizedDCTOperator`s (`0` divergences, `max R-hat = 1.02`, `min ESS_bulk = 145`, exact IS efficiency $\mathrm{ESS}_{\mathrm{IS}} / S = 0.999$ across all `500/500` draws, raw $\chi^2 / N = 0.97$ on `775CE` and $1.12$ on `993CE`), reports IS-weighted physical fluences (`fluence_atoms_cm2`) alongside pre-industrial and epoch-local `fluence_q0_years`, renders an IS-weighted 7-parameter `ChainConsumer` `plot_corner`, and pairs MAP-conditional NH/SH fits with audited `plot_residual_map` heatmaps and 1:1 `plot_data_model_correlation` diagnostics.
 
 ---
 
