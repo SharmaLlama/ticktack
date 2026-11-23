@@ -23,7 +23,6 @@ import zodiax as zdx
 from .constants import DEFAULT_Q_STD
 
 __all__ = [
-    "kernel_spectral_density",
     "solin_sarkka_eigenpairs",
     "ProductionTerm",
     "ProductionSum",
@@ -149,98 +148,15 @@ def _skewnormal_mode_and_fwhm(alpha: jax.Array) -> tuple[jax.Array, jax.Array]:
     return z_mode, z_right - z_left
 
 
-def kernel_spectral_density(kernel: Any, omega: ArrayLike) -> jax.Array:
-    """Two-sided Fourier power spectral density ``S_k(omega) = int k(tau) e^{-i omega tau} dtau``.
-
-    Satisfies ``k(tau) = (1 / pi) int_0^inf S_k(omega) cos(omega tau) domega``,
-    matching Solin & Särkkä (2020) Hilbert-space GP eigenvalues ``lambda_j = S_k(omega_j)``.
-    Supports stationary and quasiseparable ``tinygp >= 0.3`` kernels and algebraic
-    sums/scalar products.
-    """
-    w = jnp.asarray(omega, dtype=jnp.float64)
-
-    # Sum kernels (both stationary base.Sum and quasisep.Sum)
-    if isinstance(kernel, (tk.base.Sum, tk.quasisep.Sum)):
-        return kernel_spectral_density(kernel.kernel1, w) + kernel_spectral_density(
-            kernel.kernel2, w
-        )
-
-    # Quasiseparable Scale wrapper (note: Scale.scale multiplies covariance k -> scale * k)
-    if isinstance(kernel, tk.quasisep.Scale):
-        return jnp.asarray(kernel.scale, dtype=jnp.float64) * kernel_spectral_density(
-            kernel.kernel, w
-        )
-
-    # Product with a Constant kernel (e.g. sigma**2 * tk.Matern32(ell))
-    if isinstance(kernel, tk.base.Product):
-        if isinstance(kernel.kernel1, tk.base.Constant):
-            c = jnp.asarray(kernel.kernel1.value, dtype=jnp.float64)
-            return c * kernel_spectral_density(kernel.kernel2, w)
-        if isinstance(kernel.kernel2, tk.base.Constant):
-            c = jnp.asarray(kernel.kernel2.value, dtype=jnp.float64)
-            return c * kernel_spectral_density(kernel.kernel1, w)
-        raise TypeError(
-            "Product of two non-constant kernels does not have an elementary closed-form "
-            f"spectral density; got {type(kernel.kernel1)} * {type(kernel.kernel2)}."
-        )
-
-    # Quasiseparable kernels carry explicit amplitude sigma
-    if isinstance(kernel, tk.quasisep.Matern32):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        sig2 = jnp.square(jnp.asarray(kernel.sigma, dtype=jnp.float64))
-        return sig2 * (12.0 * math.sqrt(3.0) * ell) / jnp.square(3.0 + jnp.square(ell * w))
-
-    if isinstance(kernel, tk.quasisep.Matern52):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        sig2 = jnp.square(jnp.asarray(kernel.sigma, dtype=jnp.float64))
-        return (
-            sig2
-            * (400.0 * math.sqrt(5.0) * ell / 3.0)
-            / (5.0 + jnp.square(ell * w)) ** 3
-        )
-
-    if isinstance(kernel, tk.quasisep.Exp):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        sig2 = jnp.square(jnp.asarray(kernel.sigma, dtype=jnp.float64))
-        return sig2 * (2.0 * ell) / (1.0 + jnp.square(ell * w))
-
-    if isinstance(kernel, tk.quasisep.SHO):
-        w0 = jnp.asarray(kernel.omega, dtype=jnp.float64)
-        q = jnp.asarray(kernel.quality, dtype=jnp.float64)
-        sig2 = jnp.square(jnp.asarray(kernel.sigma, dtype=jnp.float64))
-        num = sig2 * (2.0 * w0**3 / q)
-        den = jnp.square(jnp.square(w) - jnp.square(w0)) + jnp.square(w0 * w / q)
-        return num / den
-
-    # Standard stationary kernels (unit variance unless multiplied by Constant)
-    if isinstance(kernel, tk.Matern32):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        return (12.0 * math.sqrt(3.0) * ell) / jnp.square(3.0 + jnp.square(ell * w))
-
-    if isinstance(kernel, tk.Matern52):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        return (400.0 * math.sqrt(5.0) * ell / 3.0) / (5.0 + jnp.square(ell * w)) ** 3
-
-    if isinstance(kernel, tk.Exp):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        return (2.0 * ell) / (1.0 + jnp.square(ell * w))
-
-    if isinstance(kernel, tk.ExpSquared):
-        ell = jnp.asarray(kernel.scale, dtype=jnp.float64)
-        return math.sqrt(2.0 * math.pi) * ell * jnp.exp(-0.5 * jnp.square(ell * w))
-
-    raise TypeError(
-        f"Unsupported kernel type for spectral density evaluation: {type(kernel)!r}."
-    )
-
-
 def solin_sarkka_eigenpairs(
     a: float,
     b: float,
     n_modes: int,
-    kernel: Any,
+    kernel: tk.Kernel,
 ) -> tuple[jax.Array, jax.Array, float]:
     """Dirichlet Laplacian frequencies ``omega_j``, spectral weights ``S_k(omega_j)``, and half-length ``L``."""
+    from .linear import spectral_density
+
     if not (b > a):
         raise ValueError(f"Domain requires b > a, got [{a}, {b}].")
     if n_modes < 1:
@@ -248,7 +164,7 @@ def solin_sarkka_eigenpairs(
     half_len = 0.5 * float(b - a)
     j = jnp.arange(1, int(n_modes) + 1, dtype=jnp.float64)
     omegas = j * (math.pi / (2.0 * half_len))
-    psd = kernel_spectral_density(kernel, omegas)
+    psd = spectral_density(kernel, omegas)
     return omegas, psd, half_len
 
 

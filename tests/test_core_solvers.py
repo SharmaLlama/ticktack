@@ -20,6 +20,7 @@ import jax.numpy as jnp  # noqa: E402
 from jax.test_util import check_grads  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from scipy import integrate as sp_integrate  # noqa: E402
 import tinygp.kernels as tk  # noqa: E402
 import zodiax as zdx  # noqa: E402
 
@@ -45,6 +46,7 @@ from ticktack.constants import (  # noqa: E402
     GUTTLER15_TROP_C14_KG,
     GUTTLER15_TROP_MASS_GTC,
 )
+from ticktack.linear import spectral_density  # noqa: E402
 from ticktack.production import (  # noqa: E402
     GPProduction,
     GriddedProduction,
@@ -54,7 +56,6 @@ from ticktack.production import (  # noqa: E402
     MiyakeSpike,
     ProductionSum,
     SteadyProduction,
-    kernel_spectral_density,
     solin_sarkka_eigenpairs,
 )
 from ticktack.solvers import (  # noqa: E402
@@ -902,29 +903,63 @@ def test_miyake_spike_fluence_and_fwhm_normalization(kwargs: dict) -> None:
     "kernel",
     [
         1.44 * tk.Matern32(scale=6.5),
+        tk.Matern32(scale=6.5) * 1.44,
         0.81 * tk.Matern52(scale=4.2),
         0.64 * tk.Exp(scale=9.0),
         1.21 * tk.ExpSquared(scale=3.0),
+        tk.RationalQuadratic(alpha=2.5, scale=4.0),
         tk.quasisep.Matern32(sigma=1.2, scale=6.5),
         tk.quasisep.Matern52(sigma=0.9, scale=4.2),
         tk.quasisep.Exp(sigma=0.8, scale=9.0),
         tk.quasisep.SHO(omega=2.0 * math.pi / 11.0, quality=4.5, sigma=0.5),
+        2.3 * tk.quasisep.Matern32(sigma=0.7, scale=5.5),
+        1.44 * tk.Matern32(scale=6.5) + 0.81 * tk.ExpSquared(scale=3.0),
         tk.quasisep.Matern32(sigma=0.7, scale=12.0)
         + tk.quasisep.SHO(omega=2.0 * math.pi / 11.0, quality=6.0, sigma=0.35),
+        0.7 * (tk.Matern32(scale=15.0) * tk.Cosine(scale=11.0)),
+        0.6 * (tk.ExpSquared(scale=14.0) * tk.Cosine(scale=11.0)),
+        tk.ExpSquared(scale=15.0) * tk.ExpSineSquared(scale=11.0, gamma=1.4),
+        tk.quasisep.Matern32(sigma=0.9, scale=8.0)
+        * tk.quasisep.SHO(omega=0.5, quality=3.0, sigma=0.7),
     ],
 )
-def test_kernel_spectral_density_wiener_khinchin(kernel) -> None:
+def test_spectral_density_wiener_khinchin(kernel) -> None:
     # Verify k(tau) = (1 / pi) int_0^inf S_k(omega) cos(omega * tau) domega
-    # Map omega = 10 * tan(u) on u in [0, pi/2 - 1e-4] to integrate to infinity cleanly
-    u = jnp.linspace(0.0, 0.5 * math.pi - 1e-4, 60_001)
-    w = 10.0 * jnp.tan(u)
-    dw_du = 10.0 / jnp.square(jnp.cos(u))
-    psd = kernel_spectral_density(kernel, w)
+    # against independent adaptive scipy.integrate.quad integration.
+    psd_scalar = jax.jit(lambda w: spectral_density(kernel, w))
+
+    def s_fn(w: float) -> float:
+        return float(psd_scalar(w))
+
     for tau in (0.0, 0.7, 2.5, 7.0):
-        integrand = psd * jnp.cos(w * tau) * dw_du
-        cov_wk = float(jnp.trapezoid(integrand, u) / math.pi)
+        if tau == 0.0:
+            integral, _ = sp_integrate.quad(s_fn, 0.0, np.inf, limit=200, epsabs=1e-8, epsrel=1e-7)
+        else:
+            integral, _ = sp_integrate.quad(
+                s_fn,
+                0.0,
+                np.inf,
+                weight="cos",
+                wvar=tau,
+                limit=200,
+                epsabs=1e-8,
+                epsrel=1e-7,
+            )
+        cov_wk = integral / math.pi
         cov_exact = float(kernel.evaluate(jnp.asarray(0.0), jnp.asarray(tau)))
         assert cov_wk == pytest.approx(cov_exact, rel=1e-5, abs=1e-5)
+
+
+def test_solin_sarkka_eigenpairs_uses_spectral_density() -> None:
+    kernel = tk.quasisep.Matern32(sigma=0.8, scale=7.5) + tk.quasisep.SHO(
+        omega=2.0 * math.pi / 11.0, quality=4.0, sigma=0.4
+    )
+    omegas, psd, half_len = solin_sarkka_eigenpairs(750.0, 810.0, 32, kernel)
+    assert half_len == pytest.approx(30.0)
+    np.testing.assert_allclose(psd, spectral_density(kernel, omegas), rtol=1e-14, atol=1e-15)
+    for bad_kernel in (tk.Constant(1.5), tk.Cosine(scale=11.0), tk.quasisep.Cosine(scale=11.0)):
+        with pytest.raises(TypeError):
+            solin_sarkka_eigenpairs(750.0, 810.0, 8, bad_kernel)
 
 
 def test_log_gp_production_ito_mean_correction() -> None:
