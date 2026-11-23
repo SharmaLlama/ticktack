@@ -76,11 +76,11 @@ without ever inverting $A$ or suffering small-$\Delta t$ catastrophic cancellati
 
 When the CBM parameters are fixed across a long grid of $N_t$ steps, the recurrence is a causal LTI discrete convolution $\delta y_{c,k} = \sum_{m=0}^k h_{c,m}\,\delta Q_{k-m}$ with impulse kernel $h_c$, which `ExactLinearSolver` evaluates in $\mathcal{O}(N_t \log N_t)$ operations via zero-padded real fast Fourier transforms (`jnp.fft.rfft` / `irfft`) while falling back to `jax.lax.scan` on short grids.
 
-### Exact Sub-Interval Spike Quadrature (No Grid-Snapping Ringing)
+### Analytical Boxcar & Sub-Interval Spike Quadrature (No Grid-Snapping Ringing)
 
 Impulsive Miyake events have durations $\tau_{\text{dur}} \sim 0.05$–$1.5\text{ yr}$ whose onset $t_{\text{start}}$ and end $t_{\text{start}} + \tau_{\text{dur}}$ move continuously during `jax.grad`-based optimization (`fit_map`, `sample_nuts`, `sample_smc`). Evaluating a discontinuous `MiyakeSpike` on a fixed discrete time grid causes zero-gradient plateaus and step-discontinuity ringing whenever $t_{\text{start}}$ crosses a knot.
 
-Instead, `ExactLinearSolver` integrates `MiyakeSpike` analytically:
+Instead, `ExactLinearSolver` integrates `MiyakeSpike` via closed-form boxcar integrals and sub-panel quadrature:
 
 - **Boxcar profile (`profile="boxcar"`)**: For any evaluation point $t$ or seasonal growth window $[a, b]$, overlap intervals $[t_1, t_2] = [t_{\text{start}}, t_{\text{start}} + \tau_{\text{dur}}] \cap (-\infty, t]$ are computed with smooth `jnp.clip` bounds and propagated in closed form via block matrix exponentials $\int e^{A\tau}\mathbf{b}\,\mathrm{d}\tau$ and double integrals $\iint e^{A\tau}\mathbf{b}\,\mathrm{d}\tau\,\mathrm{d}s$ for window averages. Consequently, $\Delta^{14}\text{C}(t)$ is $C^1$-smooth with respect to $(t_{\text{start}}, \tau_{\text{dur}}, \text{fluence})$ everywhere.
 - **Smooth profiles (`"supergaussian"`, `"skewgaussian"`, `"gamma"`)**: Integrated over their smooth dimensionless support sub-panels (`MiyakeSpike.unit_support_panels`) with fixed-order Gauss–Legendre quadrature, maintaining machine-precision gradients down to arbitrary sub-monthly FWHM `duration`.
@@ -110,7 +110,7 @@ where $\operatorname{sinc}(x) = \sin(\pi x)/(\pi x)$ (`jnp.sinc`). Evaluating `H
 
 When reservoir $^{12}\text{C}$ masses $M_c(t)$ vary in time (e.g. post-1850 industrial Suess dilution or glacial carbon-cycle reorganizations) or nonlinear kinetic extensions are introduced, the generator $A(t)$ becomes non-autonomous and `ticktack 2.0` provides two adaptive differential-equation backends:
 
-- **`DiffraxSolver`**: Wraps [`diffrax.diffeqsolve`](https://docs.kidger.site/diffrax/) with explicit `Tsit5` (5th-order Tsitouras Runge–Kutta) for non-stiff/moderate systems or implicit `Kvaerno5` (5th-order singly diagonally implicit Runge–Kutta) with `PIDController(rtol=1e-8, atol=1e-10)` and `RecursiveCheckpointAdjoint` for exact reverse-mode `jax.grad` differentiation. Jump discontinuities at spike boundaries are registered via `jump_ts` so adaptive steppers hit onset/cessation epochs cleanly without step-rejection chatter.
+- **`DiffraxSolver`**: Wraps [`diffrax.diffeqsolve`](https://docs.kidger.site/diffrax/) with explicit `Tsit5` (5th-order Tsitouras Runge–Kutta) for non-stiff/moderate systems or implicit `Kvaerno5` (5th-order singly diagonally implicit Runge–Kutta) with `PIDController(rtol=1e-8, atol=1e-10)` and `RecursiveCheckpointAdjoint` for reverse-mode `jax.grad` differentiation. Jump discontinuities at spike boundaries are registered via `jump_ts` so adaptive steppers hit onset/cessation epochs cleanly without step-rejection chatter.
 - **`ModaxSolver`**: Provides a lightweight custom adaptive Dormand–Prince / RK solver with continuous adjoint sensitivities implemented via `@jax.custom_vjp`. When wrapping forward-mode-only (`jax.jvp`) functions inside reverse-mode (`jax.grad`) pipelines such as `optimistix` BFGS or `NumPyro` NUTS, `wrap_jvp_only_scalar_fn` bridges `jvp` tangents into a valid reverse-mode `custom_vjp` gradient rule.
 
 On autonomous LTI benchmarks, `ExactLinearSolver`, `DiffraxSolver`, and `ModaxSolver` agree to $< 10^{-7}\text{‰}$ across all bundled presets.

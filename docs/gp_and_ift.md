@@ -64,7 +64,7 @@ $$
 P_{k+1} = P_k + \Phi_k P_k \Phi_k^\top, \qquad \Phi_{k+1} = \Phi_k^2,
 $$
 
-accumulating exact stationary pre-history covariance over $0.25 \times 2^{24} \approx 4.19 \times 10^6\text{ years}$ ($\gg 8267\text{ yr}$ $^{14}\text{C}$ mean life) in 24 tiny matrix multiplications (`include_gp_initial_cov=True` by default on `LinearMarginalConfig`).
+accumulating the stationary pre-history covariance over $0.25 \times 2^{24} \approx 4.19 \times 10^6\text{ years}$ ($\gg 8267\text{ yr}$ $^{14}\text{C}$ mean life) in 24 tiny matrix multiplications (`include_gp_initial_cov=True` by default on `LinearMarginalConfig`).
 
 For long annual records where $\mathcal{O}(N)$ state-space complexity is preferred over modal bases, `kalman_gp_marginal` integrates the augmented CBM+GP system directly with a stabilized Joseph-form Kalman filter.
 
@@ -144,7 +144,7 @@ Comparing quasi-periodic (`"sho_solar"`, backed by `QuasiPeriodicSpectrum`) agai
 
 - **Bundled `775CE` compilation (`28` series, `313` rings, `760.25–781.25 CE`)**: `27` of `28` COSMIC series span only `770–780 CE` (with only `Büntgen18_GER01` extending back to `760 CE`). Without multi-decade leverage to separate an oscillatory period and quality factor from slow baseline drift, `select_gp_kernel` favours a low-amplitude aperiodic `"matern12"` kernel ($\sigma \approx 0.05$) that reverts toward $Q_{\text{std}}$ before 770 CE.
 - **Extended multi-decade `775CE` compilation (`32` series, `432` rings, `760–800 CE`)**: Combining `load_bundled_event("775CE")` with four longer repository records (`notebooks/miyake12.csv`, `notebooks/775CE/Rakowski15_Oak.csv`, `Jull14_Bristlecone.csv`, and `Guttler15_Kauri.csv`) alongside a MAP-profiled Miyake spike ranks `"sho_solar"` ($P \approx 9.9\text{ yr}$) first with modest Laplace hyper-evidence ($\Delta\ln\mathcal{Z}_{\text{hyper}} = +1.43$ over `"squared_exp"` and $+1.44$ over `"matern12"`, weight `0.43`).
-- **Limits of interpretation (post-774 CE oscillation)**: These results do **not** establish that the post-774 CE oscillation is genuine solar modulation. Only two narrower points are shown: (1) the apparent pre-/post-774 CE amplitude contrast is a sampling coverage artefact (only a few of the `32` series extend before `770 CE` — `4` series have rings in `765–769 CE` and `3` in `760–764 CE`, whereas all `32` overlap after `770 CE`), and (2) the post-774 CE oscillation survives when floating four `Brehm21` carbon-box modes. A direct test of whether the oscillation reflects stationary solar modulation or a post-spike amplitude change would compare a stationary kernel against a non-stationary kernel whose amplitude changes at the 774 CE spike.
+- **Limits of interpretation (post-774 CE oscillation)**: These results do **not** establish that the post-774 CE oscillation is genuine solar modulation. Only two narrower points are shown: (1) the apparent pre-/post-774 CE amplitude contrast is a sampling coverage artefact (only `4` of the `32` series — `3` supplemental records plus `Büntgen18_GER01` — have rings before `770 CE`, and `3` extend to `760–764 CE`, whereas all `32` overlap after `770 CE`), and (2) the post-774 CE oscillation survives when floating four `Brehm21` carbon-box modes. A direct test of whether the oscillation reflects stationary solar modulation or a post-spike amplitude change would compare a stationary kernel against a non-stationary kernel whose amplitude changes at the 774 CE spike.
 
 ---
 
