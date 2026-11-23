@@ -59,8 +59,10 @@ def test_plot_field_draws_single_field_axes_artists_and_rcparams(as_total_q: boo
         for idx in range(3):
             # 1 draw line + 1 reference axhline
             assert len(axes[idx].lines) == 2
-        # 12 ensemble lines + 1 truth line
+        # 12 ensemble lines + 1 truth line (preserving single-field widths)
         assert len(axes[3].lines) == 13
+        assert axes[3].lines[0].get_linewidth() == pytest.approx(0.75)
+        assert axes[3].lines[12].get_linewidth() == pytest.approx(1.5)
     finally:
         plt.close(fig)
 
@@ -99,6 +101,8 @@ def test_plot_field_draws_multi_field_mapping_and_sequence() -> None:
         for col in range(2):
             assert len(axes[0, col].lines) == 3
             assert len(axes[1, col].lines) == 11
+            assert axes[1, col].lines[0].get_linewidth() == pytest.approx(0.7)
+            assert axes[1, col].lines[10].get_linewidth() == pytest.approx(1.3)
         assert axes[0, 0].get_title() == "Short"
         assert axes[0, 1].get_title() == "Long"
     finally:

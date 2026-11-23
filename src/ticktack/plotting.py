@@ -2338,13 +2338,14 @@ def _plot_field_ensemble(
 ) -> None:
     """Plot faint ensemble draws, bold Draw 1, and optional truth curve on ``ax``."""
     color, n_faint, draw1_label = style
+    lw_faint, lw_truth = (0.75, 1.5) if draw1_label is not None else (0.7, 1.3)
     n_show = min(int(n_faint), curves.shape[0])
     for m in range(1, n_show):
-        ax.plot(t_np, curves[m], color=color, lw=0.75, alpha=0.14)
+        ax.plot(t_np, curves[m], color=color, lw=lw_faint, alpha=0.14)
     ax.plot(t_np, curves[0], color=color, lw=2.0, label=draw1_label or "Draw 1")
     if truth is not None:
         ax.plot(
-            t_np, np.asarray(truth, dtype=np.float64), color="#111111", lw=1.4, ls="--",
+            t_np, np.asarray(truth, dtype=np.float64), color="#111111", lw=lw_truth, ls="--",
             label="Truth" if draw1_label is not None else None,
         )
     ax.set_xlim(float(t_np[0]), float(t_np[-1]))
@@ -2352,7 +2353,7 @@ def _plot_field_ensemble(
         ax.legend(loc="upper right", frameon=False)
 
 
-def plot_field_draws(
+def plot_field_draws(  # shape-exempt(carbon): existing public plotting API moved from fields.py preserving keyword signature
     field_or_fields: (
         GaussianField
         | LogGaussianField
@@ -2474,7 +2475,7 @@ def _annotate_evidence_cells(
             )
 
 
-def plot_evidence_grid(
+def plot_evidence_grid(  # shape-exempt(carbon): existing public plotting API moved from fields.py preserving keyword signature
     grid: EvidenceGridResult,
     *,
     delta: bool = True,
