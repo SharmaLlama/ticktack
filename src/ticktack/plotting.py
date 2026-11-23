@@ -3,7 +3,9 @@
 Every plotting function in this module is strictly stateless:
 - Never mutates ``matplotlib.rcParams`` or global styles.
 - Never relies on ``plt.gca()`` / ``plt.gcf()`` implicit state.
-- Accepts optional caller-supplied ``Axes`` and always returns ``(fig, axes)``.
+- Standard single/pair-panel helpers accept optional caller-supplied ``Axes`` and
+  return ``(fig, axes)``; multi-grid composite diagnostics such as
+  :func:`plot_ringdown_comparison` return ``Figure`` directly.
 """
 
 from __future__ import annotations
@@ -14,6 +16,10 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
+import equinox as eqx
+import jax
+import jax.numpy as jnp
+import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -25,6 +31,9 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch
 
 from .data import Dataset, TreeRingSeries
+from .likelihood import LinearMarginalConfig, linear_posterior
+from .model import RadiocarbonModel
+from .production import MiyakeSpike, ProductionSum, ProductionTerm, SteadyProduction
 
 _PALETTE: tuple[str, ...] = (
     "#0072B2",  # blue (NH / primary)
@@ -2231,9 +2240,1162 @@ def plot_cbm_mode_impulse_responses(
     return fig, mode_axes
 
 
+# ---------------------------------------------------------------------------
+# Post-spike GP ringdown diagnostics & fixed-CBM vs SubspaceCBM comparison
+# ---------------------------------------------------------------------------
+
+
+def _collect_miyake_spikes(production: ProductionTerm) -> list[MiyakeSpike]:
+    """Recursively collect all :class:`~ticktack.production.MiyakeSpike` terms."""
+    if isinstance(production, MiyakeSpike):
+        return [production]
+    if isinstance(production, ProductionSum):
+        found: list[MiyakeSpike] = []
+        for part in production.parts:
+            found.extend(_collect_miyake_spikes(part))
+        return found
+    return []
+
+
+def _sum_spike_delta_q(
+    production: ProductionTerm,
+    t_fine: jax.Array,
+    q_std: Any,
+) -> jax.Array:
+    """Evaluate the summed parametric ``MiyakeSpike.delta_q`` on ``t_fine``."""
+    spikes = _collect_miyake_spikes(production)
+    total = jnp.zeros_like(t_fine, dtype=jnp.float64)
+    for sp in spikes:
+        total = total + jnp.asarray(sp.delta_q(t_fine, q_std=q_std), dtype=jnp.float64)
+    return total
+
+
+def _steady_baseline_rate(model: RadiocarbonModel) -> float:
+    """Resolve the steady baseline production rate ``Q_0`` (atoms cm^-2 s^-1)."""
+
+    def _collect_steady(prod: ProductionTerm) -> list[SteadyProduction]:
+        if isinstance(prod, SteadyProduction):
+            return [prod]
+        if isinstance(prod, ProductionSum):
+            items: list[SteadyProduction] = []
+            for part in prod.parts:
+                items.extend(_collect_steady(part))
+            return items
+        return []
+
+    q_std_f = float(np.asarray(model.q_std, dtype=np.float64))
+    steady_terms = _collect_steady(model.production)
+    if not steady_terms:
+        return q_std_f
+    delta_steady = sum(
+        float(np.asarray(st.rate, dtype=np.float64)) - q_std_f for st in steady_terms
+    )
+    return float(q_std_f + delta_steady)
+
+
+def _infer_spike_window(production: ProductionTerm) -> tuple[float, float] | None:
+    """Infer ``(t_start, t_end)`` from any parametric ``MiyakeSpike`` terms."""
+    spikes = _collect_miyake_spikes(production)
+    if not spikes:
+        return None
+    t_lo = min(float(np.asarray(sp.t_start, dtype=np.float64)) for sp in spikes)
+    t_hi = max(
+        float(np.asarray(sp.t_start, dtype=np.float64))
+        + float(np.asarray(sp.duration, dtype=np.float64))
+        for sp in spikes
+    )
+    return (t_lo, t_hi)
+
+
+def _infer_subspace_modes(cbm: Any) -> int:
+    """Infer subspace dimension ``m`` from a CBM instance (0 for fixed/non-subspace)."""
+    if hasattr(cbm, "alpha"):
+        return int(np.asarray(cbm.alpha).size)
+    if hasattr(cbm, "n_modes"):
+        return int(cbm.n_modes)
+    return 0
+
+
+def _safe_ratio(num: float, den: float) -> float:
+    if den <= 0.0:
+        return float("nan") if num <= 0.0 else float("inf")
+    return float(num / den)
+
+
+def _build_ordered_z_grid(
+    dataset: Dataset,
+    z_residuals: np.ndarray,
+) -> tuple[np.ndarray, list[TreeRingSeries], int, int, int]:
+    """Arrange flat z-score residuals into a ``(n_series, n_years)`` NH-then-SH grid.
+
+    Unobserved series-year cells remain ``NaN``. Multiple sub-annual rings
+    falling inside the same calendar year are combined via inverse-variance
+    weighted Stouffer pooling so unit variance under ``N(0, 1)`` is preserved.
+    """
+    series_list = list(dataset.series)
+    n_tot = sum(s.n_obs for s in series_list)
+    z_flat = np.asarray(z_residuals, dtype=np.float64).reshape(-1)
+    if z_flat.size != n_tot:
+        raise ValueError(
+            f"z_residuals length {z_flat.size} does not match dataset.n_obs={n_tot}."
+        )
+
+    per_series_z: list[np.ndarray] = []
+    cursor = 0
+    for s in series_list:
+        per_series_z.append(z_flat[cursor : cursor + s.n_obs])
+        cursor += s.n_obs
+
+    nh_idx = [i for i, s in enumerate(series_list) if s.hemisphere == "north"]
+    sh_idx = [i for i, s in enumerate(series_list) if s.hemisphere == "south"]
+    other_idx = [
+        i for i, s in enumerate(series_list) if s.hemisphere not in ("north", "south")
+    ]
+    order = nh_idx + sh_idx + other_idx
+    ordered_series = [series_list[i] for i in order]
+    ordered_z = [per_series_z[i] for i in order]
+    n_nh = len(nh_idx)
+
+    series_years = [
+        np.floor(np.asarray(s.t_starts, dtype=np.float64) + 1e-9).astype(np.int64)
+        for s in ordered_series
+    ]
+    year_min = int(min(int(np.min(yrs)) for yrs in series_years))
+    year_max = int(max(int(np.max(yrs)) for yrs in series_years))
+    n_series = len(ordered_series)
+    n_years = year_max - year_min + 1
+
+    num_acc = np.zeros((n_series, n_years), dtype=np.float64)
+    w_acc = np.zeros((n_series, n_years), dtype=np.float64)
+    counts = np.zeros((n_series, n_years), dtype=np.int64)
+
+    for row_idx, (s, z_s, yrs) in enumerate(zip(ordered_series, ordered_z, series_years)):
+        sig_s = np.asarray(s.sigma_d14c, dtype=np.float64)
+        inv_sig_s = 1.0 / sig_s
+        inv_var_s = inv_sig_s**2
+        cols = yrs - year_min
+        np.add.at(num_acc[row_idx], cols, z_s * inv_sig_s)
+        np.add.at(w_acc[row_idx], cols, inv_var_s)
+        np.add.at(counts[row_idx], cols, 1)
+
+    grid = np.full((n_series, n_years), np.nan, dtype=np.float64)
+    mask_obs = counts > 0
+    grid[mask_obs] = num_acc[mask_obs] / np.sqrt(w_acc[mask_obs])
+    return grid, ordered_series, n_nh, year_min, year_max
+
+
+class RingdownDiagnosticResult(eqx.Module):
+    """Frozen PyTree holding fixed-CBM (``m = 0``) vs joint ``SubspaceCBM`` ringdown diagnostics.
+
+    All ``chi2`` and ``chi2_per_n`` statistics are raw values evaluated on the
+    quoted, unrescaled ``dataset.sigma_flat`` uncertainties. Background cosmic-ray
+    trajectories ``q_field_*`` have all parametric :class:`~ticktack.production.MiyakeSpike`
+    contributions subtracted cleanly so post-spike GP ringdown is isolated.
+    """
+
+    t_fine: jax.Array
+    q_field_m0_mean: jax.Array
+    q_field_m0_std: jax.Array
+    q_field_subspace_mean: jax.Array
+    q_field_subspace_std: jax.Array
+    q_field_m0_draws: jax.Array | None
+    q_field_subspace_draws: jax.Array | None
+    ring_pred_m0: jax.Array
+    ring_pred_subspace: jax.Array
+    z_residuals_m0: jax.Array
+    z_residuals_subspace: jax.Array
+    q_true_fine: jax.Array | None
+
+    n_obs: int = eqx.field(static=True)
+    m_modes: int = eqx.field(static=True)
+    q_baseline: float = eqx.field(static=True)
+    pre_window: tuple[float, float] = eqx.field(static=True)
+    post_window: tuple[float, float] = eqx.field(static=True)
+    spike_window: tuple[float, float] | None = eqx.field(static=True)
+
+    rms_pre_m0: float = eqx.field(static=True)
+    rms_post_m0: float = eqx.field(static=True)
+    excitation_ratio_m0: float = eqx.field(static=True)
+    rms_pre_subspace: float = eqx.field(static=True)
+    rms_post_subspace: float = eqx.field(static=True)
+    excitation_ratio_subspace: float = eqx.field(static=True)
+
+    # Conditional-mean-only RMS excursions and direct between-model post-spike shift
+    rms_pre_mean_m0: float = eqx.field(static=True)
+    rms_post_mean_m0: float = eqx.field(static=True)
+    rms_pre_mean_subspace: float = eqx.field(static=True)
+    rms_post_mean_subspace: float = eqx.field(static=True)
+    rms_post_diff: float = eqx.field(static=True)
+    max_abs_diff_post: float = eqx.field(static=True)
+
+    chi2_m0: float = eqx.field(static=True)
+    chi2_per_n_m0: float = eqx.field(static=True)
+    chi2_subspace: float = eqx.field(static=True)
+    chi2_per_n_subspace: float = eqx.field(static=True)
+
+    rmse_pre_m0: float | None = eqx.field(static=True, default=None)
+    rmse_post_m0: float | None = eqx.field(static=True, default=None)
+    max_abs_err_post_m0: float | None = eqx.field(static=True, default=None)
+    rmse_pre_subspace: float | None = eqx.field(static=True, default=None)
+    rmse_post_subspace: float | None = eqx.field(static=True, default=None)
+    max_abs_err_post_subspace: float | None = eqx.field(static=True, default=None)
+
+    label_m0: str = eqx.field(static=True, default="Fixed CBM ($m=0$)")
+    label_subspace: str = eqx.field(static=True, default="Joint SubspaceCBM")
+
+    @property
+    def q_field_diff(self) -> jax.Array:
+        """Signed background difference ``Q_m0(t) - Q_subspace(t)`` on ``t_fine``."""
+        return self.q_field_m0_mean - self.q_field_subspace_mean
+
+    @property
+    def rms_post_reduction(self) -> float:
+        """Ratio ``rms_post_m0 / rms_post_subspace`` of posterior realization RMS (``> 1`` when ``SubspaceCBM`` reduces post-spike variance)."""
+        return _safe_ratio(self.rms_post_m0, self.rms_post_subspace)
+
+    @property
+    def excitation_ratio_reduction(self) -> float:
+        """Ratio ``excitation_ratio_m0 / excitation_ratio_subspace`` (``> 1`` when ``SubspaceCBM`` reduces excess post/pre excitation)."""
+        return _safe_ratio(self.excitation_ratio_m0, self.excitation_ratio_subspace)
+
+    @property
+    def rmse_post_reduction(self) -> float | None:
+        """Ratio ``rmse_post_m0 / rmse_post_subspace`` against ``q_true_fine`` (``None`` when truth is absent)."""
+        if self.rmse_post_m0 is None or self.rmse_post_subspace is None:
+            return None
+        return _safe_ratio(self.rmse_post_m0, self.rmse_post_subspace)
+
+    def format_summary(self) -> str:
+        """Return a concise Markdown comparison table of ringdown metrics."""
+        lines = [
+            f"| Metric | {self.label_m0} | {self.label_subspace} |",
+            "| :--- | :---: | :---: |",
+            f"| Raw $\\chi^2 / N$ ($N = {self.n_obs}$) | `{self.chi2_per_n_m0:.2f}` | `{self.chi2_per_n_subspace:.2f}` |",
+            f"| Pre-spike posterior RMS ({self.pre_window[0]:g}–{self.pre_window[1]:g}) | `{self.rms_pre_m0:.3g}` | `{self.rms_pre_subspace:.3g}` |",
+            f"| Post-spike posterior RMS ({self.post_window[0]:g}–{self.post_window[1]:g}) | `{self.rms_post_m0:.3g}` | `{self.rms_post_subspace:.3g}` |",
+            f"| Excitation ratio $\\mathrm{{RMS}}_{{\\mathrm{{post}}}} / \\mathrm{{RMS}}_{{\\mathrm{{pre}}}}$ | `{self.excitation_ratio_m0:.2f}` | `{self.excitation_ratio_subspace:.2f}` |",
+            f"| Between-model post-spike $\\mathrm{{RMS}}(Q_{{m=0}} - Q_{{\\mathrm{{sub}}}})$ | `{self.rms_post_diff:.3g}` | (max `{self.max_abs_diff_post:.3g}`) |",
+        ]
+        if self.rmse_post_m0 is not None and self.rmse_post_subspace is not None:
+            lines.extend(
+                [
+                    f"| Pre-spike truth RMSE | `{self.rmse_pre_m0:.3g}` | `{self.rmse_pre_subspace:.3g}` |",
+                    f"| Post-spike truth RMSE | `{self.rmse_post_m0:.3g}` | `{self.rmse_post_subspace:.3g}` |",
+                    f"| Max post-spike $|\\widehat{{Q}} - Q_{{\\mathrm{{true}}}}|$ | `{self.max_abs_err_post_m0:.3g}` | `{self.max_abs_err_post_subspace:.3g}` |",
+                ]
+            )
+        return "\n".join(lines)
+
+
+def _infer_default_ringdown_windows(
+    t_lo_grid: float,
+    t_hi_grid: float,
+    spike_win: tuple[float, float] | None,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Infer epoch-agnostic ``(pre_window, post_window)`` from spike and grid span."""
+    if spike_win is None:
+        raise ValueError(
+            "pre_window and post_window must be specified explicitly when neither "
+            "model contains a MiyakeSpike."
+        )
+    sp_lo, sp_hi = float(spike_win[0]), float(spike_win[1])
+    pre_hi = sp_lo - 1.0 if (sp_lo - 1.0) > t_lo_grid else sp_lo
+    if not (pre_hi > t_lo_grid):
+        raise ValueError(
+            f"Cannot infer a non-empty pre_window before spike onset {sp_lo:.2f} "
+            f"within t_fine [{t_lo_grid:.2f}, {t_hi_grid:.2f}]; pass pre_window explicitly."
+        )
+    pre_win = (t_lo_grid, pre_hi)
+
+    post_lo = max(sp_hi, sp_lo + 0.5)
+    if post_lo >= t_hi_grid:
+        post_lo = sp_hi
+    post_hi = min(post_lo + 17.0, t_hi_grid)
+    if not (post_hi > post_lo):
+        raise ValueError(
+            f"Cannot infer a non-empty post_window after spike end {sp_hi:.2f} "
+            f"within t_fine [{t_lo_grid:.2f}, {t_hi_grid:.2f}]; pass post_window explicitly."
+        )
+    post_win = (post_lo, post_hi)
+    return pre_win, post_win
+
+
+def _collect_field_spans(production: ProductionTerm) -> list[tuple[float, float]]:
+    """Collect ``(t_start, t_end)`` spans of any ``GaussianField`` terms."""
+    from .fields import GaussianField
+
+    if isinstance(production, GaussianField):
+        return [(float(production.t_start), float(production.t_end))]
+    if isinstance(production, ProductionSum):
+        spans: list[tuple[float, float]] = []
+        for part in production.parts:
+            spans.extend(_collect_field_spans(part))
+        return spans
+    return []
+
+
+def ringdown_diagnostic(
+    model_m0: RadiocarbonModel,
+    model_subspace: RadiocarbonModel,
+    dataset: Dataset,
+    marginal_config_m0: LinearMarginalConfig | None = None,
+    marginal_config_subspace: LinearMarginalConfig | None = None,
+    *,
+    pre_window: tuple[float, float] | None = None,
+    post_window: tuple[float, float] | None = None,
+    t_fine: Any | None = None,
+    n_draws: int = 100,
+    rng_key: Any | None = None,
+    q_true_fine: Any | None = None,
+    q_baseline: float | None = None,
+    subspace_models: Sequence[RadiocarbonModel] | None = None,
+    subspace_weights: Any | None = None,
+    label_m0: str | None = None,
+    label_subspace: str | None = None,
+) -> RingdownDiagnosticResult:
+    """Compare fixed-CBM (``m = 0``) vs joint ``SubspaceCBM`` post-spike GP ringdown.
+
+    Evaluates the closed-form linear posterior (:func:`~ticktack.likelihood.linear_posterior`)
+    for both models on ``t_fine``, subtracts any parametric
+    :class:`~ticktack.production.MiyakeSpike` contribution so ``q_field(t)`` isolates
+    the background cosmic-ray production field, and computes:
+
+    * Pre-spike and post-spike posterior realization RMS excursions
+      ``sqrt(mean((Q_hat(t) - Q_0)^2 + sigma_Q(t)^2))`` (whose stationary prior
+      expectation equals ``sigma_GP`` regardless of observational coverage gaps)
+      together with ``excitation_ratio = rms_post / rms_pre``, conditional-mean RMS
+      values, and the direct between-model post-spike shift ``rms_post_diff``;
+    * Raw ``chi2`` and ``chi2_per_n`` (``chi^2 / N``) and per-observation z-score
+      residuals ``(d - m_pred) / sigma`` on the quoted, unrescaled ``dataset.sigma_flat``;
+    * Optional synthetic-truth errors (``rmse_pre``, ``rmse_post``, ``max_abs_err_post``)
+      whenever ``q_true_fine`` is provided.
+
+    Parameters
+    ----------
+    model_m0 : RadiocarbonModel
+        Baseline fixed-CBM (``m = 0``) model with marginalized GP/field term.
+    model_subspace : RadiocarbonModel
+        Joint ``SubspaceCBM(m)`` model (typically at its MAP or posterior mean).
+    dataset : Dataset
+        Multi-series tree-ring dataset.
+    marginal_config_m0 : LinearMarginalConfig, optional
+        Marginalization configuration for ``model_m0`` (defaults to ``LinearMarginalConfig()``).
+    marginal_config_subspace : LinearMarginalConfig, optional
+        Marginalization configuration for ``model_subspace``. When ``None``, inherits
+        ``marginal_config_m0`` with any fixed-CBM :class:`~ticktack.fields.DCTResponseOperator`
+        stripped so ``model_subspace`` never reuses ``model_m0``'s response matrix.
+    pre_window : tuple[float, float], optional
+        Pre-spike reference window ``(t_lo, t_hi)`` in astronomical CE. When ``None``,
+        inferred cleanly before the detected :class:`~ticktack.production.MiyakeSpike`
+        within the dataset span.
+    post_window : tuple[float, float], optional
+        Post-spike ringdown evaluation window ``(t_lo, t_hi)`` in astronomical CE.
+        When ``None``, inferred cleanly after the detected spike (up to ``17 yr``)
+        within the dataset span.
+    t_fine : array-like, optional
+        Fine evaluation grid in astronomical CE. If ``None``, constructed at
+        ``~0.1 yr`` spacing spanning ``dataset`` alone.
+    n_draws : int, default 100
+        Number of correlated posterior background draws per model (``0`` disables draws).
+    rng_key : jax.Array, optional
+        PRNG key for posterior draws (defaults to ``jax.random.PRNGKey(0)`` when ``n_draws > 0``).
+    q_true_fine : array-like, optional
+        Known background cosmic-ray production ``Q_true(t_fine)`` (``atoms cm^-2 s^-1``)
+        for synthetic injection-and-recovery validation.
+    q_baseline : float, optional
+        Baseline steady production rate subtracted before computing RMS excursions
+        (defaults to ``model_m0``'s steady production rate / ``q_std``).
+    subspace_models : sequence of RadiocarbonModel, optional
+        Optional ensemble of posterior ``SubspaceCBM`` models (e.g. NUTS or IS-weighted
+        draws) over which ``q_field_subspace_mean``, ``q_field_subspace_std``, and
+        ``q_field_subspace_draws`` are marginalized via the Law of Total Variance.
+    subspace_weights : array-like, optional
+        Optional non-negative importance weights matching ``subspace_models`` (normalized
+        internally; defaults to uniform weights).
+    label_m0, label_subspace : str, optional
+        Display labels stored on the returned :class:`RingdownDiagnosticResult`.
+
+    Returns
+    -------
+    RingdownDiagnosticResult
+        Frozen PyTree containing reconstructed trajectories, residuals, and summary metrics.
+    """
+    from .fields import DCTResponseOperator
+
+    if dataset.n_obs <= 0:
+        raise ValueError("dataset must contain at least one observation.")
+
+    n_draws_int = int(n_draws)
+    if n_draws_int < 0:
+        raise ValueError(f"n_draws must be >= 0, got {n_draws!r}.")
+
+    cfg_m0 = LinearMarginalConfig() if marginal_config_m0 is None else marginal_config_m0
+    if marginal_config_subspace is None:
+        if cfg_m0.dct_operator is not None and isinstance(
+            cfg_m0.dct_operator, DCTResponseOperator
+        ):
+            cfg_sub = eqx.tree_at(lambda c: c.dct_operator, cfg_m0, None)
+        else:
+            cfg_sub = cfg_m0
+    else:
+        cfg_sub = marginal_config_subspace
+
+    if t_fine is None:
+        ds_lo = min(float(np.min(s.t_starts)) for s in dataset.series)
+        ds_hi = max(float(np.max(s.t_ends)) for s in dataset.series)
+        n_pts = max(201, int(round((ds_hi - ds_lo) * 10.0)) + 1)
+        t_fine_np = np.linspace(ds_lo, ds_hi, n_pts, dtype=np.float64)
+    else:
+        t_fine_np = np.asarray(t_fine, dtype=np.float64).reshape(-1)
+        if t_fine_np.size < 2:
+            raise ValueError("t_fine must contain at least 2 points.")
+
+    t_fine_arr = jnp.asarray(t_fine_np, dtype=jnp.float64)
+    t_lo_grid = float(np.min(t_fine_np))
+    t_hi_grid = float(np.max(t_fine_np))
+
+    spike_win = _infer_spike_window(model_subspace.production) or _infer_spike_window(
+        model_m0.production
+    )
+    if pre_window is None or post_window is None:
+        inferred_pre, inferred_post = _infer_default_ringdown_windows(
+            t_lo_grid, t_hi_grid, spike_win
+        )
+        eff_pre = inferred_pre if pre_window is None else pre_window
+        eff_post = inferred_post if post_window is None else post_window
+    else:
+        eff_pre = pre_window
+        eff_post = post_window
+
+    pre_lo, pre_hi = float(eff_pre[0]), float(eff_pre[1])
+    post_lo, post_hi = float(eff_post[0]), float(eff_post[1])
+    if not (pre_hi > pre_lo):
+        raise ValueError(f"pre_window must satisfy t_hi > t_lo, got {eff_pre!r}.")
+    if not (post_hi > post_lo):
+        raise ValueError(f"post_window must satisfy t_hi > t_lo, got {eff_post!r}.")
+
+    pre_mask = (t_fine_np >= pre_lo) & (t_fine_np <= pre_hi)
+    post_mask = (t_fine_np >= post_lo) & (t_fine_np <= post_hi)
+    if not np.any(pre_mask):
+        raise ValueError(
+            f"pre_window={eff_pre!r} contains no points in t_fine "
+            f"[{t_lo_grid:.2f}, {t_hi_grid:.2f}]."
+        )
+    if not np.any(post_mask):
+        raise ValueError(
+            f"post_window={eff_post!r} contains no points in t_fine "
+            f"[{t_lo_grid:.2f}, {t_hi_grid:.2f}]."
+        )
+
+    for gf_lo, gf_hi in _collect_field_spans(model_m0.production) + _collect_field_spans(
+        model_subspace.production
+    ):
+        if pre_hi < gf_lo or pre_lo > gf_hi:
+            raise ValueError(
+                f"pre_window={eff_pre!r} lies outside GaussianField domain [{gf_lo:.2f}, {gf_hi:.2f}]."
+            )
+        if post_hi < gf_lo or post_lo > gf_hi:
+            raise ValueError(
+                f"post_window={eff_post!r} lies outside GaussianField domain [{gf_lo:.2f}, {gf_hi:.2f}]."
+            )
+
+    q_true_np: np.ndarray | None = None
+    q_true_arr: jax.Array | None = None
+    if q_true_fine is not None:
+        q_true_np = np.asarray(q_true_fine, dtype=np.float64).reshape(-1)
+        if q_true_np.shape != t_fine_np.shape:
+            raise ValueError(
+                f"q_true_fine shape {q_true_np.shape} does not match t_fine shape {t_fine_np.shape}."
+            )
+        q_true_arr = jnp.asarray(q_true_np, dtype=jnp.float64)
+
+    if n_draws_int > 0:
+        base_key = (
+            jax.random.PRNGKey(0)
+            if rng_key is None
+            else jnp.asarray(rng_key)
+        )
+        key_m0, key_sub = jax.random.split(base_key)
+    else:
+        key_m0 = None
+        key_sub = None
+
+    # 1. Fixed-CBM (m = 0) linear posterior + parametric spike subtraction
+    lp_m0 = linear_posterior(
+        model_m0,
+        dataset,
+        cfg_m0,
+        rng_key=key_m0,
+        n_draws=n_draws_int,
+        t_fine=t_fine_arr,
+    )
+    assert lp_m0.q_fine_mean is not None
+    assert lp_m0.q_fine_std is not None
+    assert lp_m0.ring_pred_mean is not None
+    spike_dq_m0 = _sum_spike_delta_q(model_m0.production, t_fine_arr, model_m0.q_std)
+    q_m0_mean = lp_m0.q_fine_mean - spike_dq_m0
+    q_m0_std = lp_m0.q_fine_std
+    q_m0_draws = (
+        lp_m0.q_fine_draws - spike_dq_m0[None, :]
+        if lp_m0.q_fine_draws is not None
+        else None
+    )
+    ring_pred_m0 = lp_m0.ring_pred_mean
+
+    # 2. Joint SubspaceCBM(m) linear posterior (single model or weighted ensemble)
+    if subspace_models is not None and len(subspace_models) > 0:
+        n_ens = len(subspace_models)
+        if subspace_weights is None:
+            w_norm = np.full((n_ens,), 1.0 / n_ens, dtype=np.float64)
+        else:
+            w_raw = np.asarray(subspace_weights, dtype=np.float64).reshape(-1)
+            if w_raw.shape != (n_ens,):
+                raise ValueError(
+                    f"subspace_weights length {w_raw.size} does not match "
+                    f"len(subspace_models)={n_ens}."
+                )
+            if not np.all(np.isfinite(w_raw)) or np.any(w_raw < 0.0):
+                raise ValueError("subspace_weights must be finite and non-negative.")
+            w_sum = float(np.sum(w_raw))
+            if not (w_sum > 0.0):
+                raise ValueError("subspace_weights must have a strictly positive sum.")
+            w_norm = w_raw / w_sum
+
+        if n_draws_int > 0 and key_sub is not None:
+            key_idx, key_draw = jax.random.split(key_sub)
+            member_indices = np.asarray(
+                jax.random.choice(
+                    key_idx,
+                    n_ens,
+                    shape=(n_draws_int,),
+                    replace=True,
+                    p=jnp.asarray(w_norm, dtype=jnp.float64),
+                ),
+                dtype=np.int64,
+            )
+            counts_per_member = np.bincount(member_indices, minlength=n_ens)
+            ens_keys = jax.random.split(key_draw, n_ens)
+        else:
+            member_indices = np.zeros((0,), dtype=np.int64)
+            counts_per_member = np.zeros((n_ens,), dtype=np.int64)
+            ens_keys = [None] * n_ens
+
+        bg_means: list[np.ndarray] = []
+        bg_vars: list[np.ndarray] = []
+        member_draws: list[np.ndarray | None] = []
+        ring_preds: list[np.ndarray] = []
+        for idx_m, (m_s, k_s) in enumerate(zip(subspace_models, ens_keys)):
+            c_m = int(counts_per_member[idx_m])
+            lp_s = linear_posterior(
+                m_s,
+                dataset,
+                cfg_sub,
+                rng_key=(k_s if c_m > 0 else None),
+                n_draws=c_m,
+                t_fine=t_fine_arr,
+            )
+            assert lp_s.q_fine_mean is not None
+            assert lp_s.q_fine_std is not None
+            assert lp_s.ring_pred_mean is not None
+            sp_s = _sum_spike_delta_q(m_s.production, t_fine_arr, m_s.q_std)
+            bg_means.append(np.asarray(lp_s.q_fine_mean - sp_s, dtype=np.float64))
+            bg_vars.append(np.asarray(lp_s.q_fine_std, dtype=np.float64) ** 2)
+            ring_preds.append(np.asarray(lp_s.ring_pred_mean, dtype=np.float64))
+            if c_m > 0 and lp_s.q_fine_draws is not None:
+                member_draws.append(
+                    np.asarray(lp_s.q_fine_draws - sp_s[None, :], dtype=np.float64)
+                )
+            else:
+                member_draws.append(None)
+
+        bg_means_arr = np.stack(bg_means, axis=0)
+        bg_vars_arr = np.stack(bg_vars, axis=0)
+        # Weighted Law of Total Expectation & Law of Total Variance:
+        # Var[Q] = E_w[Var[Q | theta]] + Var_w[E[Q | theta]]
+        q_sub_mean_np = np.sum(w_norm[:, None] * bg_means_arr, axis=0)
+        mean_cond_var = np.sum(w_norm[:, None] * bg_vars_arr, axis=0)
+        between_var = np.sum(
+            w_norm[:, None] * (bg_means_arr - q_sub_mean_np[None, :]) ** 2, axis=0
+        )
+        q_sub_var_np = mean_cond_var + between_var
+        q_sub_mean = jnp.asarray(q_sub_mean_np, dtype=jnp.float64)
+        q_sub_std = jnp.asarray(
+            np.sqrt(np.maximum(q_sub_var_np, 0.0)), dtype=jnp.float64
+        )
+        ring_pred_sub = jnp.asarray(
+            np.sum(w_norm[:, None] * np.stack(ring_preds, axis=0), axis=0),
+            dtype=jnp.float64,
+        )
+        if n_draws_int > 0:
+            draw_cursors = np.zeros((n_ens,), dtype=np.int64)
+            assembled = np.empty((n_draws_int, t_fine_np.size), dtype=np.float64)
+            for out_i, m_idx in enumerate(member_indices):
+                m_i = int(m_idx)
+                arr_m = member_draws[m_i]
+                assert arr_m is not None
+                assembled[out_i] = arr_m[int(draw_cursors[m_i])]
+                draw_cursors[m_i] += 1
+            q_sub_draws = jnp.asarray(assembled, dtype=jnp.float64)
+        else:
+            q_sub_draws = None
+    else:
+        if subspace_weights is not None:
+            raise ValueError(
+                "subspace_weights can only be supplied together with subspace_models."
+            )
+        lp_sub = linear_posterior(
+            model_subspace,
+            dataset,
+            cfg_sub,
+            rng_key=key_sub,
+            n_draws=n_draws_int,
+            t_fine=t_fine_arr,
+        )
+        assert lp_sub.q_fine_mean is not None
+        assert lp_sub.q_fine_std is not None
+        assert lp_sub.ring_pred_mean is not None
+        spike_dq_sub = _sum_spike_delta_q(
+            model_subspace.production, t_fine_arr, model_subspace.q_std
+        )
+        q_sub_mean = lp_sub.q_fine_mean - spike_dq_sub
+        q_sub_std = lp_sub.q_fine_std
+        q_sub_draws = (
+            lp_sub.q_fine_draws - spike_dq_sub[None, :]
+            if lp_sub.q_fine_draws is not None
+            else None
+        )
+        ring_pred_sub = lp_sub.ring_pred_mean
+
+    # 3. Raw chi^2 / N and per-observation z-score residuals on unrescaled sigma_flat
+    d_flat = np.asarray(dataset.d14c_flat, dtype=np.float64)
+    sigma_flat = np.asarray(dataset.sigma_flat, dtype=np.float64)
+    z_m0_np = (d_flat - np.asarray(ring_pred_m0, dtype=np.float64)) / sigma_flat
+    z_sub_np = (d_flat - np.asarray(ring_pred_sub, dtype=np.float64)) / sigma_flat
+
+    n_obs = int(d_flat.size)
+    chi2_m0 = float(np.sum(z_m0_np**2))
+    chi2_per_n_m0 = float(chi2_m0 / n_obs)
+    chi2_sub = float(np.sum(z_sub_np**2))
+    chi2_per_n_sub = float(chi2_sub / n_obs)
+
+    # 4. Pre-spike vs post-spike posterior realization RMS (and conditional-mean RMS)
+    q_ref = (
+        float(q_baseline)
+        if q_baseline is not None
+        else _steady_baseline_rate(model_m0)
+    )
+    q_m0_np = np.asarray(q_m0_mean, dtype=np.float64)
+    q_m0_sd_np = np.asarray(q_m0_std, dtype=np.float64)
+    q_sub_np = np.asarray(q_sub_mean, dtype=np.float64)
+    q_sub_sd_np = np.asarray(q_sub_std, dtype=np.float64)
+
+    dq_m0 = q_m0_np - q_ref
+    dq_sub = q_sub_np - q_ref
+
+    rms_pre_mean_m0 = float(np.sqrt(np.mean(dq_m0[pre_mask] ** 2)))
+    rms_post_mean_m0 = float(np.sqrt(np.mean(dq_m0[post_mask] ** 2)))
+    rms_pre_mean_sub = float(np.sqrt(np.mean(dq_sub[pre_mask] ** 2)))
+    rms_post_mean_sub = float(np.sqrt(np.mean(dq_sub[post_mask] ** 2)))
+
+    # Posterior realization second-moment RMS: sqrt(<dQ_hat^2 + sigma_Q^2>)
+    rms_pre_m0 = float(np.sqrt(np.mean(dq_m0[pre_mask] ** 2 + q_m0_sd_np[pre_mask] ** 2)))
+    rms_post_m0 = float(np.sqrt(np.mean(dq_m0[post_mask] ** 2 + q_m0_sd_np[post_mask] ** 2)))
+    exc_m0 = _safe_ratio(rms_post_m0, rms_pre_m0)
+
+    rms_pre_sub = float(np.sqrt(np.mean(dq_sub[pre_mask] ** 2 + q_sub_sd_np[pre_mask] ** 2)))
+    rms_post_sub = float(np.sqrt(np.mean(dq_sub[post_mask] ** 2 + q_sub_sd_np[post_mask] ** 2)))
+    exc_sub = _safe_ratio(rms_post_sub, rms_pre_sub)
+
+    diff_post = q_m0_np[post_mask] - q_sub_np[post_mask]
+    rms_post_diff = float(np.sqrt(np.mean(diff_post**2)))
+    max_abs_diff_post = float(np.max(np.abs(diff_post)))
+
+    # 5. Optional synthetic-truth errors
+    rmse_pre_m0: float | None = None
+    rmse_post_m0: float | None = None
+    max_abs_err_post_m0: float | None = None
+    rmse_pre_sub: float | None = None
+    rmse_post_sub: float | None = None
+    max_abs_err_post_sub: float | None = None
+    if q_true_np is not None:
+        err_m0 = q_m0_np - q_true_np
+        err_sub = q_sub_np - q_true_np
+        rmse_pre_m0 = float(np.sqrt(np.mean(err_m0[pre_mask] ** 2)))
+        rmse_post_m0 = float(np.sqrt(np.mean(err_m0[post_mask] ** 2)))
+        max_abs_err_post_m0 = float(np.max(np.abs(err_m0[post_mask])))
+        rmse_pre_sub = float(np.sqrt(np.mean(err_sub[pre_mask] ** 2)))
+        rmse_post_sub = float(np.sqrt(np.mean(err_sub[post_mask] ** 2)))
+        max_abs_err_post_sub = float(np.max(np.abs(err_sub[post_mask])))
+
+    m_modes = _infer_subspace_modes(model_subspace.cbm)
+    eff_label_m0 = "Fixed CBM ($m=0$)" if label_m0 is None else str(label_m0)
+    eff_label_sub = (
+        f"Joint SubspaceCBM ($m={m_modes}$)"
+        if (label_subspace is None and m_modes > 0)
+        else ("Joint SubspaceCBM" if label_subspace is None else str(label_subspace))
+    )
+
+    return RingdownDiagnosticResult(
+        t_fine=t_fine_arr,
+        q_field_m0_mean=q_m0_mean,
+        q_field_m0_std=q_m0_std,
+        q_field_subspace_mean=q_sub_mean,
+        q_field_subspace_std=q_sub_std,
+        q_field_m0_draws=q_m0_draws,
+        q_field_subspace_draws=q_sub_draws,
+        ring_pred_m0=ring_pred_m0,
+        ring_pred_subspace=ring_pred_sub,
+        z_residuals_m0=jnp.asarray(z_m0_np, dtype=jnp.float64),
+        z_residuals_subspace=jnp.asarray(z_sub_np, dtype=jnp.float64),
+        q_true_fine=q_true_arr,
+        n_obs=n_obs,
+        m_modes=m_modes,
+        q_baseline=q_ref,
+        pre_window=(pre_lo, pre_hi),
+        post_window=(post_lo, post_hi),
+        spike_window=spike_win,
+        rms_pre_m0=rms_pre_m0,
+        rms_post_m0=rms_post_m0,
+        excitation_ratio_m0=exc_m0,
+        rms_pre_subspace=rms_pre_sub,
+        rms_post_subspace=rms_post_sub,
+        excitation_ratio_subspace=exc_sub,
+        rms_pre_mean_m0=rms_pre_mean_m0,
+        rms_post_mean_m0=rms_post_mean_m0,
+        rms_pre_mean_subspace=rms_pre_mean_sub,
+        rms_post_mean_subspace=rms_post_mean_sub,
+        rms_post_diff=rms_post_diff,
+        max_abs_diff_post=max_abs_diff_post,
+        chi2_m0=chi2_m0,
+        chi2_per_n_m0=chi2_per_n_m0,
+        chi2_subspace=chi2_sub,
+        chi2_per_n_subspace=chi2_per_n_sub,
+        rmse_pre_m0=rmse_pre_m0,
+        rmse_post_m0=rmse_post_m0,
+        max_abs_err_post_m0=max_abs_err_post_m0,
+        rmse_pre_subspace=rmse_pre_sub,
+        rmse_post_subspace=rmse_post_sub,
+        max_abs_err_post_subspace=max_abs_err_post_sub,
+        label_m0=eff_label_m0,
+        label_subspace=eff_label_sub,
+    )
+
+
+def plot_ringdown_comparison(
+    diag: RingdownDiagnosticResult,
+    dataset: Dataset,
+    *,
+    spike_window: tuple[float, float] | None = None,
+    q_true_fine: Any | None = None,
+    title: str | None = None,
+    vmax: float | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> Figure:
+    """Render the 3-row / 4-panel ringdown diagnostic figure.
+
+    * **Panel A**: Reconstructed background cosmic-ray production ``Q_field(t)``
+      (``atoms cm^-2 s^-1``) for fixed CBM (``m = 0``, orange dashed + ``1σ`` band)
+      versus joint ``SubspaceCBM`` (blue solid + ``1σ`` band), optional black truth
+      curve, and shaded spike and post-spike windows.
+    * **Panel B**: Signed difference ``ΔQ_field(t) = Q_m0(t) - Q_subspace(t)``
+      (or reconstruction error ``Q_hat(t) - Q_true(t)`` when ``q_true_fine`` is supplied).
+    * **Panels C & D**: Paired NH (top) / SH (bottom) standardized z-score residual
+      heatmaps ``(d - m) / σ`` sharing a symmetric diverging ``RdBu_r`` colourbar
+      (``vmin = -vmax``) with explicit grey hatched masking for missing series-years.
+
+    Strictly stateless: renders inside ``plt.rc_context(...)`` without mutating
+    global Matplotlib configuration.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The rendered 4-panel diagnostic figure.
+    """
+    c_black = "#1A1A1A"
+    c_verm = "#D55E00"
+    c_blue = "#0072B2"
+    c_amber = "#E69F00"
+
+    t_fine = np.asarray(diag.t_fine, dtype=np.float64)
+    q_m0 = np.asarray(diag.q_field_m0_mean, dtype=np.float64)
+    q_m0_sd = np.asarray(diag.q_field_m0_std, dtype=np.float64)
+    q_sub = np.asarray(diag.q_field_subspace_mean, dtype=np.float64)
+    q_sub_sd = np.asarray(diag.q_field_subspace_std, dtype=np.float64)
+
+    eff_q_true: np.ndarray | None = None
+    if q_true_fine is not None:
+        eff_q_true = np.asarray(q_true_fine, dtype=np.float64).reshape(-1)
+        if eff_q_true.shape != t_fine.shape:
+            raise ValueError(
+                f"q_true_fine shape {eff_q_true.shape} does not match diag.t_fine shape {t_fine.shape}."
+            )
+    elif diag.q_true_fine is not None:
+        eff_q_true = np.asarray(diag.q_true_fine, dtype=np.float64)
+
+    eff_spike = spike_window if spike_window is not None else diag.spike_window
+
+    grid_m0, ordered_series, n_nh, year_min, year_max = _build_ordered_z_grid(
+        dataset, np.asarray(diag.z_residuals_m0, dtype=np.float64)
+    )
+    grid_sub, _, _, _, _ = _build_ordered_z_grid(
+        dataset, np.asarray(diag.z_residuals_subspace, dtype=np.float64)
+    )
+    n_series = len(ordered_series)
+    n_sh = sum(1 for s in ordered_series if s.hemisphere == "south")
+    has_missing = bool(np.any(np.isnan(grid_m0)) or np.any(np.isnan(grid_sub)))
+
+    finite_vals = np.concatenate(
+        [
+            np.abs(grid_m0[np.isfinite(grid_m0)]),
+            np.abs(grid_sub[np.isfinite(grid_sub)]),
+        ]
+    )
+    if vmax is not None:
+        eff_vmax = float(vmax)
+        if not (np.isfinite(eff_vmax) and eff_vmax > 0.0):
+            raise ValueError(f"vmax must be finite and positive, got {vmax!r}.")
+        extend_cbar = "both" if (finite_vals.size > 0 and float(np.max(finite_vals)) > eff_vmax) else "neither"
+    elif finite_vals.size > 0:
+        max_abs = float(np.max(finite_vals))
+        if max_abs <= 6.0:
+            eff_vmax = float(math.ceil(max(max_abs, 3.5) * 2.0) / 2.0)
+            extend_cbar = "neither"
+        else:
+            p99 = float(np.percentile(finite_vals, 99.0))
+            eff_vmax = float(math.ceil(max(p99, 3.5) * 2.0) / 2.0)
+            extend_cbar = "both" if max_abs > eff_vmax else "neither"
+    else:
+        eff_vmax = 4.0
+        extend_cbar = "neither"
+
+    if figsize is None:
+        extra_h = max(0.0, 0.12 * (n_series - 12))
+        eff_figsize = (12.2, min(13.2, 9.6 + extra_h))
+    else:
+        eff_figsize = figsize
+    heatmap_height_ratio = 1.32 + min(1.35, max(0.0, 0.045 * (n_series - 10)))
+
+    rc_style = {
+        "font.size": 10.2,
+        "axes.titlesize": 11.2,
+        "axes.labelsize": 10.2,
+        "legend.fontsize": 8.9,
+        "xtick.labelsize": 9.2,
+        "ytick.labelsize": 9.2,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+    }
+
+    with plt.rc_context(rc_style):
+        fig = plt.figure(figsize=eff_figsize)
+        gs = gridspec.GridSpec(
+            3,
+            3,
+            figure=fig,
+            height_ratios=[1.62, 0.94, heatmap_height_ratio],
+            width_ratios=[1.0, 1.0, 0.042],
+            hspace=0.42,
+            wspace=0.14,
+        )
+
+        # ------------------------------------------------------------------
+        # Panel A: Reconstructed background Q_field(t)
+        # ------------------------------------------------------------------
+        ax_a = fig.add_subplot(gs[0, :2])
+        if eff_spike is not None:
+            sp0, sp1 = float(eff_spike[0]), float(eff_spike[1])
+            if sp1 > sp0:
+                ax_a.axvspan(
+                    sp0, sp1, color=c_amber, alpha=0.22, label="Parametric spike window"
+                )
+            else:
+                ax_a.axvline(
+                    sp0, color=c_amber, lw=1.8, ls=":", label="Parametric spike onset"
+                )
+        ax_a.axvspan(
+            diag.post_window[0],
+            diag.post_window[1],
+            color="#EEEEEE",
+            alpha=0.78,
+            zorder=0,
+        )
+
+        ax_a.fill_between(
+            t_fine, q_m0 - q_m0_sd, q_m0 + q_m0_sd, color=c_verm, alpha=0.18
+        )
+        ax_a.plot(
+            t_fine,
+            q_m0,
+            color=c_verm,
+            ls="--",
+            lw=1.9,
+            label=(
+                f"{diag.label_m0} "
+                f"($\\chi^2/N={diag.chi2_per_n_m0:.2f}$, "
+                f"$R={diag.excitation_ratio_m0:.2f}$)"
+            ),
+        )
+
+        ax_a.fill_between(
+            t_fine, q_sub - q_sub_sd, q_sub + q_sub_sd, color=c_blue, alpha=0.22
+        )
+        ax_a.plot(
+            t_fine,
+            q_sub,
+            color=c_blue,
+            lw=2.0,
+            label=(
+                f"{diag.label_subspace} "
+                f"($\\chi^2/N={diag.chi2_per_n_subspace:.2f}$, "
+                f"$R={diag.excitation_ratio_subspace:.2f}$)"
+            ),
+        )
+
+        if eff_q_true is not None:
+            ax_a.plot(
+                t_fine,
+                eff_q_true,
+                color=c_black,
+                lw=2.0,
+                label="Injected background truth",
+            )
+
+        y_candidates = [q_m0 - q_m0_sd, q_m0 + q_m0_sd, q_sub - q_sub_sd, q_sub + q_sub_sd]
+        if eff_q_true is not None:
+            y_candidates.append(eff_q_true)
+        y_lo = float(min(np.min(arr) for arr in y_candidates))
+        y_hi = float(max(np.max(arr) for arr in y_candidates))
+        y_span = max(y_hi - y_lo, 0.25)
+        ax_a.set_xlim(float(t_fine[0]), float(t_fine[-1]))
+        ax_a.set_ylim(y_lo - 0.19 * y_span, y_hi + 0.38 * y_span)
+
+        post_mid = 0.5 * (diag.post_window[0] + diag.post_window[1])
+        ax_a.text(
+            post_mid,
+            y_lo - 0.14 * y_span,
+            f"Post-spike window ({diag.post_window[0]:g}–{diag.post_window[1]:g} CE)",
+            ha="center",
+            va="bottom",
+            fontsize=8.6,
+            color="#555555",
+            style="italic",
+        )
+        ax_a.set_ylabel(r"Background $Q_{\mathrm{field}}(t)$ (atoms cm$^{-2}$ s$^{-1}$)")
+        ax_a.set_title(
+            "A. Background cosmic-ray production recovery (parametric spike subtracted)",
+            loc="left",
+            fontweight="bold",
+        )
+        ax_a.legend(
+            loc="upper left",
+            ncol=2,
+            frameon=True,
+            framealpha=0.94,
+            edgecolor="#CCCCCC",
+            fontsize=8.6,
+        )
+        ax_a.grid(alpha=0.25, ls=":")
+
+        # ------------------------------------------------------------------
+        # Panel B: Signed error (with truth) or Q_m0 - Q_subspace difference
+        # ------------------------------------------------------------------
+        ax_b = fig.add_subplot(gs[1, :2], sharex=ax_a)
+        if eff_spike is not None:
+            sp0, sp1 = float(eff_spike[0]), float(eff_spike[1])
+            if sp1 > sp0:
+                ax_b.axvspan(sp0, sp1, color=c_amber, alpha=0.22)
+            else:
+                ax_b.axvline(sp0, color=c_amber, lw=1.6, ls=":")
+        ax_b.axvspan(
+            diag.post_window[0],
+            diag.post_window[1],
+            color="#EEEEEE",
+            alpha=0.78,
+            zorder=0,
+        )
+        ax_b.axhline(0.0, color=c_black, lw=1.0, ls="-", alpha=0.7)
+
+        post_mask = (t_fine >= diag.post_window[0]) & (t_fine <= diag.post_window[1])
+        if eff_q_true is not None:
+            err_m0 = q_m0 - eff_q_true
+            err_sub = q_sub - eff_q_true
+            rmse_m0_p = float(np.sqrt(np.mean(err_m0[post_mask] ** 2)))
+            max_m0_p = float(np.max(np.abs(err_m0[post_mask])))
+            rmse_sub_p = float(np.sqrt(np.mean(err_sub[post_mask] ** 2)))
+            max_sub_p = float(np.max(np.abs(err_sub[post_mask])))
+
+            ax_b.plot(
+                t_fine,
+                err_m0,
+                color=c_verm,
+                ls="--",
+                lw=1.8,
+                label=(
+                    f"{diag.label_m0}: post-spike RMSE = {rmse_m0_p:.3g}, "
+                    f"max $|\\Delta Q|$ = {max_m0_p:.3g}"
+                ),
+            )
+            ax_b.fill_between(t_fine, 0.0, err_m0, color=c_verm, alpha=0.14)
+            ax_b.plot(
+                t_fine,
+                err_sub,
+                color=c_blue,
+                lw=1.9,
+                label=(
+                    f"{diag.label_subspace}: post-spike RMSE = {rmse_sub_p:.3g}, "
+                    f"max $|\\Delta Q|$ = {max_sub_p:.3g}"
+                ),
+            )
+            ax_b.set_ylabel(
+                r"$\widehat{Q}_{\mathrm{field}} - Q_{\mathrm{true}}$ (atoms cm$^{-2}$ s$^{-1}$)"
+            )
+            ax_b.set_title(
+                r"B. Reconstruction error $\widehat{Q}_{\mathrm{field}}(t) - Q_{\mathrm{true}}(t)$",
+                loc="left",
+                fontweight="bold",
+            )
+        else:
+            diff_q = q_m0 - q_sub
+            ax_b.plot(
+                t_fine,
+                diff_q,
+                color=c_verm,
+                lw=1.9,
+                label=(
+                    f"$Q_{{m=0}} - Q_{{\\mathrm{{sub}}}}$: post-spike RMS = {diag.rms_post_diff:.3g}, "
+                    f"max $|\\Delta Q|$ = {diag.max_abs_diff_post:.3g}"
+                ),
+            )
+            ax_b.fill_between(t_fine, 0.0, diff_q, color=c_verm, alpha=0.15)
+            ax_b.set_ylabel(
+                r"$\Delta Q_{\mathrm{field}}$ (atoms cm$^{-2}$ s$^{-1}$)"
+            )
+            ax_b.set_title(
+                r"B. Background difference $\Delta Q_{\mathrm{field}}(t) = Q_{m=0}(t) - Q_{\mathrm{sub}}(t)$",
+                loc="left",
+                fontweight="bold",
+            )
+
+        ax_b.set_xlabel("Calendar year (CE)")
+        b_ymin, b_ymax = ax_b.get_ylim()
+        b_span = max(b_ymax - b_ymin, 0.1)
+        ax_b.set_ylim(b_ymin - 0.06 * b_span, b_ymax + 0.30 * b_span)
+        ax_b.legend(
+            loc="upper right",
+            frameon=True,
+            framealpha=0.94,
+            edgecolor="#CCCCCC",
+            fontsize=8.6,
+        )
+        ax_b.grid(alpha=0.25, ls=":")
+
+        # ------------------------------------------------------------------
+        # Panels C & D: Paired NH (top) / SH (bottom) z-score residual maps
+        # ------------------------------------------------------------------
+        cmap_obj = plt.get_cmap("RdBu_r").with_extremes(bad="#E4E4E4")
+        extent = (year_min - 0.5, year_max + 0.5, n_series - 0.5, -0.5)
+        x_edges = np.arange(year_min, year_max + 2, dtype=np.float64) - 0.5
+        y_edges = np.arange(n_series + 1, dtype=np.float64) - 0.5
+
+        def _render_heatmap(ax: Axes, grid: np.ndarray, panel_title: str) -> Any:
+            im = ax.imshow(
+                grid,
+                aspect="auto",
+                cmap=cmap_obj,
+                vmin=-eff_vmax,
+                vmax=eff_vmax,
+                extent=extent,
+                interpolation="nearest",
+            )
+            nan_mask = np.isnan(grid)
+            if np.any(nan_mask):
+                hatch_arr = np.ma.masked_where(~nan_mask, np.ones_like(grid))
+                ax.pcolor(
+                    x_edges,
+                    y_edges,
+                    hatch_arr,
+                    hatch="////",
+                    facecolor="none",
+                    edgecolor="#9E9E9E",
+                    linewidth=0.0,
+                    zorder=2,
+                )
+            if 0 < n_nh < n_series:
+                ax.axhline(n_nh - 0.5, color=c_black, lw=1.35, ls="-", zorder=3)
+            if eff_spike is not None:
+                ax.axvline(float(eff_spike[0]), color=c_black, lw=1.15, ls="--", zorder=3)
+            ax.set_xlabel("Calendar year (CE)")
+            ax.set_title(panel_title, loc="left", fontweight="bold", fontsize=10.3)
+            return im
+
+        ax_c = fig.add_subplot(gs[2, 0])
+        _render_heatmap(
+            ax_c,
+            grid_m0,
+            f"C. {diag.label_m0} ($\\chi^2/N = {diag.chi2_per_n_m0:.2f}$)",
+        )
+
+        tick_fs = 8.4 if n_series <= 12 else (7.2 if n_series <= 22 else 6.0)
+        if n_nh > 0 and n_sh > 0 and n_series > 16:
+            series_labels = [s.name for s in ordered_series]
+        else:
+            series_labels = [
+                f"{s.name} ({'NH' if s.hemisphere == 'north' else 'SH'})"
+                for s in ordered_series
+            ]
+        ax_c.set_yticks(np.arange(n_series))
+        ax_c.set_yticklabels(series_labels, fontsize=tick_fs)
+
+        ax_d = fig.add_subplot(gs[2, 1], sharey=ax_c)
+        im_d = _render_heatmap(
+            ax_d,
+            grid_sub,
+            f"D. {diag.label_subspace} ($\\chi^2/N = {diag.chi2_per_n_subspace:.2f}$)",
+        )
+        plt.setp(ax_d.get_yticklabels(), visible=False)
+
+        if 0 < n_nh < n_series:
+            ax_d.text(
+                1.015,
+                1.0 - (0.5 * n_nh) / n_series,
+                "NH",
+                transform=ax_d.transAxes,
+                ha="left",
+                va="center",
+                fontsize=8.5,
+                fontweight="bold",
+                color=c_blue,
+            )
+            ax_d.text(
+                1.015,
+                (0.5 * (n_series - n_nh)) / n_series,
+                "SH",
+                transform=ax_d.transAxes,
+                ha="left",
+                va="center",
+                fontsize=8.5,
+                fontweight="bold",
+                color=c_verm,
+            )
+
+        cax = fig.add_subplot(gs[2, 2])
+        cbar = fig.colorbar(im_d, cax=cax, extend=extend_cbar)
+        cbar_lbl = r"$\Delta^{14}\mathrm{C}$ z-score residual $(d - m)/\sigma$"
+        if has_missing:
+            cbar_lbl += "\n(grey hatched = missing)"
+        cbar.set_label(cbar_lbl, fontsize=9.4)
+
+        if title is not None:
+            fig.suptitle(title, fontsize=11.8, fontweight="bold", y=0.985)
+            fig.subplots_adjust(top=0.925)
+
+    return fig
+
+
 from .fields import plot_evidence_grid, plot_field_draws  # noqa: E402
 
 __all__ = [
+    "RingdownDiagnosticResult",
     "plot_cbm_eigenmodes",
     "plot_cbm_mode_impulse_responses",
     "plot_cbm_tikz_modes",
@@ -2245,4 +3407,6 @@ __all__ = [
     "plot_fisher_spectrum",
     "plot_production_posterior",
     "plot_residual_map",
+    "plot_ringdown_comparison",
+    "ringdown_diagnostic",
 ]

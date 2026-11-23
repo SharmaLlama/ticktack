@@ -2,7 +2,7 @@
 
 `ticktack 2.0` ships with two complementary suites of self-contained, pre-executed minimal-working-example (MWE) Jupyter notebooks under [`notebooks/v2/`](https://github.com/SharmaLlama/ticktack/tree/main/notebooks/v2):
 
-1. **Core `v2` Pillar Walkthroughs (`notebooks/v2/01..05_*.ipynb`)** – end-to-end demonstrations of semiparametric event inference, Fisher information & tempered SMC, causal POD vs log-GP reconstruction, Information Field Theory kernel discovery, and multi-event Miyake reanalysis.
+1. **Core `v2` Pillar Walkthroughs (`notebooks/v2/01..06_*.ipynb`)** – end-to-end demonstrations of semiparametric event inference, Fisher information & tempered SMC, causal POD vs log-GP reconstruction, Information Field Theory kernel discovery, multi-event Miyake reanalysis, and joint `SubspaceCBM` + marginalized-GP ringdown diagnostics.
 2. **`v1` → `v2` Reproduction & Benchmark Suite (`notebooks/v2/docs_examples/01..06_*.ipynb`)** – direct head-to-head reproductions of every `ticktack 1.x` documentation tutorial (`docs/notebooks/01..05_*.ipynb`) with cold-JIT and warm wall-clock benchmarks, plus direct Bayesian inference of carbon-box transfer coefficients (`06_direct_cbm_inference.ipynb`).
 
 ---
@@ -61,6 +61,16 @@ Homogeneously re-analyses all six bundled Holocene Miyake cosmic-ray excursions 
 - Audits proleptic astronomical year conversion (`historical_bce` $-Y \mapsto -(Y - 1)$), Austral summer Southern Hemisphere ring windows (`october-march`), and `Brehm21`'s `4.39‰` inter-hemispheric steady-state gradient.
 - Marginalizes hierarchical Holocene offsets, 11-year solar quadratures, and Solin–Särkkä GP modes analytically inside `fit_map`, contrasting 1950 CE standard yields (`relative_to="standard"`) against epoch-local ambient yields (`relative_to="ambient"`, $(1 + \Delta_0/1000)^{-1}$) when mid-Holocene atmospheric $\Delta^{14}\text{C}$ exceeded $+75\text{‰}$.
 - Runs `fit_ift_field` + `error_scale(..., by_series=True)` to isolate over-dispersed laboratory series across multi-site compilations without MCMC.
+
+---
+
+### 6. Carbon-Box Misspecification vs Post-Spike Cosmic-Ray Ringdown
+**Notebook:** [`notebooks/v2/06_cbm_misspecification_and_gp_ringdown.ipynb`](https://github.com/SharmaLlama/ticktack/blob/main/notebooks/v2/06_cbm_misspecification_and_gp_ringdown.ipynb)
+
+Disentangles carbon-box model misspecification artefacts from genuine post-event solar modulation using `cbm_gp_fisher_spectrum`, `LinearizedDCTOperator`, `fit_subspace_cbm_gp`, `select_gp_kernel(..., optimize_cbm=True)`, and `ringdown_diagnostic` / `plot_ringdown_comparison`:
+
+- **Synthetic benchmark (`760–800 CE`, `5 NH + 3 SH`)**: Demonstrates GP-marginalized NH-only identifiability collapse ($d_{\mathrm{eff}} = 1.42$) versus NH + SH rescue ($d_{\mathrm{eff}} = 5.12$), shows how freezing a misspecified `Brehm21` (`m = 0`) creates spurious post-spike $Q_{\mathrm{field}}(t)$ ringdown and coherent NH/SH z-score residual dipoles, and verifies joint `SubspaceCBM(m = 5)` recovery via `fit_subspace_cbm_gp` with exact IS reweighting (`is_max_draws=None`) and an IS-weighted `ChainConsumer` `plot_corner` overlay.
+- **Real 32-series `774 CE` (`760–800 CE`) reanalysis**: Computes GP-marginalized vs white-noise Fisher spectra ($d_{\mathrm{eff}} = 1.21$ NH-only vs $4.23$ NH + SH), scans Laplace evidence across $m = 0\text{..}5$ (peaking at $m^\star = 4$, $\Delta\ln Z = +4.24\text{ nats}$, raw $\chi^2 / N = 1.06 \to 1.01$), runs `select_gp_kernel(..., optimize_spike=True, optimize_cbm=True, spike_priors=...)` ($\Delta\ln\mathcal{Z}_{\mathrm{hyper}} = +4.73\text{ nats}$, `sho_solar` weight `0.667`) and IS-weighted `fit_subspace_cbm_gp` NUTS at $m^\star = 4$, and shows via `plot_ringdown_comparison` that `SubspaceCBM` absorbs a modest symmetric uptake shift ($\alpha_3 \approx +1.4$, $\alpha_4 \approx -1.0$) while the post-774 CE `sho_solar` oscillation persists as genuine solar modulation.
 
 ---
 
