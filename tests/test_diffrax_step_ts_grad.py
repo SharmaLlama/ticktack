@@ -354,3 +354,122 @@ def test_triangular_gridded_spike_and_explicit_t0_override_grad() -> None:
     g_dfx = float(jax.jit(jax.grad(_t0_loss(dfx)))(t0_init))
     assert abs(g_ex) > 1e-3
     np.testing.assert_allclose(g_dfx, g_ex, rtol=1e-7, atol=1e-8)
+
+
+def test_y0_with_t0_none_and_onset_before_earliest_obs() -> None:
+    """When ``y0`` is supplied with ``t0=None``, ``y0`` is anchored at ``earliest_obs``."""
+    cbm = load_preset("Guttler15")
+    exact = ExactLinearSolver()
+    dfx = DiffraxSolver("Tsit5", rtol=1e-12, atol=1e-12)
+    y_ss = cbm.steady_state_c14()
+    y0 = y_ss * (1.0 + 0.05 * jnp.linspace(-1.0, 1.0, cbm.n_boxes))
+    t_late = jnp.array([774.5, 775.2, 776.4], dtype=jnp.float64)
+    t_starts = jnp.array([774.5, 775.5, 776.5], dtype=jnp.float64)
+    t_ends = jnp.array([775.0, 776.0, 777.0], dtype=jnp.float64)
+    p0 = jnp.array([774.40, 0.25, 5.5], dtype=jnp.float64)
+
+    for binned in (False, True):
+        jax.clear_caches()
+
+        def _make_loss(
+            solver: ExactLinearSolver | DiffraxSolver,
+            _binned: bool = binned,
+        ) -> Callable[[jax.Array], jax.Array]:
+            def _fn(params: jax.Array) -> jax.Array:
+                prod = MiyakeSpike(
+                    params[0], params[1], params[2], profile="supergaussian", exponent=10.0
+                )
+                if _binned:
+                    dy = solver.solve_delta_binned(cbm, prod, t_starts, t_ends, y0=y0)
+                else:
+                    dy = solver.solve_delta_trajectory(cbm, prod, t_late, y0=y0)
+                return jnp.sum(dy[:, 1] ** 2)
+
+            return _fn
+
+        f_ex = _make_loss(exact)
+        f_dfx = _make_loss(dfx)
+        np.testing.assert_allclose(float(f_dfx(p0)), float(f_ex(p0)), rtol=1e-9, atol=1e-9)
+        _assert_grad_matches(f_ex, f_dfx, p0, rtol_exact=1e-7, rtol_fd=1e-5, rtol_eager_jit=1e-8)
+
+
+def test_gridded_production_shift_grad_via_stopped_jump_ts() -> None:
+    """Shifted ``GriddedProduction.t_grid`` uses stopped ``jump_ts`` for accurate timing grads."""
+    dfx = DiffraxSolver("Tsit5", rtol=1e-12, atol=1e-12)
+    t_eval = jnp.array([773.8, 774.5, 775.2, 776.4], dtype=jnp.float64)
+    t_base = jnp.array([773.5, 774.40, 774.525, 774.65, 777.0], dtype=jnp.float64)
+    q_vals = DEFAULT_Q_STD + jnp.array([0.0, 0.0, 44.0, 0.0, 0.0], dtype=jnp.float64)
+
+    for cbm in (load_preset("Guttler15"), _make_near_degenerate_3box()):
+        jax.clear_caches()
+
+        def _loss(shift: jax.Array, _cbm: CarbonBoxModel = cbm) -> jax.Array:
+            prod = GriddedProduction(t_base + shift[0], q_vals)
+            return jnp.sum(dfx.solve_delta_trajectory(_cbm, prod, t_eval)[:, 1] ** 2)
+
+        s0 = jnp.array([0.0], dtype=jnp.float64)
+        g_fd = _central_fd_grad(jax.jit(_loss), s0)
+        g_eager = np.asarray(jax.grad(_loss)(s0), dtype=np.float64)
+        g_jit = np.asarray(jax.jit(jax.grad(_loss))(s0), dtype=np.float64)
+        np.testing.assert_allclose(g_eager, g_fd, rtol=1e-5, atol=1e-8)
+        np.testing.assert_allclose(g_jit, g_fd, rtol=1e-5, atol=1e-8)
+        np.testing.assert_allclose(g_eager, g_jit, rtol=1e-8, atol=1e-8)
+
+
+def test_boxcar_predict_d14c_onset_before_first_obs() -> None:
+    """Boxcar ``predict_d14c`` with spike onset before the first window stays accurate."""
+    cbm = load_preset("Guttler15")
+    exact = ExactLinearSolver()
+    t_starts = jnp.array([774.5, 775.5, 776.5], dtype=jnp.float64)
+    t_ends = jnp.array([775.0, 776.0, 777.0], dtype=jnp.float64)
+    p0 = jnp.array([774.40, 0.25, 5.5], dtype=jnp.float64)
+
+    def _make_loss(
+        solver: ExactLinearSolver | DiffraxSolver,
+    ) -> Callable[[jax.Array], jax.Array]:
+        def _fn(params: jax.Array) -> jax.Array:
+            prod = (
+                SteadyProduction(1.76)
+                + HarmonicSolar.from_polar(
+                    periods=11.0, amplitudes=0.25, phases=0.4, t_ref=774.0
+                )
+                + MiyakeSpike(params[0], params[1], params[2], profile="boxcar")
+            )
+            d14c = solver.predict_d14c(cbm, prod, t_starts, t_ends, box_indices=1)
+            return jnp.sum(d14c**2)
+
+        return _fn
+
+    f_ex = _make_loss(exact)
+    for method, tol, rtol_ex in (
+        ("Tsit5", 1e-10, 1e-4),
+        ("Kvaerno5", 1e-10, 2e-2),
+    ):
+        jax.clear_caches()
+        dfx = DiffraxSolver(method, rtol=tol, atol=tol)
+        _assert_grad_matches(
+            f_ex,
+            _make_loss(dfx),
+            p0,
+            rtol_exact=rtol_ex,
+            rtol_fd=1e-5,
+            rtol_eager_jit=1e-7,
+        )
+
+
+def test_gamma_k2_onset_jump_grad() -> None:
+    """``MiyakeSpike(profile='gamma', gamma_shape=2.0)`` resolves the ``u=0`` slope kink."""
+    cbm = load_preset("Guttler15")
+    exact = ExactLinearSolver()
+    dfx = DiffraxSolver("Tsit5", rtol=1e-12, atol=1e-12)
+    p0 = jnp.array([774.40, 0.25, 5.5], dtype=jnp.float64)
+    kw = {"profile": "gamma", "gamma_shape": 2.0}
+
+    _assert_grad_matches(
+        _make_spike_loss(cbm, exact, kw, binned=False),
+        _make_spike_loss(cbm, dfx, kw, binned=False),
+        p0,
+        rtol_exact=1e-7,
+        rtol_fd=1e-5,
+        rtol_eager_jit=1e-8,
+    )

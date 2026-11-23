@@ -1694,8 +1694,10 @@ def _collect_initial_time_and_events(
             if term.profile == "boxcar":
                 jump_list.extend([term.t_start, term.t_start + dur])
             elif term.profile == "gamma":
-                if term.gamma_shape <= 1.0:
-                    jump_list.append(term.t_start)
+                if term.gamma_shape == 2.0:
+                    # C^0 onset with finite slope jump at u=0; jump past t_start without
+                    # differentiating the mesh boundary.
+                    jump_list.append(jax.lax.stop_gradient(term.t_start))
                 else:
                     step_list.append(term.t_start)
                 for _, u_hi in panels[:-1]:
@@ -1710,7 +1712,9 @@ def _collect_initial_time_and_events(
             step_list.append(tr)
         elif isinstance(term, GriddedProduction):
             t0_candidates.append(term.t_grid[0])
-            step_list.append(term.t_grid)
+            # Piecewise-linear jnp.interp has slope kinks at t_grid knots; step past them
+            # via jump_ts with stopped gradients (continuous value -> zero Leibniz jump).
+            jump_list.append(jax.lax.stop_gradient(term.t_grid))
         elif isinstance(term, (LogGPProduction, GPProduction)) and term.domain is not None:
             t0_candidates.append(jnp.asarray(term.domain[0], dtype=jnp.float64))
 
@@ -1725,7 +1729,7 @@ def _collect_initial_time_and_events(
 
     t_end_int = jnp.maximum(jnp.reshape(latest_obs, ()), t_start_int + 1e-9)
     # Stop gradients on continuous step_ts (zero Leibniz boundary term), while
-    # keeping discontinuous jump_ts differentiable for boxcar/step-jump edges.
+    # keeping discontinuous jump_ts differentiable for boxcar edges.
     step_ts = _filter_event_timestamps(
         step_list, t_start_int, t_end_int, stop_grad=True
     )
@@ -1868,8 +1872,9 @@ class DiffraxSolver(AbstractSolver):
         y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
         terms = _unpack_terms(production)
 
+        eff_t0 = t_sorted[0] if (t0 is None and y0 is not None) else t0
         t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
-            terms, t_sorted[0], t_sorted[-1], t0
+            terms, t_sorted[0], t_sorted[-1], eff_t0
         )
         t_end_int = jnp.maximum(t_sorted[-1], t_start_int + 1e-9)
 
@@ -1935,8 +1940,9 @@ class DiffraxSolver(AbstractSolver):
         y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
         terms = _unpack_terms(production)
 
+        eff_t0 = ts_sorted[0] if (t0 is None and y0 is not None) else t0
         t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
-            terms, ts_sorted[0], ts_sorted[-1], t0
+            terms, ts_sorted[0], ts_sorted[-1], eff_t0
         )
         t_end_int = jnp.maximum(ts_sorted[-1], t_start_int + 1e-9)
 
@@ -2057,8 +2063,9 @@ class DiffraxSolver(AbstractSolver):
         y_base = y_ss * (1.0 + dg_arr / 1000.0)
         terms = _unpack_terms(production)
 
+        eff_t0 = ts_sorted[0] if (t0 is None and y0 is not None) else t0
         t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
-            terms, ts_sorted[0], ts_sorted[-1], t0
+            terms, ts_sorted[0], ts_sorted[-1], eff_t0
         )
         t_end_int = jnp.maximum(ts_sorted[-1], t_start_int + 1e-9)
 
@@ -2300,8 +2307,9 @@ class ModaxSolver(AbstractSolver):
         y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
         terms = _unpack_terms(production)
 
+        eff_t0 = t_sorted[0] if (t0 is None and y0 is not None) else t0
         t_start_int, _, _ = _collect_initial_time_and_events(
-            terms, t_sorted[0], t_sorted[-1], t0
+            terms, t_sorted[0], t_sorted[-1], eff_t0
         )
         t_end_int = jnp.maximum(t_sorted[-1], t_start_int + 1e-9)
 
