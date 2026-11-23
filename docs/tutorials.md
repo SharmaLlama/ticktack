@@ -49,7 +49,7 @@ Adapts [`virgil`](https://github.com/benjaminpope/virgil)'s Information Field Th
 
 - Demonstrates reflecting-boundary (orthonormal DCT-II) non-centred `GaussianField` synthesis across rough (`MaternSpectrum(order=1)`), smooth (`MaternSpectrum(order=2)`), and composite solar-modulated (`MaternSpectrum + QuasiPeriodicSpectrum`) priors driven by identical standardized excitations $z \sim \mathcal{N}(0, I_N)$.
 - Evaluates 2D MacKay marginal log-evidence landscapes (`evidence_grid` + `plot_evidence_grid`) on a multi-decade `760–800 CE` 774 CE compilation ($\sim 3.5$ Schwabe cycles, combining `775CE` with the longer repository records) alongside a spike profiled from a rough initial guess (`select_gp_kernel(..., optimize_spike=True)`), and ranks all eight canonical kernel families in `DEFAULT_CANDIDATE_KERNELS` – demonstrating why $\ge 2$ Schwabe cycles are required to select `"sho_solar"` (`QuasiPeriodicSpectrum`) over short-baseline aperiodic `"matern12"` solutions.
-- Applies MacKay's closed-form `error_scale` diagnostic (both global and `by_series=True`) to detect understated AMS measurement uncertainties and compares linear Wiener-filter `GaussianField` vs strictly positive Itô-corrected `LogGaussianField(..., ito_corrected=True)` reconstructions (`plot_field_draws`).
+- Applies MacKay's closed-form `error_scale` diagnostic (both global and `by_series=True`) to detect understated AMS measurement uncertainties and compares linear Wiener-filter `GaussianField` vs strictly positive Itô-corrected `LogGaussianField` (`ito_corrected=True` by default) reconstructions (`plot_field_draws`).
 
 ---
 

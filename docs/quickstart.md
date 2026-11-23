@@ -133,14 +133,13 @@ s_global = float(tt.error_scale(sel.best_result.fit, dataset))
 dataset_rescaled = dataset.with_error_scale(s_global)
 print(f"Global MacKay error_scale = {s_global:.3f}")
 
-# Strictly positive log-Gaussian IFT reconstruction with exact Ito mean correction E[Q(t)] = Q_std
+# Strictly positive log-Gaussian IFT reconstruction (ito_corrected=True by default so E[Q(t)] = Q_std)
 op = sel.best_result.fit.operator
 log_field = tt.LogGaussianField(
     jnp.zeros(op.n_grid),
     op.t_start,
     op.t_end,
     kernel=sel.best_kernel,
-    ito_corrected=True,
 )
 pos_fit = tt.fit_ift_field(tt.RadiocarbonModel(cbm_brehm, log_field), dataset_rescaled, operator=op)
 pos_draws = tt.laplace_samples(pos_fit, dataset_rescaled, n_samples=200, rng_key=jax.random.PRNGKey(42))
