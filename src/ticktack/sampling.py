@@ -1181,6 +1181,11 @@ class SubspaceGPFitResult(NamedTuple):
         """Kish effective sample size fraction ``ESS_IS / S`` when reweighted."""
         return self.diagnostics.get("kish_ess_ratio")
 
+    @property
+    def pareto_k(self) -> float | None:
+        """PSIS Pareto-``k`` tail shape diagnostic when reweighted."""
+        return self.diagnostics.get("pareto_k")
+
 
 def _pack_unconstrained_from_idata(
     idata: az.InferenceData,
@@ -1296,6 +1301,44 @@ def _thin_idata_for_is(
     return idata_sel, flat_idx, int(chain_idx.shape[0]), int(draw_idx.shape[0])
 
 
+def _compute_psis_pareto_k(log_w_2d: np.ndarray) -> float:
+    """Estimate PSIS Pareto-``k`` tail index of importance weights ``exp(log_w_2d)``.
+
+    ``arviz_stats.psislw`` follows the LOO convention and negates its input
+    internally (``-ary``), so passing ``-log_w_2d`` fits the generalized Pareto
+    tail to the right tail of ``exp(+log_w_2d)``.
+    """
+    arr = np.asarray(log_w_2d, dtype=np.float64)
+    if arr.ndim == 1:
+        arr = arr[None, :]
+    if np.any(np.isnan(arr)) or not np.any(np.isfinite(arr)):
+        return float("nan")
+    if np.any(np.isposinf(arr)):
+        return float("inf")
+    finite = arr[np.isfinite(arr)]
+    if float(np.ptp(finite)) <= np.finfo(np.float64).tiny:
+        return 0.0
+    if arr.size < 25:
+        return float("nan")
+    try:
+        _, khat_da = xr.DataArray(-arr, dims=("chain", "draw")).azstats.psislw()
+        return float(np.max(np.asarray(khat_da, dtype=np.float64)))
+    except ValueError:
+        return float("nan")
+
+
+def _warn_if_high_pareto_k(pareto_k: float, caller: str) -> None:
+    """Emit ``UserWarning`` when PSIS ``pareto_k > 0.7`` indicates heavy-tailed IS weights."""
+    if pareto_k > 0.7:
+        warnings.warn(
+            f"{caller} importance-sampling Pareto-k diagnostic is high "
+            f"(pareto_k={pareto_k:.3f} > 0.7); the surrogate posterior may be narrower "
+            "than the exact target, yielding heavy-tailed weights with infinite variance.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 def _summarize_is_weights(
     log_w_eval: np.ndarray,
     *,
@@ -1396,7 +1439,10 @@ def reweight_exact_marginal(
     w_is, kish_ess, kish_ess_ratio, log_z_corr, med_abs, max_abs = _summarize_is_weights(
         log_w_eval, center_for_spread=False
     )
-    idata_out = _attach_log_weight_is(idata_sel, log_w_eval.reshape(n_c_out, n_d_out))
+    log_w_2d = log_w_eval.reshape(n_c_out, n_d_out)
+    pareto_k = _compute_psis_pareto_k(log_w_2d)
+    _warn_if_high_pareto_k(pareto_k, "reweight_exact_marginal")
+    idata_out = _attach_log_weight_is(idata_sel, log_w_2d)
 
     diagnostics: dict[str, Any] = {
         "log_weight_is": log_w_eval,
@@ -1406,6 +1452,7 @@ def reweight_exact_marginal(
         "n_total": int(s_total),
         "kish_ess": kish_ess,
         "kish_ess_ratio": kish_ess_ratio,
+        "pareto_k": pareto_k,
         "median_abs_dlnL": med_abs,
         "max_abs_dlnL": max_abs,
         "log_z_correction": log_z_corr,
@@ -1413,7 +1460,123 @@ def reweight_exact_marginal(
     return idata_out, diagnostics
 
 
-def fit_subspace_cbm_gp(
+def _run_subspace_stage2_sampler(
+    sampler: str,
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    cfg_tan: LinearMarginalConfig,
+    map_result: MAPResult,
+    samp_key: jax.Array,
+    sigma_jitter: ArrayLike | None,
+    skw: dict[str, Any],
+) -> tuple[az.InferenceData, dict[str, Any], jax.Array | None, jax.Array | None]:  # shape-exempt(carbon): internal Stage-2 dispatch forwarding model/dataset/config/MAP state
+    """Run Stage-2 NUTS, SMC, or Laplace sampling under the MAP-centred tangent operator."""
+    extra_diag: dict[str, Any] = {}
+    if sampler == "nuts":
+        num_warmup = int(skw.pop("num_warmup", 200))
+        adapt_mm = skw.pop("adapt_mass_matrix", num_warmup >= 150)
+        for k_ignore in ("init_map", "init_u", "init_cov_u"):
+            skw.pop(k_ignore, None)
+        idata = sample_nuts(
+            model,
+            dataset,
+            parameter_space,
+            cfg_tan,
+            num_warmup=num_warmup,
+            init_map=False,
+            init_u=map_result.u_map,
+            init_cov_u=map_result.laplace_cov,
+            adapt_mass_matrix=bool(adapt_mm),
+            rng_key=samp_key,
+            sigma_jitter=sigma_jitter,
+            **skw,
+        )
+        return idata, extra_diag, None, None
+    if sampler == "smc":
+        smc_res = sample_smc(
+            model,
+            dataset,
+            parameter_space,
+            cfg_tan,
+            rng_key=samp_key,
+            sigma_jitter=sigma_jitter,
+            **skw,
+        )
+        extra_diag["smc_result"] = smc_res
+        extra_diag["log_evidence_tan"] = float(smc_res.log_evidence)
+        extra_diag["log_evidence_err"] = float(smc_res.log_evidence_err)
+        return smc_res.idata, extra_diag, None, None
+
+    num_samples = int(skw.pop("num_samples", 200))
+    d = parameter_space.n_params
+    cov_u = 0.5 * (map_result.laplace_cov + map_result.laplace_cov.T)
+    ev, evec = jnp.linalg.eigh(cov_u)
+    cov_spd = (evec * jnp.maximum(ev, 1e-12)[None, :]) @ evec.T
+    l_u = jnp.linalg.cholesky(0.5 * (cov_spd + cov_spd.T))
+    z_draw = jax.random.normal(samp_key, (1, num_samples, d), dtype=jnp.float64)
+    laplace_u_draws = map_result.u_map[None, None, :] + z_draw @ l_u.T
+    laplace_log_q = (
+        -0.5 * jnp.sum(jnp.square(z_draw), axis=-1)
+        - jnp.sum(jnp.log(jnp.diag(l_u)))
+        - 0.5 * float(d) * math.log(2.0 * math.pi)
+    )
+    post_dict = _unpack_constrained_samples(parameter_space, laplace_u_draws)
+    return az.from_dict({"posterior": post_dict}), extra_diag, laplace_u_draws, laplace_log_q
+
+
+def _reweight_laplace_draws(
+    idata: az.InferenceData,
+    laplace_u_draws: jax.Array,
+    laplace_log_q: jax.Array,
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    cfg_exact: LinearMarginalConfig,
+    *,
+    is_max_draws: int | None = None,
+    sigma_jitter: ArrayLike | None = None,
+) -> tuple[az.InferenceData, dict[str, Any]]:  # shape-exempt(carbon): internal Stage-3 Laplace IS evaluator matching reweight_exact_marginal
+    """Compute exact IS weights and PSIS Pareto-``k`` for Gaussian Laplace draws."""
+    n_c_lap, n_d_lap, d_lap = laplace_u_draws.shape
+    idata_sel, eval_idx, n_c_out, n_d_out = _thin_idata_for_is(
+        idata, n_c_lap, n_d_lap, is_max_draws
+    )
+    u_eval = laplace_u_draws.reshape(-1, d_lap)[eval_idx]
+    log_q_eval = laplace_log_q.reshape(-1)[eval_idx]
+    jit_arr = (
+        jnp.asarray(sigma_jitter, dtype=jnp.float64)
+        if sigma_jitter is not None
+        else None
+    )
+    ll_ex = _eval_marginal_ll_batch_jit(
+        u_eval, model, dataset, parameter_space, cfg_exact, jit_arr
+    )
+    lp_ex = _vmap_log_prior_jit(parameter_space, u_eval)
+    log_w_eval = np.asarray(ll_ex + lp_ex - log_q_eval, dtype=np.float64)
+    w_is, kish_ess, kish_ess_ratio, log_z_exact, med_abs, max_abs = (
+        _summarize_is_weights(log_w_eval, center_for_spread=True)
+    )
+    log_w_2d = log_w_eval.reshape(n_c_out, n_d_out)
+    pareto_k = _compute_psis_pareto_k(log_w_2d)
+    _warn_if_high_pareto_k(pareto_k, "fit_subspace_cbm_gp")
+    idata_out = _attach_log_weight_is(idata_sel, log_w_2d)
+    return idata_out, {
+        "log_weight_is": log_w_eval,
+        "weights_is": w_is,
+        "eval_indices": eval_idx,
+        "n_eval": int(eval_idx.shape[0]),
+        "n_total": int(n_c_lap * n_d_lap),
+        "kish_ess": kish_ess,
+        "kish_ess_ratio": kish_ess_ratio,
+        "pareto_k": pareto_k,
+        "median_abs_dlnL": med_abs,
+        "max_abs_dlnL": max_abs,
+        "log_evidence_exact": log_z_exact,
+    }
+
+
+def fit_subspace_cbm_gp(  # shape-exempt(carbon): public two-stage sampler accepting **sampler_kwargs passthrough
     model: RadiocarbonModel,
     dataset: Dataset,
     parameter_space: ParameterSpace,
@@ -1466,14 +1629,12 @@ def fit_subspace_cbm_gp(
     gf = field_terms[0]
 
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
-    key, map_key, samp_key = jax.random.split(key, 3)
-
+    _, map_key, samp_key = jax.random.split(key, 3)
     skw = dict(sampler_kwargs)
     map_method = skw.pop("map_method", "BFGS")
     map_max_steps = int(skw.pop("map_max_steps", 1000))
     map_tol = float(skw.pop("map_tol", 1e-6))
 
-    # --- Stage 1: Exact MAP + MAP-centred LinearizedDCTOperator + Laplace cov ---
     map_result = fit_map(
         model,
         dataset,
@@ -1507,18 +1668,10 @@ def fit_subspace_cbm_gp(
         template=gf.template,
     )
     cfg_tan = eqx.tree_at(
-        lambda c: c.dct_operator,
-        cfg_exact,
-        lin_op,
-        is_leaf=lambda x: x is None,
+        lambda c: c.dct_operator, cfg_exact, lin_op, is_leaf=lambda x: x is None
     )
     laplace_cov = _laplace_covariance(
-        map_result.u_map,
-        model,
-        dataset,
-        parameter_space,
-        cfg_tan,
-        sigma_jitter,
+        map_result.u_map, model, dataset, parameter_space, cfg_tan, sigma_jitter
     )
     map_result = map_result._replace(laplace_cov=laplace_cov)
 
@@ -1530,100 +1683,25 @@ def fit_subspace_cbm_gp(
         "map_log_likelihood": float(map_result.log_likelihood),
     }
 
-    # --- Stage 2: Sampling under MAP-centred tangent-linear operator ---
-    laplace_u_draws: jax.Array | None = None
-    laplace_log_q: jax.Array | None = None
-    if sampler == "nuts":
-        num_warmup = int(skw.pop("num_warmup", 200))
-        adapt_mm = skw.pop("adapt_mass_matrix", num_warmup >= 150)
-        skw.pop("init_map", None)
-        skw.pop("init_u", None)
-        skw.pop("init_cov_u", None)
-        idata = sample_nuts(
-            model,
-            dataset,
-            parameter_space,
-            cfg_tan,
-            num_warmup=num_warmup,
-            init_map=False,
-            init_u=map_result.u_map,
-            init_cov_u=map_result.laplace_cov,
-            adapt_mass_matrix=bool(adapt_mm),
-            rng_key=samp_key,
-            sigma_jitter=sigma_jitter,
-            **skw,
-        )
-    elif sampler == "smc":
-        smc_res = sample_smc(
-            model,
-            dataset,
-            parameter_space,
-            cfg_tan,
-            rng_key=samp_key,
-            sigma_jitter=sigma_jitter,
-            **skw,
-        )
-        idata = smc_res.idata
-        diagnostics["smc_result"] = smc_res
-        diagnostics["log_evidence_tan"] = float(smc_res.log_evidence)
-        diagnostics["log_evidence_err"] = float(smc_res.log_evidence_err)
-    else:
-        num_samples = int(skw.pop("num_samples", 200))
-        d = parameter_space.n_params
-        cov_u = 0.5 * (map_result.laplace_cov + map_result.laplace_cov.T)
-        ev, evec = jnp.linalg.eigh(cov_u)
-        cov_spd = (evec * jnp.maximum(ev, 1e-12)[None, :]) @ evec.T
-        L_u = jnp.linalg.cholesky(0.5 * (cov_spd + cov_spd.T))
-        z_draw = jax.random.normal(samp_key, (1, num_samples, d), dtype=jnp.float64)
-        laplace_u_draws = map_result.u_map[None, None, :] + z_draw @ L_u.T
-        log_det_l = jnp.sum(jnp.log(jnp.diag(L_u)))
-        laplace_log_q = (
-            -0.5 * jnp.sum(jnp.square(z_draw), axis=-1)
-            - log_det_l
-            - 0.5 * float(d) * math.log(2.0 * math.pi)
-        )
-        post_dict = _unpack_constrained_samples(parameter_space, laplace_u_draws)
-        idata = az.from_dict({"posterior": post_dict})
+    idata, stage2_diag, lap_u, lap_lq = _run_subspace_stage2_sampler(
+        sampler, model, dataset, parameter_space, cfg_tan, map_result, samp_key, sigma_jitter, skw
+    )
+    diagnostics.update(stage2_diag)
 
-    # --- Stage 3: Exact importance-sampling reweighting ---
     if reweight_exact:
         if sampler == "laplace":
-            assert laplace_u_draws is not None and laplace_log_q is not None
-            n_c_lap, n_d_lap, d_lap = laplace_u_draws.shape
-            idata_sel, eval_idx, n_c_out, n_d_out = _thin_idata_for_is(
-                idata, n_c_lap, n_d_lap, is_max_draws
+            assert lap_u is not None and lap_lq is not None
+            idata, is_diag = _reweight_laplace_draws(
+                idata,
+                lap_u,
+                lap_lq,
+                model,
+                dataset,
+                parameter_space,
+                cfg_exact,
+                is_max_draws=is_max_draws,
+                sigma_jitter=sigma_jitter,
             )
-            u_eval = laplace_u_draws.reshape(-1, d_lap)[eval_idx]
-            log_q_eval = laplace_log_q.reshape(-1)[eval_idx]
-            jit_arr = (
-                jnp.asarray(sigma_jitter, dtype=jnp.float64)
-                if sigma_jitter is not None
-                else None
-            )
-            ll_ex = _eval_marginal_ll_batch_jit(
-                u_eval, model, dataset, parameter_space, cfg_exact, jit_arr
-            )
-            lp_ex = _vmap_log_prior_jit(parameter_space, u_eval)
-            log_w_eval = np.asarray(ll_ex + lp_ex - log_q_eval, dtype=np.float64)
-            w_is, kish_ess, kish_ess_ratio, log_z_exact, med_abs, max_abs = (
-                _summarize_is_weights(log_w_eval, center_for_spread=True)
-            )
-            idata = _attach_log_weight_is(
-                idata_sel, log_w_eval.reshape(n_c_out, n_d_out)
-            )
-            is_diag: dict[str, Any] = {
-                "log_weight_is": log_w_eval,
-                "weights_is": w_is,
-                "eval_indices": eval_idx,
-                "n_eval": int(eval_idx.shape[0]),
-                "n_total": int(n_c_lap * n_d_lap),
-                "kish_ess": kish_ess,
-                "kish_ess_ratio": kish_ess_ratio,
-                "median_abs_dlnL": med_abs,
-                "max_abs_dlnL": max_abs,
-                "log_evidence_exact": log_z_exact,
-            }
-            diagnostics.update(is_diag)
         else:
             idata, is_diag = reweight_exact_marginal(
                 idata,
@@ -1635,12 +1713,11 @@ def fit_subspace_cbm_gp(
                 is_max_draws=is_max_draws,
                 sigma_jitter=sigma_jitter,
             )
-            diagnostics.update(is_diag)
             if sampler == "smc" and "log_evidence_tan" in diagnostics:
                 diagnostics["log_evidence_exact"] = (
-                    float(diagnostics["log_evidence_tan"])
-                    + float(is_diag["log_z_correction"])
+                    float(diagnostics["log_evidence_tan"]) + float(is_diag["log_z_correction"])
                 )
+        diagnostics.update(is_diag)
         if math.isfinite(is_diag["kish_ess_ratio"]) and is_diag["kish_ess_ratio"] < 0.85:
             warnings.warn(
                 f"fit_subspace_cbm_gp exact IS efficiency is low "

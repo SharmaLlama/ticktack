@@ -40,17 +40,14 @@ import optimistix as optx
 import zodiax as zdx
 from jax.typing import ArrayLike
 
-from .cbm import CarbonBoxModel, SubspaceCBM
+from .cbm import CarbonBoxModel
 from .data import Dataset
 from .fields import (
     DCTResponseOperator,
     GaussianField,
     LinearizedDCTOperator,
     LogGaussianField,
-    _compute_cbm_digest,
-    _compute_dataset_digest,
-    _compute_subspace_basis_digest,
-    _compute_template_digest,
+    _build_field_cov_columns,
     _field_prehistory_root_y0,
     _safe_sqrt,
     build_dct_response_operator,
@@ -440,8 +437,8 @@ class LinearMarginalConfig(eqx.Module):
             "hierarchical", "per_series", "shared", "none"
         ] = "hierarchical",
         global_prior_mean: float = 0.0,
-        global_prior_sd: float = 200.0,
-        lab_prior_sd: float = 1.5,
+        global_prior_sd: float | None = 200.0,
+        lab_prior_sd: float | None = 1.5,
         solar_prior_sd: float = 1.0,
         trend_prior_sd: float = 5.0,
         marginalise_solar: bool | None = None,
@@ -492,8 +489,10 @@ class LinearMarginalConfig(eqx.Module):
         )
         self.offset_mode = str(offset_mode)
         self.global_prior_mean = float(global_prior_mean)
-        self.global_prior_sd = float(global_prior_sd)
-        self.lab_prior_sd = float(lab_prior_sd)
+        self.global_prior_sd = (
+            math.inf if global_prior_sd is None else float(global_prior_sd)
+        )
+        self.lab_prior_sd = math.inf if lab_prior_sd is None else float(lab_prior_sd)
         self.solar_prior_sd = float(solar_prior_sd)
         self.trend_prior_sd = float(trend_prior_sd)
         self.marginalise_solar = bool(eff_solar)
@@ -870,120 +869,34 @@ def _build_marginal_design_with_projections(
                     )
                 )
 
-    # 5. Marginalized GaussianField reflecting-boundary DCT-II columns
+    # 5. Marginalized GaussianField reflecting-boundary DCT-II + pre-history columns
     field_init_roots: list[jax.Array | None] = []
     if field_terms and n_tot > 0:
         for gf in field_terms:
-            op_cfg = cfg.dct_operator
-            if isinstance(op_cfg, LinearizedDCTOperator):
-                if not isinstance(cbm, SubspaceCBM):
-                    raise TypeError(
-                        "LinearMarginalConfig.dct_operator is a LinearizedDCTOperator, "
-                        f"which requires model.cbm to be a SubspaceCBM; got {type(cbm).__name__}."
-                    )
-                if op_cfg.w_ref.shape != (n_tot, gf.n_grid) or (
-                    abs(op_cfg.t_start - gf.t_start) > 1e-9
-                    or abs(op_cfg.t_end - gf.t_end) > 1e-9
-                ):
-                    raise ValueError(
-                        "LinearizedDCTOperator geometry "
-                        f"(shape={op_cfg.w_ref.shape}, [{op_cfg.t_start}, {op_cfg.t_end}]) "
-                        f"does not match dataset/GaussianField "
-                        f"(shape=({n_tot}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
-                    )
-                if op_cfg.dataset_digest:
-                    ds_dig = _compute_dataset_digest(cbm, dataset)
-                    if ds_dig and ds_dig != op_cfg.dataset_digest:
-                        raise ValueError(
-                            "LinearizedDCTOperator dataset_digest does not match dataset."
-                        )
-                if op_cfg.template_digest:
-                    tmpl_dig = _compute_template_digest(gf.template)
-                    if tmpl_dig and tmpl_dig != op_cfg.template_digest:
-                        raise ValueError(
-                            "LinearizedDCTOperator template_digest does not match GaussianField.template."
-                        )
-                if op_cfg.subspace_basis_digest:
-                    basis_dig = _compute_subspace_basis_digest(cbm)
-                    if basis_dig != op_cfg.subspace_basis_digest:
-                        raise ValueError(
-                            "LinearizedDCTOperator subspace_basis_digest does not match model.cbm."
-                        )
-                w_dct_gf = op_cfg.evaluate_w_dct(cbm.alpha)
-            elif isinstance(op_cfg, DCTResponseOperator):
-                if op_cfg.w_dct.shape != (n_tot, gf.n_grid) or (
-                    abs(op_cfg.t_start - gf.t_start) > 1e-9
-                    or abs(op_cfg.t_end - gf.t_end) > 1e-9
-                ):
-                    raise ValueError(
-                        "DCTResponseOperator geometry "
-                        f"(shape={op_cfg.w_dct.shape}, [{op_cfg.t_start}, {op_cfg.t_end}]) "
-                        f"does not match dataset/GaussianField "
-                        f"(shape=({n_tot}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
-                    )
-                if op_cfg.dataset_digest:
-                    ds_dig = _compute_dataset_digest(cbm, dataset)
-                    if ds_dig and ds_dig != op_cfg.dataset_digest:
-                        raise ValueError(
-                            "DCTResponseOperator dataset_digest does not match dataset."
-                        )
-                if op_cfg.template_digest:
-                    tmpl_dig = _compute_template_digest(gf.template)
-                    if tmpl_dig and tmpl_dig != op_cfg.template_digest:
-                        raise ValueError(
-                            "DCTResponseOperator template_digest does not match GaussianField.template."
-                        )
-                cur_cbm_dig = _compute_cbm_digest(cbm)
-                if cur_cbm_dig == "" or (
-                    op_cfg.cbm_digest != "" and cur_cbm_dig != op_cfg.cbm_digest
-                ):
-                    op_gf = build_dct_response_operator(
-                        cbm,
-                        dataset,
-                        t_start=gf.t_start,
-                        t_end=gf.t_end,
-                        n_grid=gf.n_grid,
-                        q_std=model.q_std,
-                        alpha_unit=model.alpha_unit,
-                        template=gf.template,
-                    )
-                    w_dct_gf = op_gf.w_dct
-                else:
-                    w_dct_gf = op_cfg.w_dct
-            else:
-                op_gf = build_dct_response_operator(
-                    cbm,
-                    dataset,
-                    t_start=gf.t_start,
-                    t_end=gf.t_end,
-                    n_grid=gf.n_grid,
-                    q_std=model.q_std,
-                    alpha_unit=model.alpha_unit,
-                    template=gf.template,
-                )
-                w_dct_gf = op_gf.w_dct
-            H_gf = w_dct_gf * _safe_sqrt(gf.power_spectrum())[None, :]
-            design_cols.append(H_gf)
-            pmean_parts.append(jnp.zeros((gf.n_grid,), dtype=jnp.float64))
-            psd_parts.append(jnp.ones((gf.n_grid,), dtype=jnp.float64))
-            if cfg.include_field_initial_cov:
-                root_y0_gf = _field_prehistory_root_y0(cbm, model.alpha_unit, gf)
-                H_init = op_gf.init_state_basis @ root_y0_gf
-                m_rank = H_init.shape[1]
-                init_start = sum(c.shape[1] for c in design_cols)
-                design_cols.append(H_init)
-                pmean_parts.append(jnp.zeros((m_rank,), dtype=jnp.float64))
-                psd_parts.append(jnp.ones((m_rank,), dtype=jnp.float64))
+            col_start = sum(c.shape[1] for c in design_cols)
+            h_block, root_y0_gf = _build_field_cov_columns(
+                cbm,
+                dataset,
+                gf,
+                cfg.dct_operator,
+                q_std=model.q_std,
+                alpha_unit=model.alpha_unit,
+                include_field_initial_cov=cfg.include_field_initial_cov,
+            )
+            n_cols = h_block.shape[1]
+            design_cols.append(h_block)
+            pmean_parts.append(jnp.zeros((n_cols,), dtype=jnp.float64))
+            psd_parts.append(jnp.ones((n_cols,), dtype=jnp.float64))
+            if root_y0_gf is not None:
+                init_start = col_start + gf.n_grid
                 init_state_blocks.append(
                     (
-                        slice(init_start, init_start + m_rank),
+                        slice(init_start, n_cols + col_start),
                         root_y0_gf,
                         jnp.asarray(gf.t_start, dtype=jnp.float64),
                     )
                 )
-                field_init_roots.append(root_y0_gf)
-            else:
-                field_init_roots.append(None)
+            field_init_roots.append(root_y0_gf)
 
     if design_cols:
         X = jnp.concatenate(design_cols, axis=1)
