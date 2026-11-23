@@ -56,7 +56,7 @@ $$
 $$
 
 !!! warning "Preserving the Inter-Hemispheric $\Delta^{14}\text{C}$ Gradient"
-    In two-hemisphere models such as `Brehm21`, upwelling of $^{14}\text{C}$-depleted circumpolar deep water in the Southern Ocean depresses Southern Hemisphere tropospheric $^{14}\text{C}/^{12}\text{C}$ relative to the Northern Hemisphere by **$\approx 4.38\text{‰}$** in steady state ([Hogg et al. 2020](https://doi.org/10.1017/RDC.2020.59); [Brehm et al. 2021](https://doi.org/10.1038/s41561-020-00674-0)). Normalizing each hemisphere separately to its own steady-state box inventory ($y_c(t)/y_{c,\text{ss}} - 1$, as in `ticktack 1.x`) artificially erases this $4.38\text{‰}$ NH–SH offset!
+    In two-hemisphere models such as `Brehm21`, upwelling of $^{14}\text{C}$-depleted circumpolar deep water in the Southern Ocean depresses Southern Hemisphere tropospheric $^{14}\text{C}/^{12}\text{C}$ relative to the Northern Hemisphere by **$\approx 4.38\text{‰}$** in steady state ([Hogg et al. 2020](https://doi.org/10.1017/RDC.2020.59); [Brehm et al. 2021](https://doi.org/10.1038/s41561-020-00674-0)). Normalizing each hemisphere separately to its own steady-state box inventory ($y_c(t)/y_{c,\text{ss}} - 1$, as in `ticktack 1.x`) artificially erases this $4.38\text{‰}$ NH–SH offset.
 
 `ticktack 2.0` defines a **single global tropospheric reference specific activity** $R_{\text{ref}}$ (`CarbonBoxModel.reference_specific_activity`) as the mass-weighted steady-state mean over all tropospheric boxes $\mathcal{T}$:
 
@@ -80,7 +80,7 @@ $$
 \Delta^{14}\text{C}_{\text{pred},s}(Y) = \mathcal{B}_{\text{season},s}\!\left[\Delta^{14}\text{C}_{c(s)}\right](Y) + \Delta_{\text{global}}\,r_{c(s)} + \delta_{\text{lab},s}.
 $$
 
-In `LinearMarginalConfig(offset_mode="hierarchical")`, `ticktack 2.0` places independent Gaussian priors $\Delta_{\text{global}} \sim \mathcal{N}(\mu_{\text{global}}, \sigma_{\text{global}}^2)$ (default $\sigma_{\text{global}} = 200\text{‰}$) and $\delta_{\text{lab},s} \sim \mathcal{N}(0, \sigma_{\text{lab}}^2)$ (default $\sigma_{\text{lab}} = 1.5\text{‰}$) and marginalizes all $S + 1$ offset parameters analytically – completely replacing the biased `ticktack 1.x` practice of clamping the model baseline to the sample mean of the first four rings (`mean(y[:4])`).
+In `LinearMarginalConfig(offset_mode="hierarchical")`, `ticktack 2.0` places independent Gaussian priors $\Delta_{\text{global}} \sim \mathcal{N}(\mu_{\text{global}}, \sigma_{\text{global}}^2)$ (default $\sigma_{\text{global}} = 200\text{‰}$) and $\delta_{\text{lab},s} \sim \mathcal{N}(0, \sigma_{\text{lab}}^2)$ (default $\sigma_{\text{lab}} = 1.5\text{‰}$) and marginalizes all $S + 1$ offset parameters analytically, replacing the biased `ticktack 1.x` practice of clamping the model baseline to the sample mean of the first four rings (`mean(y[:4])`).
 
 ### `relative_to="standard"` vs `"ambient"` Yield Conventions
 
@@ -95,7 +95,7 @@ Literature studies report Miyake-event cosmic-ray fluences either in absolute ph
   $$
   \tau_{q_0,\text{epoch}} = \frac{\text{fluence}}{Q_{\text{std}}\,(1 + \Delta_0 / 1000)}\;\text{yr}.
   $$
-  For mid-Holocene events such as 5259 BCE or 5410 BCE ($\Delta_0 \approx +70\text{ to }+90\text{‰}$), pre-industrial and epoch-local $q_0\text{-years}$ differ by nearly $8$–$9\%$! Always report $\mathcal{F}_{\text{phys}}$ in $\text{atoms cm}^{-2}$ alongside the explicit $q_0$ reference convention.
+  For mid-Holocene events such as 5259 BCE or 5410 BCE ($\Delta_0 \approx +70\text{ to }+90\text{‰}$), pre-industrial and epoch-local $q_0\text{-years}$ differ by nearly $8$–$9\%$. Always report $\mathcal{F}_{\text{phys}}$ in $\text{atoms cm}^{-2}$ alongside the explicit $q_0$ reference convention.
 
 ### Non-Autonomous Suess Dilution via $M_c(t)$
 
@@ -116,7 +116,7 @@ All internal solver grids, spike onset times (`t_start`), and growth windows in 
 | `"historical_bce"` | **No** (`ValueError` on `0`) | $t_{\text{CE}} = \begin{cases} Y, & Y > 0 \\ Y + 1, & Y < 0 \end{cases}$ | `Y = -5259` ($5259\text{ BCE}$) $\mapsto -5258.0$ |
 
 !!! danger "The 1-Year Historical BCE Trap"
-    Published BCE CSV tables frequently encode $660\text{ BCE}$ as `-660` or $5259\text{ BCE}$ as `-5259` under traditional Dionysian BC/AD numbering, which jumps directly from `1 BCE` (`-1`) to `1 CE` (`+1`) with no year zero. Passing negative historical BCE labels without `calendar="historical_bce"` shifts every BCE ring and inferred spike onset by **exactly 1.0 year** relative to astronomical ephemerides and `cal BP` ice-core chronologies!
+    Published BCE CSV tables frequently encode $660\text{ BCE}$ as `-660` or $5259\text{ BCE}$ as `-5259` under traditional Dionysian BC/AD numbering, which jumps directly from `1 BCE` (`-1`) to `1 CE` (`+1`) with no year zero. Passing negative historical BCE labels without `calendar="historical_bce"` shifts every BCE ring and inferred spike onset by **exactly 1.0 year** relative to astronomical ephemerides and `cal BP` ice-core chronologies.
 
 ### Boreal vs Austral Growth Seasons & Schulman Dating
 
@@ -131,7 +131,7 @@ In the **Northern Hemisphere** (`hemisphere="north"`), cambial growth falls enti
 In the **Southern Hemisphere** (`hemisphere="south"`), Austral summer growth spans New Year's Day (typically October through March or September through February). Two incompatible ring-labelling conventions coexist in the radiocarbon literature:
 
 1. **`year_convention="schulman_start"`** ([Schulman 1956](https://ltrr.arizona.edu/)): Assigns an Austral ring to the calendar year in which growth **begins** (October of $Y$ through March of $Y + 1$, offsets $[+0.75, +1.25]$). Used in `Büntgen18_TAS01.csv` and `993AD-S`, where the 774 CE event jumps between ring labels `773` and `774`.
-2. **`year_convention="end_year"`**: Assigns an Austral ring to the calendar year in which growth **completes** (October of $Y - 1$ through March of $Y$, offsets $[-0.25, +0.25]$, or $[-4/12, +2/12]$ for `"september-february"`). Used in `Guttler15_Kauri.csv` (`775AD-early-S`), where the 774 CE event jumps between ring labels `774` and `775` – representing the **exact same physical Austral summer ($774.67$–$775.17\text{ CE}$)** as Schulman year `774`!
+2. **`year_convention="end_year"`**: Assigns an Austral ring to the calendar year in which growth **completes** (October of $Y - 1$ through March of $Y$, offsets $[-0.25, +0.25]$, or $[-4/12, +2/12]$ for `"september-february"`). Used in `Guttler15_Kauri.csv` (`775AD-early-S`), where the 774 CE event jumps between ring labels `774` and `775` – representing the **same physical Austral summer ($774.67$–$775.17\text{ CE}$)** as Schulman year `774`.
 3. **`year_convention="explicit_bounds"`**: Supplies exact per-ring `[t_starts, t_ends]` columns in astronomical CE directly (used for custom sub-annual micro-sliced wood records).
 
 To prevent silent $1\text{-year}$ inter-hemispheric timing artefacts (`ticktack 1.x` treated all Southern Hemisphere CSVs uniformly without distinguishing `schulman_start` from `end_year`), `parse_growth_season_bounds` and `TreeRingSeries` raise a `ValueError` whenever a cross-New-Year season is constructed without an explicit `year_convention`. Arbitrary $M$-bin sub-annual photosynthesis density profiles (e.g. 12 monthly weights) are supported via `SeasonalWeights.from_subannual_weights(...)`.

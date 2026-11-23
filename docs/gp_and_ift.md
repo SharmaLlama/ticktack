@@ -40,12 +40,12 @@ where $\phi_j(t) = L^{-1/2}\sin\!\big(\omega_j(t - t_{\text{centre}} + L)\big)$ 
   $$
   Q(t) = Q_{\text{std}}\,\exp\!\left(f(t) - \frac{1}{2}\sigma_f^2(t)\right),
   $$
-  where the point-wise basis variance $\sigma_f^2(t) = \sum_{j=1}^M S(\omega_j)\,\phi_j(t)^2$ provides the exact Itô mean correction $\mathbb{E}[Q(t)] = Q_{\text{std}}$ everywhere on the domain. Fit nonlinearly with `fit_svi` (`AutoMultivariateNormal`) or `sample_nuts` while analytically marginalizing laboratory offsets!
+  where the point-wise basis variance $\sigma_f^2(t) = \sum_{j=1}^M S(\omega_j)\,\phi_j(t)^2$ provides the exact Itô mean correction $\mathbb{E}[Q(t)] = Q_{\text{std}}$ everywhere on the domain. Fit nonlinearly with `fit_svi` (`AutoMultivariateNormal`) or `sample_nuts` while analytically marginalizing laboratory offsets.
 - **Canonical Observable POD (`canonical_pod_modes`)**: Because the carbon-box operator acts as a strong low-pass filter, many high-frequency GP modes produce negligible $\Delta^{14}\text{C}$ variance. Singular-value decomposition of the noise-whitened projected basis $\Sigma_n^{-1/2} H_{\text{GP}}$ compresses $M$ prior modes down to the $r \ll M$ orthogonal observable trajectories that actually reach tree-ring precision.
 
 ### Stationary Pre-History Reservoir Covariance via 24-Step Smith Doubling
 
-A subtle physical boundary condition arises at the start $t_0$ of any finite reconstruction window: cosmic-ray production has been fluctuating for millennia *before* $t_0$, so the ocean–biosphere–atmosphere state perturbation $\delta\mathbf{y}(t_0)$ is not zero – it is drawn from a correlated stationary Gaussian distribution $\mathcal{N}(\mathbf{0}, \Sigma_{y,0})$! Neglecting $\Sigma_{y,0}$ ("cold-starting" the GP at $t_0$) pinches credible bands artificially at the left edge of the dataset.
+A subtle physical boundary condition arises at the start $t_0$ of any finite reconstruction window: cosmic-ray production has been fluctuating for millennia *before* $t_0$, so the ocean–biosphere–atmosphere state perturbation $\delta\mathbf{y}(t_0)$ is not zero – it is drawn from a correlated stationary Gaussian distribution $\mathcal{N}(\mathbf{0}, \Sigma_{y,0})$. Neglecting $\Sigma_{y,0}$ ("cold-starting" the GP at $t_0$) pinches credible bands artificially at the left edge of the dataset.
 
 For any state-space GP (`tinygp.kernels.quasisep`) with Markov generator $(F_{\text{gp}}, L_{\text{gp}}, Q_c, H_{\text{gp}})$, coupling the GP state $\mathbf{x}(t)$ into the CBM yields the joint linear stochastic differential equation
 
@@ -64,7 +64,7 @@ $$
 P_{k+1} = P_k + \Phi_k P_k \Phi_k^\top, \qquad \Phi_{k+1} = \Phi_k^2,
 $$
 
-accumulating exact stationary pre-history covariance over $0.25 \times 2^{24} \approx 4.19 \times 10^6\text{ years}$ ($\gg 8267\text{ yr}$ $^{14}\text{C}$ mean life) in 24 tiny matrix multiplications (`include_gp_initial_cov=True` by default on `LinearMarginalConfig`).
+accumulating the stationary pre-history covariance over $0.25 \times 2^{24} \approx 4.19 \times 10^6\text{ years}$ ($\gg 8267\text{ yr}$ $^{14}\text{C}$ mean life) in 24 tiny matrix multiplications (`include_gp_initial_cov=True` by default on `LinearMarginalConfig`).
 
 For long annual records where $\mathcal{O}(N)$ state-space complexity is preferred over modal bases, `kalman_gp_marginal` integrates the augmented CBM+GP system directly with a stabilized Joseph-form Kalman filter.
 
@@ -138,12 +138,13 @@ via safeguarded Newton–bisection yields the noise scale `error_scale(fit, data
 - **`optimize_gp_kernel(cbm, dataset, kernel, ...)`**: Maximizes $\ln Z(\mathbf{d} \mid \boldsymbol{\phi}) + \ln p(\boldsymbol{\phi})$ via multi-start BFGS over a precomputed `DCTResponseOperator`, returning `OptimizedKernelResult` with the Laplace hyper-evidence $\ln \mathcal{Z}_{\text{hyper}} = \ln Z(\mathbf{d} \mid \widehat{\boldsymbol{\phi}}) + \ln p(\widehat{\boldsymbol{\phi}}) + \tfrac{d_\phi}{2}\ln(2\pi) - \tfrac{1}{2}\ln\det H_\phi$.
 - **`select_gp_kernel(cbm, dataset, ...)`**: Optimizes all eight canonical IFT / GP spectral families in `DEFAULT_CANDIDATE_KERNELS` (`"matern12"`, `"matern32"`, `"matern52"`, `"squared_exp"`, `"continuous_matern"`, `"sho_solar"`, `"matern32_plus_solar"`, `"correlated_field"`) sharing one precomputed operator and ranks them by Laplace hyper-evidence $\ln \mathcal{Z}_{\text{hyper}}$ (`KernelSelectionResult`, formatted via `sel.format_table()`).
 
-#### Temporal Baseline Requirements for Solar-Cycle Kernel Selection
+#### Temporal Baseline and Coverage Effects in 774 CE Kernel Selection
 
-Detecting quasi-periodic 11-year Schwabe modulation (`"sho_solar"`, backed by `QuasiPeriodicSpectrum`) by empirical Bayes requires a temporal baseline spanning at least two Schwabe cycles ($\ge 2$ cycles, $\gtrsim 20\text{--}35\text{ yr}$):
+Comparing quasi-periodic (`"sho_solar"`, backed by `QuasiPeriodicSpectrum`) against aperiodic kernels by empirical Bayes is sensitive to temporal baseline and uneven series coverage:
 
-- **Short single-event windows ($< 1$ Schwabe cycle)**: On `load_bundled_event("775CE")` alone, 27 of 28 COSMIC series span only `770.5–780.5 CE` (and none extend before `760 CE`). Without multi-cycle pre- and post-event leverage to separate oscillatory period and quality factor from slow baseline drift, `select_gp_kernel` favours a low-amplitude, short-timescale aperiodic `"matern12"` kernel ($\sigma \approx 0.05$) that shrinks smoothly back toward $Q_{\text{std}}$ prior to 770 CE.
-- **Multi-decade compilations ($\ge 2$ Schwabe cycles)**: Combining `775CE` with the multi-decade repository records (`notebooks/775CE/Miyake12_Cedar.csv`, `Rakowski15_Oak.csv`, `Jull14_Bristlecone.csv`, and `Guttler15_Kauri.csv`, spanning `760–800 CE` or $\sim 3.5$ solar cycles) alongside a MAP-profiled Miyake spike supplies multiple solar maxima and minima, allowing `select_gp_kernel` to select `"sho_solar"` ($P \approx 10\text{--}11\text{ yr}$) decisively over aperiodic `"matern12"` solutions.
+- **Bundled `775CE` compilation (`28` series, `313` rings, `760.25–781.25 CE`)**: `27` of `28` COSMIC series span only `770–780 CE` (with only `Büntgen18_GER01` extending back to `760 CE`). Without multi-decade leverage to separate an oscillatory period and quality factor from slow baseline drift, `select_gp_kernel` favours a low-amplitude aperiodic `"matern12"` kernel ($\sigma \approx 0.05$) that reverts toward $Q_{\text{std}}$ before 770 CE.
+- **Extended multi-decade `775CE` compilation (`32` series, `432` rings, `760–800 CE`)**: Combining `load_bundled_event("775CE")` with four longer repository records (`notebooks/miyake12.csv`, `notebooks/775CE/Rakowski15_Oak.csv`, `Jull14_Bristlecone.csv`, and `Guttler15_Kauri.csv`) alongside a MAP-profiled Miyake spike ranks `"sho_solar"` ($P \approx 9.9\text{ yr}$) first with modest Laplace hyper-evidence ($\Delta\ln\mathcal{Z}_{\text{hyper}} = +1.43$ over `"squared_exp"` and $+1.44$ over `"matern12"`, weight `0.43`).
+- **Limits of interpretation (post-774 CE oscillation)**: These results do **not** establish that the post-774 CE oscillation is genuine solar modulation. Only two narrower points are shown: (1) the apparent pre-/post-774 CE amplitude contrast is a sampling coverage artefact (only `4` of the `32` series — `3` supplemental records plus `Büntgen18_GER01` — have rings before `770 CE`, and `3` extend to `760–764 CE`, whereas all `32` overlap after `770 CE`), and (2) the post-774 CE oscillation survives when floating four `Brehm21` carbon-box modes. A direct test of whether the oscillation reflects stationary solar modulation or a post-spike amplitude change would compare a stationary kernel against a non-stationary kernel whose amplitude changes at the 774 CE spike.
 
 ---
 
