@@ -4,7 +4,7 @@ Contributions to `ticktack` — bug fixes, new carbon-cycle presets, audited rad
 
 ## Scope
 
-`ticktack` provides fast, exact, differentiable linear and non-autonomous carbon box modelling and Bayesian inference for tree-ring and atmospheric $\Delta^{14}\text{C}$ time series in JAX. Contributions within this scope (published carbon-box topologies, cosmogenic production parameterizations, Gaussian-process / Information Field Theory spectral priors, calibrated radiocarbon datasets, and numerical tests) fit naturally; coupled general circulation or nonlinear biogeochemical Earth-system models lie outside the scope of the package.
+`ticktack` provides fast, differentiable linear and non-autonomous carbon box modelling and Bayesian inference for tree-ring and atmospheric $\Delta^{14}\text{C}$ time series in JAX. Contributions within this scope (published carbon-box topologies, cosmogenic production parametrizations, Gaussian-process / Information Field Theory spectral priors, calibrated radiocarbon datasets, and numerical tests) fit naturally; coupled general circulation or nonlinear biogeochemical Earth-system models lie outside the scope of the package.
 
 ## Development Setup
 

@@ -168,10 +168,35 @@ def _git_show_text(repo_root: Path, ref: str, rel_path: str) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
+def _git_merge_base(repo_root: Path, base_ref: str) -> str:
+    proc = subprocess.run(
+        ["git", "merge-base", base_ref, "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git merge-base against {base_ref} failed: {proc.stderr.strip()}")
+    return proc.stdout.strip()
+
+
+def _git_head_commit_body(repo_root: Path) -> str:
+    proc = subprocess.run(
+        ["git", "log", "-1", "--format=%B"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.stdout if proc.returncode == 0 else ""
+
+
 def count_pr_changed_src_lines(repo_root: Path, base_ref: str) -> tuple[int, list[str]]:
     """Count changed AST code lines (added + removed) under ``src/ticktack/`` against ``base_ref``."""
+    merge_base = _git_merge_base(repo_root, base_ref)
     proc = subprocess.run(
-        ["git", "diff", "-U0", "--no-renames", f"{base_ref}...HEAD", "--", "src/ticktack"],
+        ["git", "diff", "-U0", "--no-renames", f"{merge_base}..HEAD", "--", "src/ticktack"],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -191,7 +216,7 @@ def count_pr_changed_src_lines(repo_root: Path, base_ref: str) -> tuple[int, lis
         if head_file.exists() and added:
             total_changed += len(added & code_line_numbers(head_file.read_text(encoding="utf-8")))
         if removed:
-            base_src = _git_show_text(repo_root, base_ref, rel_path)
+            base_src = _git_show_text(repo_root, merge_base, rel_path)
             if base_src is not None:
                 total_changed += len(removed & code_line_numbers(base_src))
     return total_changed, touched_py
@@ -227,10 +252,13 @@ def _check_pr_scope(
     return failures
 
 
-def _load_pr_body(pr_body_file: Path | None) -> str:
+def _load_pr_body(repo_root: Path, pr_body_file: Path | None) -> str:
     if pr_body_file is not None and pr_body_file.exists():
         return pr_body_file.read_text(encoding="utf-8")
-    return os.environ.get("PR_BODY", "")
+    env_body = os.environ.get("PR_BODY", "")
+    if env_body.strip():
+        return env_body
+    return _git_head_commit_body(repo_root)
 
 
 def check_ratchets(
@@ -297,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
     opts = RatchetOptions(
         ruff_bin=args.ruff_bin,
         base_ref=args.base_ref,
-        pr_body=_load_pr_body(args.pr_body_file),
+        pr_body=_load_pr_body(args.repo_root, args.pr_body_file),
         fail_on_pr_size=args.fail_on_pr_size,
     )
     return check_ratchets(repo_root=args.repo_root, config_path=config_path, options=opts)

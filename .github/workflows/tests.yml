@@ -2,7 +2,12 @@ name: integration
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -34,6 +39,7 @@ jobs:
 
       - name: Run CI ratchets (complexity & line budget)
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.base_ref }}
         run: |
@@ -41,6 +47,10 @@ jobs:
             git fetch origin "$BASE_REF"
             python .github/scripts/check_ratchets.py --base-ref "origin/$BASE_REF"
           else
+            if [ -z "$PR_BODY" ]; then
+              PR_BODY=$(gh pr list -R "${{ github.repository }}" --state merged --search "${{ github.sha }}" --limit 1 --json body --jq '.[0].body // ""' 2>/dev/null || true)
+              export PR_BODY
+            fi
             python .github/scripts/check_ratchets.py
           fi
 

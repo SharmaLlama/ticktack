@@ -207,6 +207,38 @@ def test_count_pr_changed_src_lines_ignores_docstrings_and_comments(tmp_path: Pa
     assert changed == 3
     assert touched == ["src/ticktack/sample.py"]
 
+    # Advance `main` with a 10-line module docstring in the same file; merge-base diff must stay 3
+    _git("checkout", "main")
+    mod.write_text('"""' + "\n".join(["doc"] * 10) + '\n"""\nx = 1\ny = 2\n', encoding="utf-8")
+    _git("add", ".")
+    _git("commit", "-m", "advance main")
+    _git("checkout", "feature")
+
+    changed_diverged, touched_diverged = check_ratchets.count_pr_changed_src_lines(tmp_path, "main")
+    assert changed_diverged == 3
+    assert touched_diverged == ["src/ticktack/sample.py"]
+
+
+def test_load_pr_body_falls_back_to_head_commit_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When PR_BODY is unset (e.g. push on main), fall back to HEAD commit message."""
+    import subprocess
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    _git("init", "-b", "main")
+    _git("config", "user.name", "Test")
+    _git("config", "user.email", "test@example.com")
+    (tmp_path / "README.md").write_text("hi\n", encoding="utf-8")
+    _git("add", ".")
+    _git("commit", "-m", "feat: add guard\n\nLine-budget-reason: Required for Gate 2.")
+
+    monkeypatch.delenv("PR_BODY", raising=False)
+    body = check_ratchets._load_pr_body(tmp_path, None)
+    assert check_ratchets.extract_line_budget_reason(body) == "Required for Gate 2."
+
 
 def test_repo_ratchets_config_matches_baseline() -> None:
     """Verify `.github/ci_ratchets.json` schema and baseline line count on the repo."""

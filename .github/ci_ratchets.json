@@ -18,5 +18,5 @@
     "src/ticktack/linear.py",
     "src/ticktack/solvers.py"
   ],
-  "min_coverage_percent": 83
+  "min_coverage_percent": 84
 }
