@@ -294,7 +294,7 @@ def _make_numpyro_model(
     return numpyro_model
 
 
-def sample_nuts(
+def sample_nuts(  # shape-exempt(carbon): public NUTS sampler adding Laplace mass-matrix warm-start keyword options
     model: RadiocarbonModel,
     dataset: Dataset,
     parameter_space: ParameterSpace,

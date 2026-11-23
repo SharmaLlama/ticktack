@@ -1216,7 +1216,7 @@ def _phi123_scalar(z: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
 
 
 @eqx.filter_jit
-def _compute_dct_operator_jit(
+def _compute_dct_operator_jit(  # shape-exempt(carbon): core JIT operator kernel adding static cbm_digest cache tag
     cbm: CarbonBoxModel,
     q_std: jax.Array,
     alpha_unit: jax.Array,
@@ -1519,16 +1519,7 @@ def build_dct_response_operator(
     ):
         q_val = float(q_np.reshape(()))
         a_val = float(a_np.reshape(()))
-        cache_key = (
-            cbm_digest,
-            ds_digest,
-            tmpl_digest,
-            t0,
-            t1,
-            n_g,
-            q_val,
-            a_val,
-        )
+        cache_key = (cbm_digest, ds_digest, tmpl_digest, t0, t1, n_g, q_val, a_val)
         cached = _DCT_OPERATOR_CACHE.get(cache_key)
         if cached is not None:
             _DCT_OPERATOR_CACHE.move_to_end(cache_key)
@@ -1541,16 +1532,8 @@ def build_dct_response_operator(
                 cbm,
                 jnp.asarray(q_val, dtype=jnp.float64).reshape(()),
                 jnp.asarray(a_val, dtype=jnp.float64).reshape(()),
-                t0,
-                t1,
-                n_g,
-                flat_s,
-                flat_e,
-                specs,
-                tmpl_arr,
-                ds_digest,
-                tmpl_digest,
-                cbm_digest,
+                t0, t1, n_g, flat_s, flat_e, specs, tmpl_arr,
+                ds_digest, tmpl_digest, cbm_digest,
             )
         if not any(
             isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(op)
@@ -1701,7 +1684,7 @@ class LinearizedDCTOperator(zdx.Base):
     template_digest: str = eqx.field(static=True)
     subspace_basis_digest: str = eqx.field(static=True)
 
-    def __init__(
+    def __init__(  # shape-exempt(carbon): PyTree constructor exposing explicit keyword fields for LinearizedDCTOperator
         self,
         alpha_ref: ArrayLike,
         w_ref: ArrayLike,
@@ -1794,7 +1777,7 @@ class LinearizedDCTOperator(zdx.Base):
         )
 
 
-def build_linearized_dct_operator(
+def build_linearized_dct_operator(  # shape-exempt(carbon): public operator builder matching build_dct_response_operator keyword signature
     subspace_cbm: SubspaceCBM,
     dataset: Dataset | TreeRingSeries,
     *,
@@ -6067,21 +6050,15 @@ def _cbm_kern_nll_vg(
     return jax.value_and_grad(_nll, argnums=(0, 1, 2))(dyn_k, alpha, sp_u)
 
 
-def _build_cbm_kernel_eval_vg(
+def _make_cbm_nll_context(
     spec: _CBMKernelOptSpec,
     lin_op0: LinearizedDCTOperator,
     spike_ref: MiyakeSpike | None,
     spike_name: str | None,
     has_spike: bool,
     opt_full_spike: bool,
-    sp_prior_mu_vec: jax.Array,
-    sp_prior_sd_vec: jax.Array,
-) -> Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]]:
-    """Build module-JIT-cached joint negative log-hyper-posterior + gradient evaluator."""
-    n_k = int(spec.phi0.shape[0])
-    m_modes = int(spec.cbm.n_modes)
-    cbm_sd_f = float(spec.cbm_prior_sd)
-    _, static_k = eqx.partition(spec.build_kernel_fn(spec.phi0), eqx.is_inexact_array)
+) -> _CBMNLLContext:
+    """Assemble static/array ``_CBMNLLContext`` for ``_cbm_kern_nll_vg``."""
     box_indices_flat = jnp.array(
         [
             int(spec.cbm.box_index(s.box_name, hemisphere=s.hemisphere))
@@ -6107,7 +6084,7 @@ def _build_cbm_kernel_eval_vg(
         raise ValueError(
             f"offset_mode must be 'hierarchical' or 'none', got {spec.offset_mode!r}."
         )
-    ctx = _CBMNLLContext(
+    return _CBMNLLContext(
         cbm_template=spec.cbm,
         ds=spec.ds,
         extra_production=spec.extra_production,
@@ -6127,6 +6104,26 @@ def _build_cbm_kernel_eval_vg(
         n_g=lin_op0.n_grid,
         t0=lin_op0.t_start,
         t1=lin_op0.t_end,
+    )
+
+
+def _build_cbm_kernel_eval_vg(
+    spec: _CBMKernelOptSpec,
+    lin_op0: LinearizedDCTOperator,
+    spike_ref: MiyakeSpike | None,
+    spike_name: str | None,
+    has_spike: bool,
+    opt_full_spike: bool,
+    sp_prior_mu_vec: jax.Array,
+    sp_prior_sd_vec: jax.Array,
+) -> Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]]:
+    """Build module-JIT-cached joint negative log-hyper-posterior + gradient evaluator."""
+    n_k = int(spec.phi0.shape[0])
+    m_modes = int(spec.cbm.n_modes)
+    cbm_sd_f = float(spec.cbm_prior_sd)
+    _, static_k = eqx.partition(spec.build_kernel_fn(spec.phi0), eqx.is_inexact_array)
+    ctx = _make_cbm_nll_context(
+        spec, lin_op0, spike_ref, spike_name, has_spike, opt_full_spike
     )
     prior_vg_fn = jax.jit(jax.value_and_grad(spec.prior_fn))
 
@@ -6208,19 +6205,18 @@ def _run_cbm_kernel_bfgs(
     return best_x, best_conv
 
 
-def _finalize_cbm_kernel_laplace(
+def _fit_exact_wiener_at_cbm_opt(
     spec: _CBMKernelOptSpec,
-    best_u_np: np.ndarray,
     active_lin_op: LinearizedDCTOperator,
-    eval_vg: Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]],
-    converged: bool,
-    spike_meta: tuple[MiyakeSpike | None, str | None, bool, bool, jax.Array, jax.Array],
-) -> OptimizedKernelResult:
-    """Evaluate exact Wiener fit and Laplace hyper-evidence at the CBM+kernel MAP."""
-    spike_ref, spike_name, has_spike, opt_full_spike, sp_mu_vec, sp_sd_vec = spike_meta
+    u_opt: jax.Array,
+    spike_ref: MiyakeSpike | None,
+    spike_name: str | None,
+    has_spike: bool,
+    opt_full_spike: bool,
+) -> tuple[SpectralKernel, SubspaceCBM, IFTFieldFitResult, jax.Array, jax.Array]:
+    """Build exact ``DCTResponseOperator`` and Wiener ``fit_ift_field`` at ``u_opt``."""
     n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
     n_g, t0, t1 = active_lin_op.n_grid, active_lin_op.t_start, active_lin_op.t_end
-    u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
     phi_opt = u_opt[:n_k]
     alpha_opt = u_opt[n_k : n_k + m_modes]
     kern_opt = spec.build_kernel_fn(phi_opt)
@@ -6259,6 +6255,24 @@ def _finalize_cbm_kernel_laplace(
         operator=op_opt,
         prehistory_kernel=spec.prehistory_kernel,
         include_field_initial_cov=spec.include_field_initial_cov,
+    )
+    return kern_opt, cbm_opt, fit_res, phi_opt, alpha_opt
+
+
+def _finalize_cbm_kernel_laplace(
+    spec: _CBMKernelOptSpec,
+    best_u_np: np.ndarray,
+    active_lin_op: LinearizedDCTOperator,
+    eval_vg: Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]],
+    converged: bool,
+    spike_meta: tuple[MiyakeSpike | None, str | None, bool, bool, jax.Array, jax.Array],
+) -> OptimizedKernelResult:
+    """Evaluate exact Wiener fit and Laplace hyper-evidence at the CBM+kernel MAP."""
+    spike_ref, spike_name, has_spike, opt_full_spike, sp_mu_vec, sp_sd_vec = spike_meta
+    n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
+    u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
+    kern_opt, cbm_opt, fit_res, phi_opt, alpha_opt = _fit_exact_wiener_at_cbm_opt(
+        spec, active_lin_op, u_opt, spike_ref, spike_name, has_spike, opt_full_spike
     )
     ln_z_val, gamma_val = fit_res.log_evidence, fit_res.gamma
 
@@ -6398,7 +6412,7 @@ def _optimize_single_kernel_with_cbm(
     )
 
 
-def optimize_gp_kernel(
+def optimize_gp_kernel(  # shape-exempt(carbon): public kernel optimizer adding optimize_cbm and cbm_prior_sd keyword options
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
     kernel: str | SpectralKernel = "matern32",
@@ -6661,7 +6675,7 @@ class KernelSelectionResult(zdx.Base):
         return self.format_table()
 
 
-def select_gp_kernel(
+def select_gp_kernel(  # shape-exempt(carbon): public kernel selector adding optimize_cbm and cbm_prior_sd keyword options
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
     candidates: Sequence[str | SpectralKernel] | Mapping[str, str | SpectralKernel] | None = None,

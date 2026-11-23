@@ -430,7 +430,7 @@ class LinearMarginalConfig(eqx.Module):
     whiten_method: str = eqx.field(static=True)
     dct_operator: DCTResponseOperator | LinearizedDCTOperator | None
 
-    def __init__(
+    def __init__(  # shape-exempt(carbon): config constructor adding dct_operator keyword option
         self,
         *,
         offset_mode: Literal[

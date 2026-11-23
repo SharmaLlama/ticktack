@@ -1123,7 +1123,10 @@ def test_item1_tangent_and_cached_operator_init_state_basis() -> None:
     eye2 = jnp.eye(2, dtype=jnp.float64)
     g_tan_fd = np.array(
         [
-            float(_ll_alpha(alpha_ref + eps_fd * eye2[i], cfg_tan) - _ll_alpha(alpha_ref - eps_fd * eye2[i], cfg_tan))
+            float(
+                _ll_alpha(alpha_ref + eps_fd * eye2[i], cfg_tan)
+                - _ll_alpha(alpha_ref - eps_fd * eye2[i], cfg_tan)
+            )
             / (2.0 * eps_fd)
             for i in range(2)
         ]
@@ -1134,17 +1137,10 @@ def test_item1_tangent_and_cached_operator_init_state_basis() -> None:
 
     # End-to-end fit_subspace_cbm_gp with default config (marginal_config=None)
     ps = tt.ParameterSpace(
-        mod_ref,
-        [tt.ParamSpec("cbm.alpha", bijector="identity", prior_mean=0.0, prior_sd=1.0)],
+        mod_ref, [tt.ParamSpec("cbm.alpha", bijector="identity", prior_mean=0.0, prior_sd=1.0)]
     )
     fit_default = tt.fit_subspace_cbm_gp(
-        mod_ref,
-        ds,
-        ps,
-        sampler="laplace",
-        reweight_exact=True,
-        num_samples=30,
-        rng_key=jax.random.PRNGKey(5),
+        mod_ref, ds, ps, sampler="laplace", reweight_exact=True, num_samples=30, rng_key=jax.random.PRNGKey(5)
     )
     assert np.all(np.isfinite(np.asarray(fit_default.idata.sample_stats["log_weight_is"])))
 
@@ -1295,46 +1291,29 @@ def test_item2_optimize_cbm_prehistory_evidence_comparability() -> None:
         atol=2e-3,
     )
 
-    # Also verify m=2 SubspaceCBM honors include_field_initial_cov=False vs True
-    opt_sub2_inc = tt.optimize_gp_kernel(
-        cbm_sub,
-        ds,
-        kernel="matern32",
-        extra_production=spike,
-        optimize_spike=False,
-        optimize_cbm=True,
-        include_field_initial_cov=True,
-        multi_start=1,
-        n_grid=gf.n_grid,
-        pad_years=pad_yr,
-    )
-    direct_inc = tt.fit_ift_field(
-        opt_sub2_inc.fit.model, ds, offset_mode="hierarchical", include_field_initial_cov=True
-    )
-    np.testing.assert_allclose(
-        float(opt_sub2_inc.log_evidence), float(direct_inc.log_evidence), rtol=1e-10, atol=1e-10
-    )
-    opt_sub2_no_inc = tt.optimize_gp_kernel(
-        cbm_sub,
-        ds,
-        kernel="matern32",
-        extra_production=spike,
-        optimize_spike=False,
-        optimize_cbm=True,
-        include_field_initial_cov=False,
-        multi_start=1,
-        n_grid=gf.n_grid,
-        pad_years=pad_yr,
-    )
-    direct_no_inc = tt.fit_ift_field(
-        opt_sub2_no_inc.fit.model, ds, offset_mode="hierarchical", include_field_initial_cov=False
-    )
-    np.testing.assert_allclose(
-        float(opt_sub2_no_inc.log_evidence),
-        float(direct_no_inc.log_evidence),
-        rtol=1e-10,
-        atol=1e-10,
-    )
+    # Also verify m=2 SubspaceCBM honours include_field_initial_cov=False vs True
+    for inc_init in (True, False):
+        opt_sub2 = tt.optimize_gp_kernel(
+            cbm_sub,
+            ds,
+            kernel="matern32",
+            extra_production=spike,
+            optimize_spike=False,
+            optimize_cbm=True,
+            include_field_initial_cov=inc_init,
+            multi_start=1,
+            n_grid=gf.n_grid,
+            pad_years=pad_yr,
+        )
+        direct_sub2 = tt.fit_ift_field(
+            opt_sub2.fit.model,
+            ds,
+            offset_mode="hierarchical",
+            include_field_initial_cov=inc_init,
+        )
+        np.testing.assert_allclose(
+            float(opt_sub2.log_evidence), float(direct_sub2.log_evidence), rtol=1e-10, atol=1e-10
+        )
 
 
 def _dense_reml_slepian_bangs_oracle(

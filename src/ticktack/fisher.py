@@ -1475,6 +1475,36 @@ def _resolve_gp_fisher_model_and_cfg(
     return stoch_prod, cfg_cov
 
 
+def _compute_reml_factors(
+    ds: Any,
+    x_0: jax.Array,
+    ps_0: jax.Array,
+    fin_idx: jax.Array,
+    inf_idx: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compute QR square-root covariance factor and orthonormal uninformative basis."""
+    h_cov_0 = (
+        x_0[:, fin_idx] * ps_0[None, fin_idx]
+        if fin_idx.size > 0
+        else jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
+    )
+    if fin_idx.size > 0:
+        aug_0 = jnp.concatenate([jnp.diag(ds.sigma_flat), h_cov_0.T], axis=0)
+        chol_eff = jnp.linalg.qr(aug_0, mode="r").T
+    else:
+        chol_eff = jnp.diag(ds.sigma_flat)
+
+    if inf_idx.size > 0:
+        v_uninf = jsl.solve_triangular(chol_eff, x_0[:, inf_idx], lower=True)
+        u_u, s_u, _ = jnp.linalg.svd(v_uninf, full_matrices=False)
+        s_np = onp.asarray(s_u, dtype=onp.float64)
+        tol_u = 1e-12 * max(float(onp.max(s_np)) if s_np.size else 0.0, 1.0)
+        q_uninf = u_u[:, jnp.asarray(onp.flatnonzero(s_np > tol_u), dtype=jnp.int32)]
+    else:
+        q_uninf = jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
+    return h_cov_0, chol_eff, q_uninf
+
+
 def _build_reml_whitening_and_sb(
     cbm: Any,
     ds: Any,
@@ -1507,27 +1537,9 @@ def _build_reml_whitening_and_sb(
     mean_idx = jnp.asarray(
         onp.flatnonzero(onp.isfinite(ps_np) & (pm_np != 0.0)), dtype=jnp.int32
     )
-
-    h_cov_0 = (
-        x_0[:, fin_idx] * ps_0[None, fin_idx]
-        if fin_idx.size > 0
-        else jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
+    h_cov_0, chol_eff, q_uninf = _compute_reml_factors(
+        ds, x_0, ps_0, fin_idx, inf_idx
     )
-    if fin_idx.size > 0:
-        aug_0 = jnp.concatenate([jnp.diag(ds.sigma_flat), h_cov_0.T], axis=0)
-        r_aug = jnp.linalg.qr(aug_0, mode="r")
-        chol_eff = r_aug.T
-    else:
-        chol_eff = jnp.diag(ds.sigma_flat)
-
-    if inf_idx.size > 0:
-        v_uninf = jsl.solve_triangular(chol_eff, x_0[:, inf_idx], lower=True)
-        u_u, s_u, _ = jnp.linalg.svd(v_uninf, full_matrices=False)
-        s_np = onp.asarray(s_u, dtype=onp.float64)
-        tol_u = 1e-12 * max(float(onp.max(s_np)) if s_np.size else 0.0, 1.0)
-        q_uninf = u_u[:, jnp.asarray(onp.flatnonzero(s_np > tol_u), dtype=jnp.int32)]
-    else:
-        q_uninf = jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
 
     def _whiten_reml(arr: jax.Array) -> jax.Array:
         w = jsl.solve_triangular(chol_eff, arr, lower=True)
@@ -1622,7 +1634,7 @@ def cbm_gp_fisher_spectrum(  # shape-exempt(carbon): public Fisher entry point p
     ``O(N^2)`` tensors, then nonlinear :class:`~ticktack.production.MiyakeSpike` tangents
     (and any uninformative infinite-variance offset columns) are projected out via the
     stabilized QR Schur complement inside :func:`cbm_fisher_spectrum`. Setting
-    ``include_covariance_fisher=False`` selects the faster mean-only Gauss--Newton
+    ``include_covariance_fisher=False`` selects the mean-only Gauss--Newton
     approximation with ``Sigma_eff`` frozen at the reference ``cbm``. The returned
     :class:`FisherSpectrumResult` can be passed directly to
     :meth:`~ticktack.cbm.SubspaceCBM.from_fisher`.
