@@ -2,11 +2,65 @@ name: integration
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+concurrency:
+  group: integration-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   build:
     name: test-ticktack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install ticktack and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run ruff
+        run: ruff check src tests .github/scripts
+
+      - name: Run CI ratchets (complexity & line budget)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            git fetch origin "$BASE_REF"
+            python .github/scripts/check_ratchets.py --base-ref "origin/$BASE_REF"
+          else
+            if [ -z "$PR_BODY" ]; then
+              PR_BODY=$(gh pr list -R "${{ github.repository }}" --state merged --search "${{ github.sha }}" --limit 1 --json body --jq '.[0].body // ""' 2>/dev/null || true)
+              export PR_BODY
+            fi
+            python .github/scripts/check_ratchets.py
+          fi
+
+      - name: Run pytest with coverage floor
+        run: |
+          COV_FLOOR=$(python .github/scripts/check_ratchets.py --print-coverage-floor)
+          pytest tests/ --cov=ticktack --cov-report=term-missing --cov-fail-under="$COV_FLOOR"
+
+  notebooks:
+    name: execute-docs-notebooks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -16,14 +70,45 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
 
       - name: Install ticktack and dev dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
-      - name: Run ruff
-        run: ruff check src tests
+      - name: Execute fast docs example notebooks
+        run: python .github/scripts/run_notebooks.py
 
-      - name: Run pytest
-        run: pytest tests/
+  trial-merge:
+    name: trial-merge-overlapping-prs
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install ticktack and dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Trial-merge overlapping open PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          git fetch origin "$BASE_REF"
+          python .github/scripts/trial_merge.py \
+            --repo "${{ github.repository }}" \
+            --pr-number "$PR_NUMBER" \
+            --base-ref "$BASE_REF"
