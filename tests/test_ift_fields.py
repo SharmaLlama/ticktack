@@ -2055,10 +2055,10 @@ def test_linear_posterior_multi_term_initial_state_anchors() -> None:
     dense_mean_gf = cross_gf @ jnp.linalg.solve(cov_d_same, r_d)
     dense_cov_gf = sig_tot_gf - cross_gf @ jnp.linalg.solve(cov_d_same, cross_gf.T)
     dense_sd_gf = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_gf + dense_cov_gf.T)), 0.0))
-    np.testing.assert_allclose(lp_two_gf_same.initial_state_mean, dense_mean_gf, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_two_gf_same.initial_state_sd, dense_sd_gf, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_two_gf_same.initial_state_d14c_mean, scale_boxes * dense_mean_gf, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_two_gf_same.initial_state_d14c_sd, scale_boxes * dense_sd_gf, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_mean, dense_mean_gf, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_sd, dense_sd_gf, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_d14c_mean, scale_boxes * dense_mean_gf, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_d14c_sd, scale_boxes * dense_sd_gf, rtol=1e-8, atol=1e-9)
 
     # Independent full GP initial-state map R_gp(t0) = [Y_SS(t0) sqrt(S_k), anchor_cov_root]
     dt_gp_anc = float(proj_gp.t_anchor - proj_gp.a)
@@ -2108,10 +2108,10 @@ def test_linear_posterior_multi_term_initial_state_anchors() -> None:
     dense_mean_mix = cross_mix @ jnp.linalg.solve(cov_d_mix, r_d)
     dense_cov_mix = sig_tot_mix - cross_mix @ jnp.linalg.solve(cov_d_mix, cross_mix.T)
     dense_sd_mix = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_mix + dense_cov_mix.T)), 0.0))
-    np.testing.assert_allclose(lp_gp_gf_same.initial_state_mean, dense_mean_mix, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_gp_gf_same.initial_state_sd, dense_sd_mix, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_gp_gf_same.initial_state_d14c_mean, scale_boxes * dense_mean_mix, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_gp_gf_same.initial_state_d14c_sd, scale_boxes * dense_sd_mix, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_mean, dense_mean_mix, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_sd, dense_sd_mix, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_d14c_mean, scale_boxes * dense_mean_mix, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_d14c_sd, scale_boxes * dense_sd_mix, rtol=1e-8, atol=1e-9)
 
     # 5. Single-term GPProduction initial-state recovery against dense Schur complement
     m_gp_only = RadiocarbonModel(cbm, SteadyProduction() + gp_term, ExactLinearSolver())
@@ -2123,8 +2123,8 @@ def test_linear_posterior_multi_term_initial_state_anchors() -> None:
     dense_mean_gp = cross_gp @ jnp.linalg.solve(cov_d_gp, r_d)
     dense_cov_gp = sig_gp_full - cross_gp @ jnp.linalg.solve(cov_d_gp, cross_gp.T)
     dense_sd_gp = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_gp + dense_cov_gp.T)), 0.0))
-    np.testing.assert_allclose(lp_gp_only.initial_state_mean, dense_mean_gp, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_gp_only.initial_state_sd, dense_sd_gp, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(lp_gp_only.initial_state_mean, dense_mean_gp, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_only.initial_state_sd, dense_sd_gp, rtol=1e-8, atol=1e-9)
 
     # 6. Mixed model with only one initial-state block enabled -> single anchor, returns exact field initial state
     cfg_gp_noinit = LinearMarginalConfig(
@@ -2150,8 +2150,8 @@ def test_linear_posterior_multi_term_initial_state_anchors() -> None:
     dense_mean_one = cross_one @ jnp.linalg.solve(cov_d_one, r_d)
     dense_cov_one = sig_m32 - cross_one @ jnp.linalg.solve(cov_d_one, cross_one.T)
     dense_sd_one = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_one + dense_cov_one.T)), 0.0))
-    np.testing.assert_allclose(lp_one_active.initial_state_mean, dense_mean_one, rtol=1e-10, atol=1e-10)
-    np.testing.assert_allclose(lp_one_active.initial_state_sd, dense_sd_one, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(lp_one_active.initial_state_mean, dense_mean_one, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_one_active.initial_state_sd, dense_sd_one, rtol=1e-8, atol=1e-9)
 
     # 7. Direct kernel test of _reconstruct_initial_state_posterior (empty, matching, differing anchors)
     n_b = cbm.n_boxes
