@@ -250,6 +250,8 @@ def test_repo_ratchets_config_matches_baseline() -> None:
         "max_complexity_violations",
         "max_src_code_lines",
         "max_pr_changed_src_lines",
+        "max_function_code_lines",
+        "max_function_params",
         "claude_review_line_threshold",
         "claude_review_modules",
         "min_coverage_percent",
@@ -283,3 +285,171 @@ def test_ci_scripts_obey_function_shape_limits() -> None:
                 params.append(args.kwarg.arg)
             assert n_code <= 80, f"{script.name}:{node.name} has {n_code} code lines (>80)"
             assert len(params) <= 8, f"{script.name}:{node.name} has {len(params)} params (>8)"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "coupled 4-box RK4 loop shares 9 intermediate state arrays",
+        "Schur-complement Kalman recursion shares Cholesky factors across steps",
+        "JAX lax.scan carry binds flux, reservoir state, and Jacobian tangents",
+        "mirrors scipy.optimize.minimize public API signature  # noqa: PLR0913",
+    ],
+)
+def test_validate_shape_exemption_reason_accepts_specific_technical_reasons(reason: str) -> None:
+    assert check_ratchets.validate_shape_exemption_reason(reason) is None
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        None,
+        "",
+        "N/A",
+        "<specific reason>",
+        "[todo]",
+        "readability",
+        "clarity",
+        "helper",
+        "keep together",
+        "short rk4 loop",
+        "for better readability and clarity",
+        "keep this helper function together",
+        "easier to read and keep logic together",
+        "too many parameters approved by carbon",
+        "readability of solver",
+    ],
+)
+def test_validate_shape_exemption_reason_rejects_short_or_vacuous(reason: str | None) -> None:
+    assert check_ratchets.validate_shape_exemption_reason(reason) is not None
+
+
+def test_extract_shape_exemptions_placements_and_ignores_strings() -> None:
+    sample = (
+        '"""Docs mentioning # shape-exempt(carbon): readability are ignored."""\n'
+        "\n"
+        "# shape-exempt(carbon): coupled 4-box RK4 loop shares 9 intermediate arrays\n"
+        "def above_def(a, b, c, d, e, f, g, h, i):\n"
+        "    return a\n"
+        "\n"
+        "def inline_def(\n"
+        "    a, b, c, d, e, f, g, h, i,\n"
+        "):  # shape-exempt(carbon): Schur-complement Kalman recursion shares Cholesky factors\n"
+        "    return a\n"
+        "\n"
+        "def inside_after_doc(a, b, c, d, e, f, g, h, i):\n"
+        '    """Docstring."""\n'
+        "    # shape-exempt(carbon): JAX lax.scan carry binds flux and reservoir tangents\n"
+        "    return a\n"
+        "\n"
+        "def outer():\n"
+        '    """Outer doc."""\n'
+        "    # shape-exempt(carbon): inner kernel binds 9 coupled ODE state vectors\n"
+        "    def inner(a, b, c, d, e, f, g, h, i):\n"
+        "        return a\n"
+        "    return inner\n"
+    )
+    exempt, errors = check_ratchets.extract_shape_exemptions(sample, filename="sample.py")
+    assert errors == []
+    # def lines: above_def=4, inline_def=7, inside_after_doc=12, inner=20 (outer=17 NOT exempt)
+    assert set(exempt.keys()) == {4, 7, 12, 20}
+
+
+def test_extract_shape_exemptions_rejects_misplaced_and_vacuous() -> None:
+    sample = (
+        "# shape-exempt(carbon): module level comment not attached to any function\n"
+        "X = 1\n"
+        "\n"
+        "def bad_vacuous(a, b, c, d, e, f, g, h, i):\n"
+        "    # shape-exempt(carbon): keep this helper function together\n"
+        "    return a\n"
+        "\n"
+        "def bad_buried(a):\n"
+        "    x = a + 1\n"
+        "    # shape-exempt(carbon): coupled 4-box RK4 loop shares 9 intermediate arrays\n"
+        "    return x\n"
+    )
+    exempt, errors = check_ratchets.extract_shape_exemptions(sample, filename="bad.py")
+    assert exempt == {}
+    assert len(errors) == 3
+    assert any("must be placed on" in e for e in errors)
+    assert any("vacuous or non-specific" in e for e in errors)
+
+
+def test_check_changed_function_shapes_enforces_limits_and_carbon_exemptions(
+    tmp_path: Path,
+) -> None:
+    """Verify new/edited function shape limits, self/cls exclusion, and Carbon exemptions."""
+    import subprocess
+
+    def _git(*args: str) -> None:
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True)
+
+    _git("init", "-b", "main")
+    _git("config", "user.name", "Test")
+    _git("config", "user.email", "test@example.com")
+    pkg = tmp_path / "src" / "ticktack"
+    pkg.mkdir(parents=True)
+    mod = pkg / "kernel.py"
+    # Pre-existing legacy oversized function on main must not block unrelated edits
+    mod.write_text(
+        "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
+        "    return a + j\n",
+        encoding="utf-8",
+    )
+    _git("add", ".")
+    _git("commit", "-m", "base")
+
+    _git("checkout", "-b", "feature")
+    # Method with self + 8 args passes; unexempted 9-arg function fails
+    mod.write_text(
+        "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
+        "    return a + j\n"
+        "\n"
+        "class Ok:\n"
+        "    def method(self, a, b, c, d, e, f, g, h):\n"
+        "        return a + h\n"
+        "\n"
+        "def too_many(a, b, c, d, e, f, g, h, i):\n"
+        "    return a + i\n",
+        encoding="utf-8",
+    )
+    _git("add", ".")
+    _git("commit", "-m", "add wide function")
+
+    errs = check_ratchets.check_changed_function_shapes(tmp_path, "main")
+    assert len(errs) == 1
+    assert "too_many" in errs[0]
+    assert "legacy_wide" not in errs[0]
+
+    # Vacuous Carbon exemption still fails both exemption validation and shape check
+    mod.write_text(
+        "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
+        "    return a + j\n"
+        "\n"
+        "# shape-exempt(carbon): keep together for readability\n"
+        "def too_many(a, b, c, d, e, f, g, h, i):\n"
+        "    return a + i\n",
+        encoding="utf-8",
+    )
+    _git("add", ".")
+    _git("commit", "-m", "vacuous exemption")
+    assert len(check_ratchets.check_shape_exemptions(pkg)) == 1
+    assert len(check_ratchets.check_changed_function_shapes(tmp_path, "main")) == 1
+
+    # Valid specific Carbon exemption passes both checks (also test >80 code lines)
+    body = "\n".join(f"    x{idx} = a + {idx}" for idx in range(82))
+    mod.write_text(
+        "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
+        "    return a + j\n"
+        "\n"
+        "# shape-exempt(carbon): coupled 4-box RK4 loop shares 9 intermediate state arrays\n"
+        "def too_many(a, b, c, d, e, f, g, h, i):\n"
+        f"{body}\n"
+        "    return x81\n",
+        encoding="utf-8",
+    )
+    _git("add", ".")
+    _git("commit", "-m", "valid carbon exemption")
+    assert check_ratchets.check_shape_exemptions(pkg) == []
+    assert check_ratchets.check_changed_function_shapes(tmp_path, "main") == []

@@ -1,6 +1,6 @@
 {
-  "baseline_commit": "5c95edfeae100b1e8538c04081fd7fcd780c34d0",
-  "count": 124,
+  "baseline_commit": "c67accc4a9dddb76951b27bd58fd9a212ce50702",
+  "count": 125,
   "all": [
     "ALPHA_ATOMS_CM2_S_TO_KG_YR",
     "AbstractSolver",
@@ -121,6 +121,7 @@
     "solin_sarkka_eigenpairs",
     "spectral_density",
     "stationary_cbm_gp_cov",
+    "stationary_cbm_spectral_cov",
     "whiten_blocks",
     "whiten_cholesky",
     "whiten_qr",

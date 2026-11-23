@@ -8,7 +8,7 @@
 
 - [ ] Single purpose, linked to a written task or issue.
 - [ ] Changed `src/ticktack/` code lines $\le 400$ (tests, notebooks, and docs excluded).
-- [ ] New or edited functions are $\le 80$ code lines and $\le 8$ parameters (or carry a one-line reason in code).
+- [ ] New or edited functions are $\le 80$ AST code lines and $\le 8$ parameters excluding `self`/`cls` (or carry a Carbon-approved `# shape-exempt(carbon): <specific >=15-char technical reason>` comment; no contortions to dodge the limit).
 - [ ] Checked for existing helpers before adding new ones; reused helpers listed below.
 - [ ] New public names (if any) have a docs example, a test, and an updated `tests/public_surface_snapshot.json`.
 

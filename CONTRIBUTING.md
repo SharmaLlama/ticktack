@@ -65,6 +65,7 @@ Every pull request passes through six ordered gates so that an error must get pa
 2. **Continuous integration.** All CI checks must pass:
    - `ruff check src tests` plus the complexity ratchet (`C901`, `PLR0912`, `PLR0913`, `PLR0915` violations must not exceed `.github/ci_ratchets.json`).
    - Source code line budget (`src/ticktack/**/*.py` non-docstring, non-comment code lines must not exceed `.github/ci_ratchets.json` unless the PR description includes a non-empty `Line-budget-reason:` justification).
+   - Function shape ratchet for new or edited functions in `src/ticktack/` ($\le 80$ AST code lines and $\le 8$ parameters excluding `self`/`cls`, unless carrying a Carbon-approved `# shape-exempt(carbon): <reason>` comment with a specific $\ge 15$-character technical reason).
    - `pytest` with coverage reporting and the coverage floor in `.github/ci_ratchets.json`.
    - Public-surface snapshot (`tests/test_public_surface.py` fails if `ticktack.__all__` changes without updating `tests/public_surface_snapshot.json`).
    - Execution of a fast subset of `notebooks/v2/docs_examples/`.
@@ -79,7 +80,9 @@ Every pull request passes through six ordered gates so that an error must get pa
 1. **Reuse first.** Search for an existing helper before writing one, and list reused functions in the PR description.
 2. **Private helpers.** Keep a private helper only if it has at least two callers or is a numerical kernel with its own unit test; otherwise inline it.
 3. **No algorithm-selecting flags.** A boolean or string flag that selects between whole algorithms should become separate functions sharing setup.
-4. **Function size and arity.** Keep new or edited functions to at most ~80 code lines and 8 parameters; any exception carries a one-line justification comment.
+4. **Function size, arity, anti-contortion, and Carbon shape exemptions.** Keep new or edited functions to at most 80 AST code lines (excluding blanks, comments, and docstrings) and at most 8 parameters (excluding `self` and `cls`).
+   - **Anti-contortion rule:** Never invent awkward workarounds solely to duck under 80 lines or 8 parameters. Packing unrelated arguments into throwaway dicts or tuples, cramming multi-line numerical expressions onto unreadable 100-character one-liners, or splitting a single cohesive numerical loop into tightly coupled helper fragments passing 10 local arrays are all explicitly forbidden. Write code *the right way*, which normally minimizes total lines.
+   - **Carbon exemption mechanism:** When a genuinely cohesive function exceeds 80 AST code lines or 8 parameters and splitting it would make the code worse, the author may request a shape exemption from an independent high-effort Carbon reviewer (`@verifier-carbon`), who compares the cohesive function against the split version pragmatically (escalating to human review only in extreme cases). Once approved by Carbon, place `# shape-exempt(carbon): <specific >=15-char technical reason>` on the `def` line, immediately above `def` (or its decorators), or immediately inside `def`. CI (`check_ratchets.py`) enforces that every `# shape-exempt(carbon):` comment is attached to a `def` and states a specific technical reason of at least 15 characters, rejecting vacuous reasons such as `"readability"`, `"clarity"`, `"helper"`, or `"keep together"`.
 5. **Validate once.** Validate inputs at the public entry point; internal functions trust their callers. Use one conversion helper rather than repeating inline casts.
 6. **One accepted form.** Convert heterogeneous inputs at a single constructor instead of accepting wide union types throughout the package.
 7. **Tight typing, no aliases.** Avoid `Any` when the type is known. Use one spelling and one class name without aliases.

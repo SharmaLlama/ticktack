@@ -1,14 +1,16 @@
 {
-  "baseline_commit": "5c95edfeae100b1e8538c04081fd7fcd780c34d0",
+  "baseline_commit": "c67accc4a9dddb76951b27bd58fd9a212ce50702",
   "complexity_rules": [
     "C901",
     "PLR0912",
     "PLR0913",
     "PLR0915"
   ],
-  "max_complexity_violations": 250,
-  "max_src_code_lines": 19270,
+  "max_complexity_violations": 259,
+  "max_src_code_lines": 20318,
   "max_pr_changed_src_lines": 400,
+  "max_function_code_lines": 80,
+  "max_function_params": 8,
   "claude_review_line_threshold": 200,
   "claude_review_modules": [
     "src/ticktack/cbm.py",
