@@ -145,20 +145,6 @@ def _eval_log_likelihood(
     )
 
 
-def _neg_log_post_fn(
-    u_vec: jax.Array,
-    model: RadiocarbonModel,
-    dataset: Dataset,
-    parameter_space: ParameterSpace,
-    cfg: LinearMarginalConfig,
-    sigma_jitter: ArrayLike | None,
-    map_space: Literal["unconstrained", "constrained"] = "unconstrained",
-) -> jax.Array:
-    return -_eval_log_posterior(
-        u_vec, model, dataset, parameter_space, cfg, sigma_jitter, map_space
-    )
-
-
 def _neg_log_post_from_spec(
     u: jax.Array,
     fast_lk_spec: FastLogLikeSpec,
@@ -622,7 +608,7 @@ def _laplace_covariance(
         else fast_lk_spec
     )
     reg_flt = float(regularize)
-    if spec.mode == "dynamic" and model.cbm.n_boxes > 8:
+    if not spec.is_static and model.cbm.n_boxes > 8:
         # Central finite-difference of exact 1st-order grad avoids massive
         # 2nd-order Van Loan expm XLA graphs on large multi-box CBMs while
         # achieving O(eps^2) ~ 1e-10 Hessian accuracy in float64.
