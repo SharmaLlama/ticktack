@@ -14,17 +14,22 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from chainconsumer import Chain, ChainConsumer, PlotConfig, Truth
+from jax.typing import ArrayLike
 from matplotlib.axes import Axes
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, FancyArrowPatch, FancyBboxPatch
 
+from .constants import DEFAULT_Q_STD
 from .data import Dataset, TreeRingSeries
+from .fields import EvidenceGridResult, GaussianField, LogGaussianField
 
 _PALETTE: tuple[str, ...] = (
     "#0072B2",  # blue (NH / primary)
@@ -2231,7 +2236,305 @@ def plot_cbm_mode_impulse_responses(
     return fig, mode_axes
 
 
-from .fields import plot_evidence_grid, plot_field_draws  # noqa: E402
+def _eval_field_realizations(
+    field: GaussianField | LogGaussianField,
+    latents: jax.Array,
+    *,
+    as_total_q: bool,
+    q_std: float,
+) -> np.ndarray:
+    """Evaluate ``(N_draws, N_grid)`` curves for ``field`` across ``latents``."""
+    if isinstance(field, GaussianField):
+        dq = jax.vmap(lambda z: field.with_latent(z).evaluate_grid())(latents)
+        vals = (q_std + dq) if as_total_q else dq
+    elif isinstance(field, LogGaussianField):
+        q = jax.vmap(lambda z: field.with_latent(z).evaluate_q_grid())(latents)
+        vals = q if as_total_q else (q - q_std)
+    else:
+        raise TypeError(f"Expected GaussianField or LogGaussianField, got {type(field)!r}.")
+    return np.asarray(vals, dtype=np.float64)
+
+
+def _normalize_field_draws_input(
+    field_or_fields: (
+        GaussianField
+        | LogGaussianField
+        | Sequence[GaussianField | LogGaussianField]
+        | Mapping[str, GaussianField | LogGaussianField]
+    ),
+) -> tuple[bool, list[str], list[GaussianField | LogGaussianField]]:
+    """Normalize single, sequence, or mapping field inputs and verify shared ``n_grid``."""
+    if isinstance(field_or_fields, (GaussianField, LogGaussianField)):
+        return True, [""], [field_or_fields]
+    if isinstance(field_or_fields, Mapping):
+        labels, fields = list(field_or_fields.keys()), list(field_or_fields.values())
+    else:
+        fields = list(field_or_fields)
+        labels = [f"Field {i + 1}" for i in range(len(fields))]
+    if not fields:
+        raise ValueError("field_or_fields cannot be empty.")
+    n_grid = fields[0].n_grid
+    if any(f.n_grid != n_grid for f in fields):
+        raise ValueError("All compared fields must share the same n_grid.")
+    return False, labels, fields
+
+
+def _resolve_field_axes(
+    is_single: bool,
+    n_cols: int,
+    figsize: tuple[float, float] | None,
+    axes: np.ndarray | Sequence[Axes] | None,
+) -> tuple[Figure, np.ndarray]:
+    """Create or unpack ``Axes`` for single-field (4 axes) or multi-field (``2 x n_cols``)."""
+    if is_single:
+        if axes is None:
+            fig = plt.figure(figsize=figsize or (9.0, 5.2), constrained_layout=True)
+            gs = fig.add_gridspec(2, 3, height_ratios=[1.0, 1.35])
+            out = np.array([*[fig.add_subplot(gs[0, c]) for c in range(3)], fig.add_subplot(gs[1, :])], dtype=object)
+            return fig, out
+        arr_ax = np.asarray(axes, dtype=object).ravel()
+        if arr_ax.size < 4:
+            raise ValueError("Single-field plot_field_draws requires 4 Axes when supplied.")
+        return arr_ax[3].figure, arr_ax
+    if axes is None:
+        fig, ax_grid = plt.subplots(
+            2, n_cols, figsize=figsize or (3.3 * n_cols, 5.2), sharex="col", sharey="row",
+            gridspec_kw={"height_ratios": [1.0, 1.25]}, constrained_layout=True,
+        )
+        return fig, np.atleast_2d(ax_grid).reshape(2, n_cols)
+    out_axes = np.asarray(axes, dtype=object).reshape(2, n_cols)
+    return out_axes[0, 0].figure, out_axes
+
+
+def _plot_single_field_top_row(
+    top_axes: Sequence[Axes],
+    t_np: np.ndarray,
+    curves: np.ndarray,
+    ref_val: float,
+    eff_ylabel: str,
+) -> None:
+    """Render the 3 individual draw panels in the top row of single-field mode."""
+    y_min, y_max = float(np.percentile(curves, 1.0)), float(np.percentile(curves, 99.0))
+    pad = 0.12 * max(y_max - y_min, 1e-6)
+    for c in range(3):
+        ax_c = top_axes[c]
+        ax_c.plot(t_np, curves[c], color=_PALETTE[c], lw=1.5)
+        ax_c.axhline(ref_val, color="#666666", lw=0.7, ls=":")
+        ax_c.set_xlim(float(t_np[0]), float(t_np[-1]))
+        ax_c.set_ylim(y_min - pad, y_max + pad)
+        ax_c.set_title(f"Draw {c + 1}", fontsize=10)
+        if c == 0:
+            ax_c.set_ylabel(eff_ylabel)
+        else:
+            ax_c.tick_params(labelleft=False)
+
+
+def _plot_field_ensemble(
+    ax: Axes,
+    t_np: np.ndarray,
+    curves: np.ndarray,
+    style: tuple[str, int, str | None],
+    truth: ArrayLike | None = None,
+) -> None:
+    """Plot faint ensemble draws, bold Draw 1, and optional truth curve on ``ax``."""
+    color, n_faint, draw1_label = style
+    n_show = min(int(n_faint), curves.shape[0])
+    for m in range(1, n_show):
+        ax.plot(t_np, curves[m], color=color, lw=0.75, alpha=0.14)
+    ax.plot(t_np, curves[0], color=color, lw=2.0, label=draw1_label or "Draw 1")
+    if truth is not None:
+        ax.plot(
+            t_np, np.asarray(truth, dtype=np.float64), color="#111111", lw=1.4, ls="--",
+            label="Truth" if draw1_label is not None else None,
+        )
+    ax.set_xlim(float(t_np[0]), float(t_np[-1]))
+    if draw1_label is not None:
+        ax.legend(loc="upper right", frameon=False)
+
+
+def plot_field_draws(
+    field_or_fields: (
+        GaussianField
+        | LogGaussianField
+        | Sequence[GaussianField | LogGaussianField]
+        | Mapping[str, GaussianField | LogGaussianField]
+    ),
+    rng_key: jax.Array | None = None,
+    *,
+    latents: ArrayLike | None = None,
+    n_faint: int = 50,
+    as_total_q: bool = True,
+    q_std: float = DEFAULT_Q_STD,
+    truth: ArrayLike | None = None,
+    title: str | None = None,
+    xlabel: str = "Calendar Year (CE)",
+    ylabel: str | None = None,
+    figsize: tuple[float, float] | None = None,
+    axes: np.ndarray | Sequence[Axes] | None = None,
+) -> tuple[Figure, np.ndarray]:
+    """Plot 3 individual field draws on top and ``n_faint`` realizations (draw 1 bold) below.
+
+    Radiocarbon 1D counterpart of ``virgil.plotting.plot_field_draws``:
+
+    * **Single field**: top row shows draws 1, 2, and 3 in three panels; bottom panel
+      spans all columns showing ``n_faint`` (default 50) faint realizations with draw 1
+      highlighted in bold.
+    * **Sequence or mapping of fields** (sharing the same grid length ``N``): draws a
+      common bank of standard-normal excitations ``z ~ N(0, I_N)`` so every column maps
+      the **identical** underlying random latents through its own power spectrum ``S(omega)``
+      (top row: first 3 draws; bottom row: 50 faint draws + draw 1 bold).
+    """
+    n_draws = max(int(n_faint), 3)
+    key = jax.random.PRNGKey(0) if rng_key is None else rng_key
+    default_ylabel = (
+        r"$Q(t)$ ($\mathrm{atoms\,cm^{-2}\,s^{-1}}$)"
+        if as_total_q
+        else r"$\delta q(t)$ ($\mathrm{atoms\,cm^{-2}\,s^{-1}}$)"
+    )
+    eff_ylabel = default_ylabel if ylabel is None else ylabel
+
+    is_single, labels, fields = _normalize_field_draws_input(field_or_fields)
+    n_grid = fields[0].n_grid
+    z_bank = (
+        jax.random.normal(key, (n_draws, n_grid), dtype=jnp.float64)
+        if latents is None
+        else jnp.asarray(latents, dtype=jnp.float64)
+    )
+    if z_bank.ndim != 2 or z_bank.shape[1] != n_grid or z_bank.shape[0] < 3:
+        raise ValueError(f"latents must have shape (n_draws >= 3, {n_grid}), got {z_bank.shape}.")
+
+    fig, out_axes = _resolve_field_axes(is_single, len(fields), figsize, axes)
+    if is_single:
+        curves = _eval_field_realizations(fields[0], z_bank, as_total_q=as_total_q, q_std=q_std)
+        t_np = np.asarray(fields[0].t_grid, dtype=np.float64)
+        _plot_single_field_top_row(
+            out_axes[:3], t_np, curves, q_std if as_total_q else 0.0, eff_ylabel
+        )
+        _plot_field_ensemble(
+            out_axes[3], t_np, curves, (_PALETTE[0], n_faint, "Draw 1 (highlighted)"), truth
+        )
+        out_axes[3].set_xlabel(xlabel)
+        out_axes[3].set_ylabel(eff_ylabel)
+    else:
+        n_show = min(int(n_faint), z_bank.shape[0])
+        for col, (lbl, f_col) in enumerate(zip(labels, fields)):
+            col_color = _PALETTE[col % len(_PALETTE)]
+            curves_c = _eval_field_realizations(f_col, z_bank, as_total_q=as_total_q, q_std=q_std)
+            t_np = np.asarray(f_col.t_grid, dtype=np.float64)
+            ax_top, ax_bot = out_axes[0, col], out_axes[1, col]
+            for r_idx, ls_style in zip(range(3), ("-", "--", "-.")):
+                ax_top.plot(
+                    t_np, curves_c[r_idx], color=col_color, lw=1.35, ls=ls_style,
+                    alpha=0.9 - 0.15 * r_idx, label=f"Draw {r_idx + 1}",
+                )
+            ax_top.set_title(lbl, fontsize=10)
+            ax_top.set_xlim(float(t_np[0]), float(t_np[-1]))
+            _plot_field_ensemble(ax_bot, t_np, curves_c, (col_color, n_faint, None), truth)
+            ax_bot.set_xlabel(xlabel)
+            if col == 0:
+                ax_top.set_ylabel(f"3 draws\n{eff_ylabel}")
+                ax_top.legend(loc="upper right", frameon=False, fontsize=8)
+                ax_bot.set_ylabel(f"{n_show} draws\n{eff_ylabel}")
+
+    if title:
+        fig.suptitle(title, fontsize=11)
+    return fig, out_axes
+
+
+def _cell_edges(centres: np.ndarray, *, log_scale: bool) -> np.ndarray:
+    """Compute ``N + 1`` cell edges around 1D monotone grid ``centres``."""
+    c = np.asarray(centres, dtype=np.float64).reshape(-1)
+    if c.size == 1:
+        return np.array([c[0] / 1.25, c[0] * 1.25] if log_scale else [c[0] - 0.5, c[0] + 0.5], dtype=np.float64)
+    vals = np.log(c) if log_scale else c
+    mids = 0.5 * (vals[:-1] + vals[1:])
+    edges = np.concatenate([[vals[0] - 0.5 * (vals[1] - vals[0])], mids, [vals[-1] + 0.5 * (vals[-1] - vals[-2])]])
+    return np.exp(edges) if log_scale else edges
+
+
+def _is_log_spaced(arr: np.ndarray) -> bool:
+    if arr.size < 3 or np.any(arr <= 0.0):
+        return False
+    lin_diff, log_diff = np.diff(arr), np.diff(np.log(arr))
+    lin_cv = float(np.std(lin_diff) / max(abs(float(np.mean(lin_diff))), 1e-12))
+    log_cv = float(np.std(log_diff) / max(abs(float(np.mean(log_diff))), 1e-12))
+    return log_cv < 0.25 * lin_cv
+
+
+def _annotate_evidence_cells(
+    ax: Axes, lens: np.ndarray, sigs: np.ndarray, surface: np.ndarray, mid_val: float,
+) -> None:
+    """Annotate 2D evidence grid cells with formatted numeric values."""
+    for i, y_c in enumerate(sigs):
+        for j, x_c in enumerate(lens):
+            val = float(surface[i, j])
+            ax.text(
+                float(x_c), float(y_c), f"{val:.1f}", ha="center", va="center",
+                fontsize=7.5, color="#111111" if val > mid_val else "white",
+            )
+
+
+def plot_evidence_grid(
+    grid: EvidenceGridResult,
+    *,
+    delta: bool = True,
+    vmin: float | None = -25.0,
+    annotate: bool = True,
+    cmap: str = "magma",
+    truth: tuple[float, float] | None = None,
+    title: str | None = None,
+    xlabel: str = r"Correlation timescale $\ell$ (yr)",
+    ylabel: str = r"Field standard deviation $\sigma$ ($\mathrm{atoms\,cm^{-2}\,s^{-1}}$)",
+    figsize: tuple[float, float] = (6.8, 5.0),
+    ax: Axes | None = None,
+) -> tuple[Figure, Axes]:
+    """Plot annotated 2D ``(sigma, length_yr)`` ``Delta ln Z`` heatmap with white ``x`` at peak.
+
+    Inspired by ``virgil/docs/imaging_gp.md``: renders ``Delta ln Z = ln Z - max ln Z``
+    (or raw ``ln Z`` when ``delta=False``), formats logarithmic or linear axes cleanly,
+    annotates cell values on compact grids (``<= 100`` cells), and marks the empirical-Bayes
+    optimum ``(best_length_yr, best_sigma)`` with a high-contrast white ``x``.
+    """
+    fig, target_ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True) if ax is None else (ax.figure, ax)
+    sigs = np.asarray(grid.sigmas, dtype=np.float64)
+    lens = np.asarray(grid.lengths_yr, dtype=np.float64)
+    lnz = np.asarray(grid.log_evidence, dtype=np.float64)
+    surface = (lnz - float(np.nanmax(lnz))) if delta else lnz
+    log_x, log_y = _is_log_spaced(lens), _is_log_spaced(sigs)
+    eff_vmin, eff_vmax = (vmin, 0.0) if delta else (None, None)
+    mesh = target_ax.pcolormesh(
+        _cell_edges(lens, log_scale=log_x), _cell_edges(sigs, log_scale=log_y),
+        surface, cmap=cmap, vmin=eff_vmin, vmax=eff_vmax, shading="flat",
+    )
+    fig.colorbar(mesh, ax=target_ax, label=r"$\Delta \ln Z$" if delta else r"$\ln Z$", pad=0.02)
+    if log_x:
+        target_ax.set_xscale("log")
+    if log_y:
+        target_ax.set_yscale("log")
+    if annotate and surface.size <= 100:
+        lo_val = float(eff_vmin) if eff_vmin is not None else float(np.nanmin(surface))
+        hi_val = float(eff_vmax) if eff_vmax is not None else float(np.nanmax(surface))
+        _annotate_evidence_cells(target_ax, lens, sigs, surface, 0.5 * (lo_val + hi_val))
+
+    best_x, best_y = float(grid.best_length_yr), float(grid.best_sigma)
+    # Dark contrast backing beneath the white 'x' marker so it stands out on bright peaks
+    target_ax.scatter([best_x], [best_y], marker="x", s=125, c="#111111", linewidths=3.4, zorder=5)
+    target_ax.scatter(
+        [best_x], [best_y], marker="x", s=95, c="white", linewidths=2.0, zorder=6,
+        label=rf"Max $\ln Z$ ($\sigma={best_y:.2g}$, $\ell={best_x:.2g}$ yr)",
+    )
+    if truth is not None:
+        target_ax.scatter(
+            [float(truth[1])], [float(truth[0])], marker="o", s=70,
+            facecolors="none", edgecolors="#56B4E9", linewidths=1.8, zorder=6, label="Truth",
+        )
+    target_ax.set_xlabel(xlabel)
+    target_ax.set_ylabel(ylabel)
+    if title:
+        target_ax.set_title(title)
+    target_ax.legend(loc="lower right", frameon=True, framealpha=0.82, fontsize=8.5)
+    return fig, target_ax
+
 
 __all__ = [
     "plot_cbm_eigenmodes",
