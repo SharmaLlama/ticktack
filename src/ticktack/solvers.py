@@ -483,7 +483,8 @@ def _smooth_clamped_panels(
     xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
     wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
     lin_q = sub_a[..., None] + span[..., None] * xi
-    u_q = jnp.where(is_tiny, u_los[:, None] + du[:, None] * xi, (lin_q - ts) / safe_tau)
+    u_lin = jnp.clip((lin_q - ts) / safe_tau, u_los[:, None], (u_los + du)[:, None])
+    u_q = jnp.where(is_tiny, u_los[:, None] + du[:, None] * xi, u_lin)
     tau_q = jnp.where(is_tiny, ts + tau_d * u_q, lin_q)
     return sub_b, tau_q, scale, wq * spike.unit_profile(u_q)
 

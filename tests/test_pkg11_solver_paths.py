@@ -541,3 +541,47 @@ def test_spike_autodiff_gradients_all_profiles_eager_jit_and_zero_duration(
             jax.grad(lambda p3: _loss(cbm_cplx, p3, modal_cplx)), (p3_zero,), (v_dir,)
         )
         assert np.all(np.isfinite(np.asarray(hvp_zero)))
+
+
+def test_empty_panel_exponent_overflow_and_window_straddle_grad_regression() -> None:
+    """Guard against ``0.0 * (-inf) = NaN`` on distant empty panels and window-edge AD error."""
+    _flush_xla_caches()
+    solver = ExactLinearSolver()
+    cbm_eff = EffectiveCBM(K=3)
+    cbm_bal = _make_regime_cbm("complex")
+
+    # 1. Steep narrow supergaussian with Holocene pre-spike rings (|2*u - 1|**32 would overflow
+    #    float64 without clamping u_lin to [u_los, u_los + du] on zero-span panels).
+    t_holocene = jnp.array([-5000.0, 200.0, 773.5, 774.5, 775.5], dtype=jnp.float64)
+    a_holocene = jnp.array([-5000.0, 773.5, 774.4], dtype=jnp.float64)
+    b_holocene = jnp.array([-4999.0, 774.0, 774.9], dtype=jnp.float64)
+    p_steep = jnp.array([774.5, 1e-6, 6.2], dtype=jnp.float64)
+
+    def _steep_loss(p: jax.Array) -> jax.Array:
+        sp = MiyakeSpike(p[0], p[1], p[2], profile="supergaussian", exponent=32.0)
+        pt = solver.solve_delta_trajectory(cbm_eff, sp, t_holocene)
+        bn = solver.solve_delta_binned(cbm_eff, sp, a_holocene, b_holocene)
+        return jnp.sum(pt**2) + jnp.sum(bn**2)
+
+    val_steep, g_steep = jax.value_and_grad(_steep_loss)(p_steep)
+    assert np.isfinite(float(val_steep))
+    assert np.all(np.isfinite(np.asarray(g_steep)))
+    assert abs(float(g_steep[0])) > 1.0
+
+    # 2. Explicit window-straddling supergaussian & skewgaussian binned spike vs central FD
+    a_strad = jnp.array([774.0, 774.5, 775.0], dtype=jnp.float64)
+    b_strad = jnp.array([774.5, 775.0, 775.5], dtype=jnp.float64)
+    p_strad = jnp.array([774.38, 0.35, 6.4], dtype=jnp.float64)
+    for kw in (
+        {"profile": "supergaussian", "exponent": 16.0},
+        {"profile": "skewgaussian", "skewness": 2.4},
+    ):
+        loss_fn = lambda p, _kw=kw: jnp.sum(  # noqa: E731
+            solver.solve_delta_binned(
+                cbm_bal, MiyakeSpike(p[0], p[1], p[2], **_kw), a_strad, b_strad
+            )[:, 1]
+            ** 2
+        )
+        g_ad = np.asarray(jax.grad(loss_fn)(p_strad))
+        g_fd = _central_fd_grad(loss_fn, p_strad, eps=1e-6)
+        np.testing.assert_allclose(g_ad, g_fd, rtol=1e-6, atol=1e-7)
