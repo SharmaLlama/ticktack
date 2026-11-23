@@ -1,0 +1,22 @@
+{
+  "baseline_commit": "5c95edfeae100b1e8538c04081fd7fcd780c34d0",
+  "complexity_rules": [
+    "C901",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915"
+  ],
+  "max_complexity_violations": 250,
+  "max_src_code_lines": 19270,
+  "max_pr_changed_src_lines": 400,
+  "claude_review_line_threshold": 200,
+  "claude_review_modules": [
+    "src/ticktack/cbm.py",
+    "src/ticktack/fields.py",
+    "src/ticktack/fisher.py",
+    "src/ticktack/likelihood.py",
+    "src/ticktack/linear.py",
+    "src/ticktack/solvers.py"
+  ],
+  "min_coverage_percent": 83
+}

@@ -59,7 +59,10 @@ Issues = "https://github.com/SharmaLlama/ticktack/issues"
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "pytest-cov",
     "ruff",
+    "nbclient",
+    "ipykernel",
 ]
 cuda = [
     "modax-solvers",
