@@ -43,8 +43,11 @@ from jax.typing import ArrayLike
 from .cbm import CarbonBoxModel
 from .data import Dataset
 from .fields import (
+    DCTResponseOperator,
     GaussianField,
+    LinearizedDCTOperator,
     LogGaussianField,
+    _build_field_cov_columns,
     _field_prehistory_root_y0,
     _safe_sqrt,
     build_dct_response_operator,
@@ -425,16 +428,17 @@ class LinearMarginalConfig(eqx.Module):
     include_gp_initial_cov: bool = eqx.field(static=True)
     include_field_initial_cov: bool = eqx.field(static=True)
     whiten_method: str = eqx.field(static=True)
+    dct_operator: DCTResponseOperator | LinearizedDCTOperator | None
 
-    def __init__(
+    def __init__(  # shape-exempt(carbon): config constructor adding dct_operator keyword option
         self,
         *,
         offset_mode: Literal[
             "hierarchical", "per_series", "shared", "none"
         ] = "hierarchical",
         global_prior_mean: float = 0.0,
-        global_prior_sd: float = 200.0,
-        lab_prior_sd: float = 1.5,
+        global_prior_sd: float | None = 200.0,
+        lab_prior_sd: float | None = 1.5,
         solar_prior_sd: float = 1.0,
         trend_prior_sd: float = 5.0,
         marginalise_solar: bool | None = None,
@@ -449,11 +453,19 @@ class LinearMarginalConfig(eqx.Module):
         include_gp_initial_cov: bool = True,
         include_field_initial_cov: bool = True,
         whiten_method: Literal["cholesky", "qr", "rank_one"] = "cholesky",
+        dct_operator: DCTResponseOperator | LinearizedDCTOperator | None = None,
     ) -> None:
         valid_offset_modes = ("hierarchical", "per_series", "shared", "none")
         if offset_mode not in valid_offset_modes:
             raise ValueError(
                 f"offset_mode must be one of {valid_offset_modes}; got {offset_mode!r}."
+            )
+        if dct_operator is not None and not isinstance(
+            dct_operator, (DCTResponseOperator, LinearizedDCTOperator)
+        ):
+            raise TypeError(
+                "dct_operator must be a DCTResponseOperator, LinearizedDCTOperator, or None; "
+                f"got {type(dct_operator).__name__}."
             )
         eff_solar = (
             marginalize_solar
@@ -477,8 +489,10 @@ class LinearMarginalConfig(eqx.Module):
         )
         self.offset_mode = str(offset_mode)
         self.global_prior_mean = float(global_prior_mean)
-        self.global_prior_sd = float(global_prior_sd)
-        self.lab_prior_sd = float(lab_prior_sd)
+        self.global_prior_sd = (
+            math.inf if global_prior_sd is None else float(global_prior_sd)
+        )
+        self.lab_prior_sd = math.inf if lab_prior_sd is None else float(lab_prior_sd)
         self.solar_prior_sd = float(solar_prior_sd)
         self.trend_prior_sd = float(trend_prior_sd)
         self.marginalise_solar = bool(eff_solar)
@@ -489,6 +503,7 @@ class LinearMarginalConfig(eqx.Module):
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.include_field_initial_cov = bool(include_field_initial_cov)
         self.whiten_method = str(whiten_method)
+        self.dct_operator = dct_operator
 
     @property
     def marginalize_solar(self) -> bool:
@@ -854,42 +869,34 @@ def _build_marginal_design_with_projections(
                     )
                 )
 
-    # 5. Marginalized GaussianField reflecting-boundary DCT-II columns
+    # 5. Marginalized GaussianField reflecting-boundary DCT-II + pre-history columns
     field_init_roots: list[jax.Array | None] = []
     if field_terms and n_tot > 0:
         for gf in field_terms:
-            op_gf = build_dct_response_operator(
+            col_start = sum(c.shape[1] for c in design_cols)
+            h_block, root_y0_gf = _build_field_cov_columns(
                 cbm,
                 dataset,
-                t_start=gf.t_start,
-                t_end=gf.t_end,
-                n_grid=gf.n_grid,
+                gf,
+                cfg.dct_operator,
                 q_std=model.q_std,
                 alpha_unit=model.alpha_unit,
-                template=gf.template,
+                include_field_initial_cov=cfg.include_field_initial_cov,
             )
-            H_gf = op_gf.w_dct * _safe_sqrt(gf.power_spectrum())[None, :]
-            design_cols.append(H_gf)
-            pmean_parts.append(jnp.zeros((gf.n_grid,), dtype=jnp.float64))
-            psd_parts.append(jnp.ones((gf.n_grid,), dtype=jnp.float64))
-            if cfg.include_field_initial_cov:
-                root_y0_gf = _field_prehistory_root_y0(cbm, model.alpha_unit, gf)
-                H_init = op_gf.init_state_basis @ root_y0_gf
-                m_rank = H_init.shape[1]
-                init_start = sum(c.shape[1] for c in design_cols)
-                design_cols.append(H_init)
-                pmean_parts.append(jnp.zeros((m_rank,), dtype=jnp.float64))
-                psd_parts.append(jnp.ones((m_rank,), dtype=jnp.float64))
+            n_cols = h_block.shape[1]
+            design_cols.append(h_block)
+            pmean_parts.append(jnp.zeros((n_cols,), dtype=jnp.float64))
+            psd_parts.append(jnp.ones((n_cols,), dtype=jnp.float64))
+            if root_y0_gf is not None:
+                init_start = col_start + gf.n_grid
                 init_state_blocks.append(
                     (
-                        slice(init_start, init_start + m_rank),
+                        slice(init_start, n_cols + col_start),
                         root_y0_gf,
                         jnp.asarray(gf.t_start, dtype=jnp.float64),
                     )
                 )
-                field_init_roots.append(root_y0_gf)
-            else:
-                field_init_roots.append(None)
+            field_init_roots.append(root_y0_gf)
 
     if design_cols:
         X = jnp.concatenate(design_cols, axis=1)

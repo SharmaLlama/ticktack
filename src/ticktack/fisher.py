@@ -48,6 +48,7 @@ __all__ = [
     "FisherSpectrumResult",
     "RelaxationModesResult",
     "cbm_fisher_spectrum",
+    "cbm_gp_fisher_spectrum",
     "cbm_mode_impulse_responses",
     "expected_fisher",
     "fisher_projection",
@@ -1386,4 +1387,390 @@ def cbm_mode_impulse_responses(
         parameter_loadings=sel_loadings,
         units=units,
         source="impulse_svd",
+    )
+
+
+def _resolve_spike_prior_precision(
+    p_spike: int,
+    spike_prior_precision: ArrayLike | None,
+) -> jax.Array:
+    """Resolve ``(p_spike, p_spike)`` prior precision matrix on active spike leaves."""
+    if spike_prior_precision is None:
+        return jnp.zeros((p_spike, p_spike), dtype=jnp.float64)
+    arr = jnp.asarray(spike_prior_precision, dtype=jnp.float64)
+    if arr.ndim == 0:
+        return arr * jnp.eye(p_spike, dtype=jnp.float64)
+    if arr.ndim == 1 and arr.shape == (p_spike,):
+        return jnp.diag(arr)
+    if arr.ndim == 2 and arr.shape == (p_spike, p_spike):
+        return 0.5 * (arr + arr.T)
+    raise ValueError(
+        f"spike_prior_precision must be scalar, ({p_spike},), or ({p_spike}, {p_spike}); "
+        f"got shape {arr.shape}."
+    )
+
+
+def _resolve_gp_fisher_model_and_cfg(
+    ds: Any,
+    gp_or_field: Any,
+    cfg: Any,
+    per_series_prior_sd: float | Literal["from_config"] | None,
+    n_grid: int,
+    pad_years: float,
+    q_std_f: float,
+) -> tuple[Any, Any]:
+    """Map ``(gp_or_field, cfg, per_series_prior_sd)`` to ``(stoch_prod, cfg_cov)``."""
+    from .fields import GaussianField, SpectralKernel
+    from .likelihood import LinearMarginalConfig
+    from .production import GPProduction, SteadyProduction
+
+    if gp_or_field is None:
+        stoch_prod: Any = SteadyProduction(q_std_f)
+    elif isinstance(gp_or_field, SpectralKernel):
+        span_lo, span_hi = ds.time_span
+        stoch_prod = GaussianField(
+            jnp.zeros((int(n_grid),), dtype=jnp.float64),
+            t_start=float(span_lo - float(pad_years)),
+            t_end=float(span_hi + 0.5),
+            kernel=gp_or_field,
+            zero_mode=getattr(gp_or_field, "zero_mode", False),
+        )
+    elif isinstance(gp_or_field, (GaussianField, GPProduction)):
+        stoch_prod = gp_or_field
+    else:
+        raise TypeError(
+            "gp_or_field must be a SpectralKernel, GaussianField, GPProduction, or None; "
+            f"got {type(gp_or_field).__name__}."
+        )
+
+    eff_g_sd = cfg.global_prior_sd
+    if cfg.offset_mode == "per_series" and per_series_prior_sd != "from_config":
+        if per_series_prior_sd is None:
+            eff_g_sd = math.inf
+        else:
+            eff_g_sd = float(per_series_prior_sd)
+            if math.isnan(eff_g_sd) or eff_g_sd <= 0.0:
+                raise ValueError(
+                    "per_series_prior_sd must be positive, +inf, or None; "
+                    f"got {per_series_prior_sd!r}."
+                )
+    if cfg.offset_mode not in ("hierarchical", "per_series", "shared", "none"):
+        raise ValueError(f"Unsupported offset_mode {cfg.offset_mode!r}.")
+
+    cfg_cov = LinearMarginalConfig(
+        offset_mode=cfg.offset_mode,
+        global_prior_mean=cfg.global_prior_mean,
+        global_prior_sd=eff_g_sd,
+        lab_prior_sd=cfg.lab_prior_sd,
+        marginalise_solar=False,
+        marginalise_trend=False,
+        marginalise_gp=isinstance(gp_or_field, GPProduction),
+        marginalise_field=isinstance(gp_or_field, (SpectralKernel, GaussianField)),
+        n_gp_modes=cfg.n_gp_modes,
+        include_gp_initial_cov=cfg.include_gp_initial_cov,
+        include_field_initial_cov=cfg.include_field_initial_cov,
+        whiten_method=cfg.whiten_method,
+        dct_operator=cfg.dct_operator,
+    )
+    return stoch_prod, cfg_cov
+
+
+def _compute_reml_factors(
+    ds: Any,
+    x_0: jax.Array,
+    ps_0: jax.Array,
+    fin_idx: jax.Array,
+    inf_idx: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compute QR square-root covariance factor and orthonormal uninformative basis."""
+    h_cov_0 = (
+        x_0[:, fin_idx] * ps_0[None, fin_idx]
+        if fin_idx.size > 0
+        else jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
+    )
+    if fin_idx.size > 0:
+        aug_0 = jnp.concatenate([jnp.diag(ds.sigma_flat), h_cov_0.T], axis=0)
+        chol_eff = jnp.linalg.qr(aug_0, mode="r").T
+    else:
+        chol_eff = jnp.diag(ds.sigma_flat)
+
+    if inf_idx.size > 0:
+        v_uninf = jsl.solve_triangular(chol_eff, x_0[:, inf_idx], lower=True)
+        u_u, s_u, _ = jnp.linalg.svd(v_uninf, full_matrices=False)
+        s_np = onp.asarray(s_u, dtype=onp.float64)
+        tol_u = 1e-12 * max(float(onp.max(s_np)) if s_np.size else 0.0, 1.0)
+        q_uninf = u_u[:, jnp.asarray(onp.flatnonzero(s_np > tol_u), dtype=jnp.int32)]
+    else:
+        q_uninf = jnp.zeros((ds.n_obs, 0), dtype=jnp.float64)
+    return h_cov_0, chol_eff, q_uninf
+
+
+def _build_reml_whitening_and_sb(
+    cbm: Any,
+    ds: Any,
+    stoch_prod: Any,
+    cfg_cov: Any,
+    q_std_f: float,
+    alpha_unit_f: float,
+    include_covariance_fisher: bool,
+) -> Callable[[Any, Any | None], jax.Array]:
+    """Build REML-projected whitened mean + Slepian--Bangs covariance forward map."""
+    from .likelihood import _build_marginal_design
+    from .model import RadiocarbonModel
+    from .production import SteadyProduction
+
+    steady_prod = SteadyProduction(q_std_f)
+
+    def _design_for(cbm_v: Any) -> tuple[jax.Array, jax.Array, jax.Array]:
+        mod_v = RadiocarbonModel(
+            cbm_v, stoch_prod, q_std=q_std_f, alpha_unit=alpha_unit_f
+        )
+        return _build_marginal_design(mod_v, ds, cfg_cov)
+
+    x_0, pm_0, ps_0 = _design_for(cbm)
+    ps_np = onp.asarray(ps_0, dtype=onp.float64)
+    pm_np = onp.asarray(pm_0, dtype=onp.float64)
+    fin_idx = jnp.asarray(
+        onp.flatnonzero(onp.isfinite(ps_np) & (ps_np > 0.0)), dtype=jnp.int32
+    )
+    inf_idx = jnp.asarray(onp.flatnonzero(~onp.isfinite(ps_np)), dtype=jnp.int32)
+    mean_idx = jnp.asarray(
+        onp.flatnonzero(onp.isfinite(ps_np) & (pm_np != 0.0)), dtype=jnp.int32
+    )
+    h_cov_0, chol_eff, q_uninf = _compute_reml_factors(
+        ds, x_0, ps_0, fin_idx, inf_idx
+    )
+
+    def _whiten_reml(arr: jax.Array) -> jax.Array:
+        w = jsl.solve_triangular(chol_eff, arr, lower=True)
+        return w - q_uninf @ (q_uninf.T @ w) if q_uninf.shape[1] > 0 else w
+
+    use_sb_cov = bool(include_covariance_fisher and fin_idx.size > 0)
+    if use_sb_cov:
+        q_0, r_0 = jnp.linalg.qr(_whiten_reml(h_cov_0), mode="reduced")
+        tril_i, tril_j = onp.tril_indices(int(q_0.shape[1]), k=-1)
+        inv_sqrt2 = 1.0 / math.sqrt(2.0)
+
+    def _eval_whitened(cbm_v: Any, sp_v: Any | None) -> jax.Array:
+        prod = steady_prod if sp_v is None else (steady_prod + sp_v)
+        pred = RadiocarbonModel(
+            cbm_v, prod, q_std=q_std_f, alpha_unit=alpha_unit_f
+        ).predict_d14c(ds, concat=True)
+        if not use_sb_cov and mean_idx.size == 0:
+            return _whiten_reml(pred)
+        x_v, pm_v, ps_v = _design_for(cbm_v)
+        if mean_idx.size > 0:
+            pred = pred + x_v[:, mean_idx] @ pm_v[mean_idx]
+        w_mean = _whiten_reml(pred)
+        if not use_sb_cov:
+            return w_mean
+        u_v = _whiten_reml(x_v[:, fin_idx] * ps_v[None, fin_idx])
+        x_proj = q_0.T @ u_v
+        y_orth = u_v - q_0 @ x_proj
+        s_sym = x_proj @ r_0.T + r_0 @ x_proj.T
+        sb_rows = jnp.concatenate(
+            [
+                inv_sqrt2 * jnp.diag(s_sym),
+                s_sym[tril_i, tril_j],
+                (y_orth @ r_0.T).reshape(-1),
+            ],
+            axis=0,
+        )
+        return jnp.concatenate([w_mean, sb_rows], axis=0)
+
+    return _eval_whitened
+
+
+def cbm_gp_fisher_spectrum(  # shape-exempt(carbon): public Fisher entry point preserving keyword options alongside cbm_fisher_spectrum
+    cbm: Any,
+    dataset: Any,
+    gp_or_field: Any,
+    *,
+    spike: Any | None = None,
+    spike_prior_precision: ArrayLike | None = None,
+    marginal_config: Any | None = None,
+    per_series_prior_sd: float | Literal["from_config"] | None = "from_config",
+    prior_sd: float | ArrayLike = 0.35,
+    parameterisation: Literal["log_rates"] = "log_rates",
+    n_grid: int = 56,
+    pad_years: float = 15.0,
+    q_std: float = DEFAULT_Q_STD,
+    alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    include_covariance_fisher: bool = True,
+    mass_fn: Callable[[Any], Any] | None = None,
+    flux_fn: Callable[[Any], Any] | None = None,
+) -> FisherSpectrumResult:
+    r"""Compute the GP- and offset-marginalized CBM Fisher eigenspectrum.
+
+    Evaluates the exact expected Fisher information matrix of the Gaussian
+    marginalized likelihood :func:`~ticktack.likelihood.marginal_log_likelihood`
+    with mean :math:`\mu(\theta, \psi)` (including any finite-prior global offset
+    prior mean ``cfg.global_prior_mean * r_ss_ratio(cbm)``) and parameter-dependent
+    effective data covariance
+
+    .. math::
+
+        \Sigma_{\mathrm{eff}}(\theta)
+        = \operatorname{diag}(\sigma_d^2)
+        + H_{\mathrm{GP}}(\theta) H_{\mathrm{GP}}(\theta)^\top
+        + X_{\mathrm{off}}(\theta) \Sigma_{\mathrm{off}} X_{\mathrm{off}}(\theta)^\top.
+
+    By the Slepian--Bangs formula for a multivariate normal with parameter-dependent
+    mean and covariance,
+
+    .. math::
+
+        F_{ij}(\theta)
+        = \frac{\partial \mu^\top}{\partial \theta_i}\,\Sigma_{\mathrm{eff}}^{-1}\,
+          \frac{\partial \mu}{\partial \theta_j}
+        + \frac{1}{2}\operatorname{tr}\!\left(
+            \Sigma_{\mathrm{eff}}^{-1}\,\frac{\partial \Sigma_{\mathrm{eff}}}{\partial \theta_i}\,
+            \Sigma_{\mathrm{eff}}^{-1}\,\frac{\partial \Sigma_{\mathrm{eff}}}{\partial \theta_j}
+          \right).
+
+    When ``include_covariance_fisher=True`` (default), the covariance-sensitivity term
+    is stacked directly into the whitened Jacobian via an exact reduced-QR factorization
+    of ``L_eff^{-1} H_cov(cbm0)`` without squaring condition numbers or forming
+    ``O(N^2)`` tensors, then nonlinear :class:`~ticktack.production.MiyakeSpike` tangents
+    (and any uninformative infinite-variance offset columns) are projected out via the
+    stabilized QR Schur complement inside :func:`cbm_fisher_spectrum`. Setting
+    ``include_covariance_fisher=False`` selects the mean-only Gauss--Newton
+    approximation with ``Sigma_eff`` frozen at the reference ``cbm``. The returned
+    :class:`FisherSpectrumResult` can be passed directly to
+    :meth:`~ticktack.cbm.SubspaceCBM.from_fisher`.
+
+    Parameters
+    ----------
+    cbm : CarbonBoxModel
+        Reference carbon-box model (e.g. ``BalancedCBM``).
+    dataset : Dataset or TreeRingSeries
+        Observational dataset defining ring windows, uncertainties, and hemisphere routing.
+    gp_or_field : SpectralKernel, GaussianField, GPProduction, or None
+        Stochastic cosmic-ray production background specification. Accepts a
+        :class:`~ticktack.fields.SpectralKernel`, :class:`~ticktack.fields.GaussianField`,
+        :class:`~ticktack.production.GPProduction`, or ``None`` (white noise + offsets only).
+    spike : MiyakeSpike, optional
+        Parametric event pulse whose active parameters ``(t_start, duration, fluence)``
+        (and ``skewness`` for skew-Gaussian profiles) are projected out via the Schur
+        complement alongside ``SteadyProduction() + spike``.
+    spike_prior_precision : ArrayLike, optional
+        Optional Gaussian prior precision on the active spike parameters (scalar, 1D,
+        or 2D matrix); defaults to zero precision (uninformative).
+    marginal_config : LinearMarginalConfig, optional
+        Linear marginalization configuration; defaults to ``LinearMarginalConfig()``
+        (``offset_mode="hierarchical"`` with ``global_prior_sd=200.0`` and
+        ``lab_prior_sd=1.5``). Supports ``"hierarchical"``, ``"per_series"``,
+        ``"shared"``, and ``"none"``. Passing ``None`` or ``jnp.inf`` for
+        ``global_prior_sd`` or ``lab_prior_sd`` projects both mean and Slepian--Bangs
+        covariance rows onto the REML orthogonal complement of ``X_0`` (matching the
+        ``prior_sd -> inf`` generative limit when ``col(X_0)`` is CBM-independent, and
+        evaluating the fixed-subspace REML projection without unphysical
+        ``O(global_prior_sd^2)`` covariance blow-up on multi-troposphere CBMs).
+    per_series_prior_sd : float, ``"from_config"``, or None, optional
+        Prior SD on per-series offsets when ``marginal_config.offset_mode == "per_series"``.
+        ``"from_config"`` (default) uses ``marginal_config.global_prior_sd``; passing
+        ``None`` or ``jnp.inf`` projects both mean and covariance rows onto the REML
+        orthogonal complement of the per-series indicator matrix.
+    prior_sd : float or ArrayLike, optional
+        Gaussian prior standard deviation on CBM log-rate parameters (default ``0.35``).
+    parameterisation : {"log_rates"}, optional
+        CBM parameterisation convention (default ``"log_rates"``).
+    n_grid : int, optional
+        Uniform DCT-II grid size used when ``gp_or_field`` is a :class:`SpectralKernel`
+        (default ``56``).
+    pad_years : float, optional
+        Pre-data spin-up padding (years) when ``gp_or_field`` is a :class:`SpectralKernel`
+        (default ``15.0``).
+    q_std, alpha_unit : float, optional
+        Reference steady-state production rate and unit conversion factor.
+    include_covariance_fisher : bool, optional
+        If ``True`` (default), include the exact Slepian--Bangs covariance-sensitivity
+        term from ``dH_GP/dtheta`` and ``dX_off/dtheta``; if ``False``, compute the
+        mean-only approximation with ``Sigma_eff`` frozen at ``cbm``.
+    mass_fn, flux_fn : callable, optional
+        Optional physical observable maps passed to :func:`cbm_fisher_spectrum`.
+        ``mass_fn`` defaults to ``lambda m: m.reservoir_masses()`` when available.
+    """
+    from .data import Dataset, TreeRingSeries
+    from .likelihood import LinearMarginalConfig
+    from .production import MiyakeSpike, ProductionTerm
+
+    if parameterisation != "log_rates":
+        raise ValueError(
+            f"parameterisation must be 'log_rates'; got {parameterisation!r}."
+        )
+
+    if isinstance(dataset, TreeRingSeries):
+        ds = Dataset((dataset,), name=dataset.name)
+    elif isinstance(dataset, Dataset):
+        ds = dataset
+    else:
+        raise TypeError(
+            f"dataset must be a Dataset or TreeRingSeries; got {type(dataset).__name__}."
+        )
+
+    cfg = LinearMarginalConfig() if marginal_config is None else marginal_config
+    if not isinstance(cfg, LinearMarginalConfig):
+        raise TypeError(
+            "marginal_config must be a LinearMarginalConfig or None; "
+            f"got {type(cfg).__name__}."
+        )
+
+    if spike is not None and not isinstance(spike, ProductionTerm):
+        raise TypeError(
+            f"spike must be a MiyakeSpike / ProductionTerm or None; got {type(spike).__name__}."
+        )
+    if spike is not None and not isinstance(spike, MiyakeSpike):
+        warnings.warn(
+            f"spike is {type(spike).__name__} rather than MiyakeSpike; projecting all "
+            "floating-point leaves of spike as nuisance parameters.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    q_std_f = float(q_std)
+    alpha_unit_f = float(alpha_unit)
+    stoch_prod, cfg_cov = _resolve_gp_fisher_model_and_cfg(
+        ds, gp_or_field, cfg, per_series_prior_sd, n_grid, pad_years, q_std_f
+    )
+    eval_whitened = _build_reml_whitening_and_sb(
+        cbm, ds, stoch_prod, cfg_cov, q_std_f, alpha_unit_f, include_covariance_fisher
+    )
+
+    if spike is not None:
+        flat_sp, _ = _partition_inexact(spike)
+        prior_psi_prec: jax.Array | None = _resolve_spike_prior_precision(
+            int(flat_sp.shape[0]), spike_prior_precision
+        )
+        psi_nuisance: Any = spike
+
+        def _fwd(cbm_v: Any, sp_v: Any) -> jax.Array:
+            return eval_whitened(cbm_v, sp_v)
+    else:
+        prior_psi_prec = None
+        psi_nuisance = None
+
+        def _fwd(cbm_v: Any) -> jax.Array:
+            return eval_whitened(cbm_v, None)
+
+    eff_mass_fn = (
+        mass_fn
+        if mass_fn is not None
+        else (
+            (lambda m: m.reservoir_masses())
+            if hasattr(cbm, "reservoir_masses")
+            else None
+        )
+    )
+
+    return cbm_fisher_spectrum(
+        _fwd,
+        cbm,
+        1.0,
+        psi_nuisance=psi_nuisance,
+        prior_cbm_sd=prior_sd,
+        prior_psi_prec=prior_psi_prec,
+        mass_fn=eff_mass_fn,
+        flux_fn=flux_fn,
+        noise_kind="sigma",
     )

@@ -29,7 +29,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import math
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 import warnings
 
 import equinox as eqx
@@ -55,10 +55,11 @@ from scipy.linalg import solve_triangular as _scipy_solve_triangular
 from scipy.optimize import minimize as _scipy_minimize
 import zodiax as zdx
 
-from .cbm import CarbonBoxModel
+from .cbm import CarbonBoxModel, SubspaceCBM
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 from .data import Dataset, TreeRingSeries
 from .linear import (
+    LinearMarginal,
     _GLEG128_W,
     _GLEG128_X,
     _safe_psd_root,
@@ -94,7 +95,9 @@ __all__ = [
     "GaussianField",
     "LogGaussianField",
     "DCTResponseOperator",
+    "LinearizedDCTOperator",
     "build_dct_response_operator",
+    "build_linearized_dct_operator",
     "build_dct_response_matrix",
     "predict_field_d14c",
     "IFTFieldFitResult",
@@ -157,6 +160,15 @@ def _as_dataset(dataset_or_series: Dataset | TreeRingSeries) -> Dataset:
 # =============================================================================
 # 1. Orthonormal 1D DCT-II Transforms & Reflecting-Boundary Spectral Kernels
 # =============================================================================
+
+
+def _dct2_ortho_matrix(n_grid: int) -> jax.Array:
+    """Orthonormal DCT-II matrix ``C`` satisfying ``dct2(x) == C @ x`` (vmap/jacfwd-safe)."""
+    n = int(n_grid)
+    k = jnp.arange(n, dtype=jnp.float64)[:, None]
+    idx = jnp.arange(n, dtype=jnp.float64)[None, :]
+    scale = jnp.where(k == 0.0, math.sqrt(1.0 / n), math.sqrt(2.0 / n))
+    return scale * jnp.cos((math.pi / (2.0 * n)) * k * (2.0 * idx + 1.0))
 
 
 def dct2(x: ArrayLike, *, axis: int = -1) -> jax.Array:
@@ -1085,10 +1097,15 @@ class DCTResponseOperator(zdx.Base):
     dt: float = eqx.field(static=True)
     dataset_digest: str = eqx.field(static=True, default="")
     template_digest: str = eqx.field(static=True, default="")
+    cbm_digest: str = eqx.field(static=True, default="")
 
     @property
     def t_grid(self) -> jax.Array:
         return jnp.linspace(self.t_start, self.t_end, self.n_grid, dtype=jnp.float64)
+
+    def evaluate_init_state_basis(self, _alpha: ArrayLike | None = None) -> jax.Array:
+        """Return ``init_state_basis`` (compatible with :meth:`LinearizedDCTOperator.evaluate_init_state_basis`)."""
+        return self.init_state_basis
 
 
 def _compute_dataset_digest(cbm: CarbonBoxModel, dataset: Dataset) -> str:
@@ -1199,7 +1216,7 @@ def _phi123_scalar(z: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
 
 
 @eqx.filter_jit
-def _compute_dct_operator_jit(
+def _compute_dct_operator_jit(  # shape-exempt(carbon): core JIT operator kernel adding static cbm_digest cache tag
     cbm: CarbonBoxModel,
     q_std: jax.Array,
     alpha_unit: jax.Array,
@@ -1212,6 +1229,7 @@ def _compute_dct_operator_jit(
     template: jax.Array | None,
     dataset_digest: str = "",
     template_digest: str = "none",
+    cbm_digest: str = "",
 ) -> DCTResponseOperator:
     """Direct FOH DCT response operator (modal scalar path + low-RAM Van Loan fallback)."""
     dt_f = (t_end - t_start) / float(n_grid - 1)
@@ -1394,7 +1412,7 @@ def _compute_dct_operator_jit(
     init_basis = full_mat[:, n_grid:]
 
     w_eff = w_grid if template is None else w_grid * template[None, :]
-    w_dct = dct2(w_eff, axis=1)
+    w_dct = w_eff @ _dct2_ortho_matrix(n_grid).T
 
     v_unit = jnp.linalg.solve(-A, b_scaled)
     unit_d14c_boxes = 1000.0 * ((v_unit / y_trop) / m_rel)
@@ -1420,6 +1438,7 @@ def _compute_dct_operator_jit(
         dt=dt_f,
         dataset_digest=dataset_digest,
         template_digest=template_digest,
+        cbm_digest=cbm_digest,
     )
 
 
@@ -1500,16 +1519,7 @@ def build_dct_response_operator(
     ):
         q_val = float(q_np.reshape(()))
         a_val = float(a_np.reshape(()))
-        cache_key = (
-            cbm_digest,
-            ds_digest,
-            tmpl_digest,
-            t0,
-            t1,
-            n_g,
-            q_val,
-            a_val,
-        )
+        cache_key = (cbm_digest, ds_digest, tmpl_digest, t0, t1, n_g, q_val, a_val)
         cached = _DCT_OPERATOR_CACHE.get(cache_key)
         if cached is not None:
             _DCT_OPERATOR_CACHE.move_to_end(cache_key)
@@ -1522,15 +1532,8 @@ def build_dct_response_operator(
                 cbm,
                 jnp.asarray(q_val, dtype=jnp.float64).reshape(()),
                 jnp.asarray(a_val, dtype=jnp.float64).reshape(()),
-                t0,
-                t1,
-                n_g,
-                flat_s,
-                flat_e,
-                specs,
-                tmpl_arr,
-                ds_digest,
-                tmpl_digest,
+                t0, t1, n_g, flat_s, flat_e, specs, tmpl_arr,
+                ds_digest, tmpl_digest, cbm_digest,
             )
         if not any(
             isinstance(x, jax.core.Tracer) for x in jax.tree_util.tree_leaves(op)
@@ -1555,6 +1558,7 @@ def build_dct_response_operator(
         tmpl_arr,
         ds_digest,
         tmpl_digest,
+        cbm_digest,
     )
 
 
@@ -1623,6 +1627,300 @@ def build_dct_response_matrix(
         template=template,
     )
     return op if return_operator else op.w_dct
+
+
+def _compute_subspace_basis_digest(cbm: SubspaceCBM) -> str:
+    """Deterministic SHA-256 fingerprint of a :class:`SubspaceCBM`'s static basis & topology."""
+    h = hashlib.sha256()
+    topo = cbm.topology
+    h.update(
+        f"nb={topo.n_boxes};ne={topo.n_edges};"
+        f"src={topo.edges_src};dst={topo.edges_dst};"
+        f"trop={topo.trop_box_indices};prod={topo.prod_box_indices};"
+        f"pw={cbm.prod_weights};decay={cbm.decay_rate:.16e};"
+        f"lmt={cbm.base_log_total_mass:.16e};".encode("utf-8")
+    )
+    h.update(
+        np.ascontiguousarray(np.asarray(cbm.base_log_rates_free, dtype=np.float64)).tobytes()
+    )
+    h.update(
+        np.ascontiguousarray(np.asarray(cbm.basis_rows, dtype=np.float64)).tobytes()
+    )
+    if cbm.tie_matrix_rows is not None:
+        h.update(
+            np.ascontiguousarray(np.asarray(cbm.tie_matrix_rows, dtype=np.float64)).tobytes()
+        )
+    return h.hexdigest()
+
+
+class LinearizedDCTOperator(zdx.Base):
+    r"""First-order tangent-linear approximation of ``W_DCT(alpha)`` for :class:`SubspaceCBM`.
+
+    Evaluates the DCT-II forward response matrix of a :class:`GaussianField` around
+    a reference subspace coordinate ``alpha_ref`` (typically the exact MAP ``alpha_MAP``):
+
+    .. math::
+
+        W_{\mathrm{tan}}(\boldsymbol{\alpha})
+        = W_{\mathrm{DCT}}(\boldsymbol{\alpha}_{\mathrm{ref}})
+        + \sum_{k=1}^{m} (\alpha_k - \alpha_{\mathrm{ref}, k})\,
+          \left.\frac{\partial W_{\mathrm{DCT}}}{\partial \alpha_k}\right|_{\boldsymbol{\alpha}_{\mathrm{ref}}},
+
+    avoiding per-step matrix eigendecompositions inside NUTS/SMC while keeping
+    ``SteadyProduction + MiyakeSpike`` and steady-state offset ratios exact at ``alpha``.
+    """
+
+    alpha_ref: jax.Array
+    w_ref: jax.Array
+    dw_dalpha: jax.Array
+    t_grid: jax.Array
+    init_basis_ref: jax.Array | None
+    d_init_basis_dalpha: jax.Array | None
+    dt: float = eqx.field(static=True)
+    t_start: float = eqx.field(static=True)
+    t_end: float = eqx.field(static=True)
+    n_grid: int = eqx.field(static=True)
+    dataset_digest: str = eqx.field(static=True)
+    template_digest: str = eqx.field(static=True)
+    subspace_basis_digest: str = eqx.field(static=True)
+
+    def __init__(  # shape-exempt(carbon): PyTree constructor exposing explicit keyword fields for LinearizedDCTOperator
+        self,
+        alpha_ref: ArrayLike,
+        w_ref: ArrayLike,
+        dw_dalpha: ArrayLike,
+        t_grid: ArrayLike,
+        dt: float,
+        *,
+        t_start: float | None = None,
+        t_end: float | None = None,
+        n_grid: int | None = None,
+        dataset_digest: str = "",
+        template_digest: str = "none",
+        subspace_basis_digest: str = "",
+        init_basis_ref: ArrayLike | None = None,
+        d_init_basis_dalpha: ArrayLike | None = None,
+    ) -> None:
+        a_ref = jnp.asarray(alpha_ref, dtype=jnp.float64).reshape(-1)
+        w_r = jnp.asarray(w_ref, dtype=jnp.float64)
+        dw = jnp.asarray(dw_dalpha, dtype=jnp.float64)
+        tg = jnp.asarray(t_grid, dtype=jnp.float64).reshape(-1)
+        if w_r.ndim != 2:
+            raise ValueError(f"w_ref must be 2D (n_obs, n_grid), got shape {w_r.shape}.")
+        n_obs, n_g = int(w_r.shape[0]), int(w_r.shape[1])
+        m_modes = int(a_ref.shape[0])
+        if dw.shape != (m_modes, n_obs, n_g):
+            raise ValueError(
+                f"dw_dalpha must have shape ({m_modes}, {n_obs}, {n_g}), got {dw.shape}."
+            )
+        if tg.shape != (n_g,):
+            raise ValueError(f"t_grid must have length {n_g}, got shape {tg.shape}.")
+
+        dt_f = float(dt)
+        if not (math.isfinite(dt_f) and dt_f > 0.0):
+            raise ValueError(f"dt must be finite and positive, got {dt}.")
+
+        ib_r = None if init_basis_ref is None else jnp.asarray(init_basis_ref, dtype=jnp.float64)
+        dib = (
+            None
+            if d_init_basis_dalpha is None
+            else jnp.asarray(d_init_basis_dalpha, dtype=jnp.float64)
+        )
+
+        t0 = float(tg[0]) if t_start is None else float(t_start)
+        t1 = float(tg[-1]) if t_end is None else float(t_end)
+        self.alpha_ref = a_ref
+        self.w_ref = w_r
+        self.dw_dalpha = dw
+        self.t_grid = tg
+        self.init_basis_ref = ib_r
+        self.d_init_basis_dalpha = dib
+        self.dt = dt_f
+        self.t_start = t0
+        self.t_end = t1
+        self.n_grid = n_g if n_grid is None else int(n_grid)
+        self.dataset_digest = str(dataset_digest)
+        self.template_digest = str(template_digest)
+        self.subspace_basis_digest = str(subspace_basis_digest)
+
+    @property
+    def n_modes(self) -> int:
+        """Number of :class:`SubspaceCBM` modes ``m``."""
+        return int(self.alpha_ref.shape[0])
+
+    def evaluate_w_dct(self, alpha: ArrayLike) -> jax.Array:
+        """Evaluate tangent-linear ``W_tan(alpha)`` of shape ``(n_obs, n_grid)``."""
+        a = jnp.asarray(alpha, dtype=jnp.float64).reshape(-1)
+        if a.shape != self.alpha_ref.shape:
+            raise ValueError(
+                f"Expected alpha of shape {self.alpha_ref.shape}, got {a.shape}."
+            )
+        if self.alpha_ref.shape[0] == 0:
+            return self.w_ref
+        return self.w_ref + jnp.tensordot(a - self.alpha_ref, self.dw_dalpha, axes=([0], [0]))
+
+    def evaluate_init_state_basis(self, alpha: ArrayLike) -> jax.Array:
+        """Evaluate tangent-linear initial-state basis ``(n_obs, n_boxes)`` at ``alpha``."""
+        if self.init_basis_ref is None or self.d_init_basis_dalpha is None:
+            raise ValueError(
+                "LinearizedDCTOperator was constructed without init_basis_ref / d_init_basis_dalpha."
+            )
+        a = jnp.asarray(alpha, dtype=jnp.float64).reshape(-1)
+        if a.shape != self.alpha_ref.shape:
+            raise ValueError(
+                f"Expected alpha of shape {self.alpha_ref.shape}, got {a.shape}."
+            )
+        if self.alpha_ref.shape[0] == 0:
+            return self.init_basis_ref
+        return self.init_basis_ref + jnp.tensordot(
+            a - self.alpha_ref, self.d_init_basis_dalpha, axes=([0], [0])
+        )
+
+
+def build_linearized_dct_operator(  # shape-exempt(carbon): public operator builder matching build_dct_response_operator keyword signature
+    subspace_cbm: SubspaceCBM,
+    dataset: Dataset | TreeRingSeries,
+    *,
+    t_start: float | None = None,
+    t_end: float | None = None,
+    pad_years: float = 15.0,
+    n_grid: int | None = None,
+    dt_target: float = 1.0,
+    solver: Any | None = None,
+    q_std: ArrayLike = DEFAULT_Q_STD,
+    alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    template: ArrayLike | None = None,
+) -> LinearizedDCTOperator:
+    """Build a :class:`LinearizedDCTOperator` around ``subspace_cbm.alpha`` via ``m`` forward JVPs.
+
+    Parameters
+    ----------
+    subspace_cbm : SubspaceCBM
+        Reference subspace carbon-box model whose ``alpha`` serves as the linearization
+        centre (typically the exact MAP estimate).
+    dataset : Dataset or TreeRingSeries
+        Observational dataset defining ring quadrature windows and hemisphere routing.
+    t_start, t_end : float, optional
+        Field grid bounds (years CE). Defaults to ``(span_lo - pad_years, span_hi + 0.5)``.
+    pad_years : float, optional
+        Pre-data spin-up padding (years) when ``t_start`` is omitted (default ``15.0``).
+    n_grid : int, optional
+        Number of uniform DCT-II knots. When omitted, chosen from ``dt_target`` as
+        ``max(round((t_end - t_start) / dt_target) + 1, 2)``.
+    dt_target : float, optional
+        Target knot spacing in years used when ``n_grid is None`` (default ``1.0``).
+    solver : AbstractSolver, optional
+        Accepted for interface compatibility (exact analytical FOH integration is used).
+    q_std, alpha_unit : ArrayLike, optional
+        Reference production rate and unit conversion factor.
+    template : ArrayLike, optional
+        Optional temporal envelope of shape ``(n_grid,)``.
+    """
+    del solver
+    if not isinstance(subspace_cbm, SubspaceCBM):
+        raise TypeError(
+            "build_linearized_dct_operator requires a SubspaceCBM; "
+            f"got {type(subspace_cbm).__name__}."
+        )
+    ds = _as_dataset(dataset)
+    if t_start is None or t_end is None:
+        span_lo, span_hi = ds.time_span
+        t0 = float(span_lo - float(pad_years)) if t_start is None else float(t_start)
+        t1 = float(span_hi + 0.5) if t_end is None else float(t_end)
+    else:
+        t0 = float(t_start)
+        t1 = float(t_end)
+    if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
+        raise ValueError(f"Expected finite t_end > t_start, got [{t0}, {t1}].")
+
+    if n_grid is None:
+        dt_t = float(dt_target)
+        if not (math.isfinite(dt_t) and dt_t > 0.0):
+            raise ValueError(f"dt_target must be finite and positive, got {dt_target}.")
+        n_g = max(int(round((t1 - t0) / dt_t)) + 1, 2)
+    else:
+        n_g = int(n_grid)
+        if n_g < 2:
+            raise ValueError(f"n_grid must be >= 2, got {n_grid}.")
+
+    if template is not None:
+        tmpl_shape = np.shape(template)
+        if tmpl_shape != (n_g,):
+            raise ValueError(f"template shape {tmpl_shape} must be ({n_g},).")
+
+    ds_digest = _compute_dataset_digest(subspace_cbm, ds)
+    tmpl_digest = _compute_template_digest(template)
+    basis_digest = _compute_subspace_basis_digest(subspace_cbm)
+    tmpl_arr = None if template is None else jnp.asarray(template, dtype=jnp.float64)
+    q_arr = jnp.asarray(q_std, dtype=jnp.float64).reshape(())
+    a_arr = jnp.asarray(alpha_unit, dtype=jnp.float64).reshape(())
+    flat_s, flat_e, specs = _pack_dataset_quadrature(subspace_cbm, ds)
+
+    alpha_ref = jnp.asarray(subspace_cbm.alpha, dtype=jnp.float64).reshape(-1)
+    m_modes = int(alpha_ref.shape[0])
+    dt_f = (t1 - t0) / float(n_g - 1)
+    t_grid = jnp.linspace(t0, t1, n_g, dtype=jnp.float64)
+
+    def _w_and_init_of_alpha(alpha_vec: jax.Array) -> tuple[jax.Array, jax.Array]:
+        cbm_a = eqx.tree_at(lambda c: c.alpha, subspace_cbm, alpha_vec)
+        op_a = _compute_dct_operator_jit(
+            cbm_a,
+            q_arr,
+            a_arr,
+            t0,
+            t1,
+            n_g,
+            flat_s,
+            flat_e,
+            specs,
+            tmpl_arr,
+            ds_digest,
+            tmpl_digest,
+        )
+        return op_a.w_dct, op_a.init_state_basis
+
+    if m_modes == 0:
+        w_ref, ib_ref = _w_and_init_of_alpha(alpha_ref)
+        dw_dalpha = jnp.zeros((0, w_ref.shape[0], n_g), dtype=jnp.float64)
+        dib_dalpha = jnp.zeros((0, ib_ref.shape[0], ib_ref.shape[1]), dtype=jnp.float64)
+    elif _concrete_np(alpha_ref) is not None:
+        @jax.jit
+        def _jvp_one(
+            a_val: jax.Array, tang: jax.Array
+        ) -> tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, jax.Array]]:
+            return jax.jvp(_w_and_init_of_alpha, (a_val,), (tang,))
+
+        eye_m = jnp.eye(m_modes, dtype=jnp.float64)
+        (w_ref, ib_ref), (dw0, dib0) = _jvp_one(alpha_ref, eye_m[0])
+        dw_list = [dw0]
+        dib_list = [dib0]
+        for k in range(1, m_modes):
+            _, (dw_k, dib_k) = _jvp_one(alpha_ref, eye_m[k])
+            dw_list.append(dw_k)
+            dib_list.append(dib_k)
+        dw_dalpha = jnp.stack(dw_list, axis=0)
+        dib_dalpha = jnp.stack(dib_list, axis=0)
+    else:
+        w_ref, ib_ref = _w_and_init_of_alpha(alpha_ref)
+        jac_w, jac_ib = jax.jacfwd(_w_and_init_of_alpha)(alpha_ref)
+        dw_dalpha = jnp.moveaxis(jac_w, -1, 0)
+        dib_dalpha = jnp.moveaxis(jac_ib, -1, 0)
+
+    return LinearizedDCTOperator(
+        alpha_ref=alpha_ref,
+        w_ref=w_ref,
+        dw_dalpha=dw_dalpha,
+        t_grid=t_grid,
+        dt=dt_f,
+        t_start=t0,
+        t_end=t1,
+        n_grid=n_g,
+        dataset_digest=ds_digest,
+        template_digest=tmpl_digest,
+        subspace_basis_digest=basis_digest,
+        init_basis_ref=ib_ref,
+        d_init_basis_dalpha=dib_dalpha,
+    )
 
 
 # =============================================================================
@@ -2350,6 +2648,131 @@ def _resolve_effective_prehistory_root_y0(
     if include_field_initial_cov:
         return _field_prehistory_root_y0(cbm, alpha_unit, field)
     return None
+
+
+def _validate_dct_operator_geometry(
+    op_cfg: DCTResponseOperator | LinearizedDCTOperator,
+    cbm: CarbonBoxModel,
+    dataset: Dataset,
+    gf: GaussianField,
+) -> None:
+    """Validate geometry and SHA-256 digests of a supplied DCT response operator."""
+    is_lin = isinstance(op_cfg, LinearizedDCTOperator)
+    kind = "LinearizedDCTOperator" if is_lin else "DCTResponseOperator"
+    w_shape = op_cfg.w_ref.shape if is_lin else op_cfg.w_dct.shape
+    if is_lin and not isinstance(cbm, SubspaceCBM):
+        raise TypeError(
+            "LinearMarginalConfig.dct_operator is a LinearizedDCTOperator, "
+            f"which requires model.cbm to be a SubspaceCBM; got {type(cbm).__name__}."
+        )
+    if w_shape != (dataset.n_obs, gf.n_grid) or (
+        abs(op_cfg.t_start - gf.t_start) > 1e-9
+        or abs(op_cfg.t_end - gf.t_end) > 1e-9
+    ):
+        raise ValueError(
+            f"{kind} geometry (shape={w_shape}, [{op_cfg.t_start}, {op_cfg.t_end}]) "
+            f"does not match dataset/GaussianField "
+            f"(shape=({dataset.n_obs}, {gf.n_grid}), [{gf.t_start}, {gf.t_end}])."
+        )
+    if op_cfg.dataset_digest:
+        ds_dig = _compute_dataset_digest(cbm, dataset)
+        if ds_dig and ds_dig != op_cfg.dataset_digest:
+            raise ValueError(f"{kind} dataset_digest does not match dataset.")
+    if op_cfg.template_digest:
+        tmpl_dig = _compute_template_digest(gf.template)
+        if tmpl_dig and tmpl_dig != op_cfg.template_digest:
+            raise ValueError(
+                f"{kind} template_digest does not match GaussianField.template."
+            )
+    if is_lin and op_cfg.subspace_basis_digest:
+        assert isinstance(cbm, SubspaceCBM)
+        if _compute_subspace_basis_digest(cbm) != op_cfg.subspace_basis_digest:
+            raise ValueError(
+                "LinearizedDCTOperator subspace_basis_digest does not match model.cbm."
+            )
+
+
+def _resolve_dct_operator_pair(
+    cbm: CarbonBoxModel,
+    dataset: Dataset,
+    gf: GaussianField,
+    dct_operator: DCTResponseOperator | LinearizedDCTOperator | None,
+    *,
+    q_std: ArrayLike = DEFAULT_Q_STD,
+    alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    need_init_basis: bool = True,
+) -> tuple[jax.Array, jax.Array | None]:
+    """Return ``(w_dct, init_state_basis)`` for exact, cached, or tangent DCT operators."""
+    if isinstance(dct_operator, LinearizedDCTOperator):
+        _validate_dct_operator_geometry(dct_operator, cbm, dataset, gf)
+        assert isinstance(cbm, SubspaceCBM)
+        w_dct = dct_operator.evaluate_w_dct(cbm.alpha)
+        init_b = (
+            dct_operator.evaluate_init_state_basis(cbm.alpha)
+            if need_init_basis
+            else None
+        )
+        return w_dct, init_b
+    if isinstance(dct_operator, DCTResponseOperator):
+        _validate_dct_operator_geometry(dct_operator, cbm, dataset, gf)
+        cur_cbm_dig = _compute_cbm_digest(cbm)
+        if cur_cbm_dig != "" and (
+            dct_operator.cbm_digest == "" or cur_cbm_dig == dct_operator.cbm_digest
+        ):
+            init_b = (
+                dct_operator.evaluate_init_state_basis()
+                if need_init_basis
+                else None
+            )
+            return dct_operator.w_dct, init_b
+    op_gf = build_dct_response_operator(
+        cbm,
+        dataset,
+        t_start=gf.t_start,
+        t_end=gf.t_end,
+        n_grid=gf.n_grid,
+        q_std=q_std,
+        alpha_unit=alpha_unit,
+        template=gf.template,
+    )
+    return op_gf.w_dct, (op_gf.init_state_basis if need_init_basis else None)
+
+
+def _build_field_cov_columns(
+    cbm: CarbonBoxModel,
+    dataset: Dataset,
+    gf: GaussianField,
+    dct_operator: DCTResponseOperator | LinearizedDCTOperator | None = None,
+    *,
+    q_std: ArrayLike = DEFAULT_Q_STD,
+    alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    prehistory_kernel: Any | None = None,
+    include_field_initial_cov: bool = True,
+) -> tuple[jax.Array, jax.Array | None]:
+    """Build ``([H_gf, H_init], root_y0)`` shared by likelihood, Fisher, and CBM+GP EB."""
+    need_init = (prehistory_kernel is not None) or bool(include_field_initial_cov)
+    w_dct_gf, init_basis_gf = _resolve_dct_operator_pair(
+        cbm,
+        dataset,
+        gf,
+        dct_operator,
+        q_std=q_std,
+        alpha_unit=alpha_unit,
+        need_init_basis=need_init,
+    )
+    h_gf = w_dct_gf * _safe_sqrt(gf.power_spectrum())[None, :]
+    root_y0 = _resolve_effective_prehistory_root_y0(
+        cbm,
+        alpha_unit,
+        gf,
+        prehistory_kernel=prehistory_kernel,
+        include_field_initial_cov=include_field_initial_cov,
+    )
+    if root_y0 is not None:
+        assert init_basis_gf is not None
+        h_init = init_basis_gf @ root_y0
+        return jnp.concatenate([h_gf, h_init], axis=1), root_y0
+    return h_gf, None
 
 
 def _build_offset_whitening(
@@ -4507,6 +4930,13 @@ class OptimizedKernelResult(zdx.Base):
     bic: jax.Array
     n_hyperparams: int = eqx.field(static=True)
     converged: bool = eqx.field(static=True)
+    cbm_opt: CarbonBoxModel | None = None
+    alpha_opt: jax.Array | None = None
+
+    @property
+    def log_evidence_hyper(self) -> jax.Array:
+        """Alias for :attr:`log_hyper_evidence`."""
+        return self.log_hyper_evidence
 
 
 def _summarize_hyperparams(kernel: SpectralKernel) -> dict[str, float]:
@@ -5356,7 +5786,624 @@ def _optimize_single_kernel_precomputed(
     )
 
 
-def optimize_gp_kernel(
+def _extract_spike_from_extra(
+    extra_production: ProductionTerm | None,
+) -> tuple[MiyakeSpike | None, str | None]:
+    """Locate the first :class:`MiyakeSpike` in ``extra_production`` and its key name."""
+    if extra_production is None:
+        return None, None
+    if isinstance(extra_production, MiyakeSpike):
+        return extra_production, None
+    if isinstance(extra_production, ProductionSum):
+        for target_name, part in zip(extra_production.names, extra_production.parts):
+            if isinstance(part, MiyakeSpike):
+                return part, target_name
+    return None, None
+
+
+def _replace_spike_in_extra(
+    extra_production: ProductionTerm | None,
+    spike_name: str | None,
+    new_spike: MiyakeSpike | None,
+    q_std: float,
+) -> ProductionTerm:
+    """Return deterministic production term with ``new_spike`` substituted in."""
+    if extra_production is None:
+        return SteadyProduction(q_std)
+    if new_spike is None:
+        return extra_production
+    if isinstance(extra_production, MiyakeSpike):
+        return new_spike
+    if isinstance(extra_production, ProductionSum) and spike_name is not None:
+        new_parts = {
+            nm: (new_spike if nm == spike_name else pt)
+            for nm, pt in zip(extra_production.names, extra_production.parts)
+        }
+        return ProductionSum(new_parts)
+    return extra_production
+
+
+def _unpack_spike_from_vec(
+    sp_u: jax.Array,
+    spike_ref: MiyakeSpike | None,
+    *,
+    has_spike: bool,
+    opt_full_spike: bool,
+    t0: float,
+    t1: float,
+    clip_like: bool = True,
+) -> MiyakeSpike | None:
+    if not has_spike or spike_ref is None:
+        return None
+    if opt_full_spike:
+        ts_raw, ld_raw, lf_raw = sp_u[0], sp_u[1], sp_u[2]
+        if clip_like:
+            ts_v = jnp.clip(ts_raw, t0, t1)
+            dur_v = jnp.exp(jnp.clip(ld_raw, -8.0, 4.0))
+            fl_v = jnp.exp(jnp.clip(lf_raw, -12.0, 12.0))
+        else:
+            ts_v = ts_raw
+            dur_v = _safe_exp_hyper(ld_raw)
+            fl_v = _safe_exp_hyper(lf_raw)
+        sp_upd = eqx.tree_at(lambda s: s.t_start, spike_ref, ts_v)
+        sp_upd = eqx.tree_at(lambda s: s.duration, sp_upd, dur_v)
+        sp_upd = eqx.tree_at(lambda s: s.fluence, sp_upd, fl_v)
+        return sp_upd
+    lf_raw = sp_u[0]
+    fl_v = jnp.exp(jnp.clip(lf_raw, -12.0, 12.0)) if clip_like else _safe_exp_hyper(lf_raw)
+    return eqx.tree_at(lambda s: s.fluence, spike_ref, fl_v)
+
+
+class _CBMKernelOptSpec(NamedTuple):
+    """Static problem specification for joint ``(phi, cbm.alpha[, spike])`` optimization."""
+
+    label: str
+    build_kernel_fn: Callable[[jax.Array], SpectralKernel]
+    prior_fn: Callable[[jax.Array], jax.Array]
+    phi0: jax.Array
+    cbm: SubspaceCBM
+    ds: Dataset
+    extra_production: ProductionTerm | None
+    optimize_spike: bool
+    spike_priors: Mapping[str, Any] | None
+    spike_log_fluence_prior: tuple[float, float]
+    cbm_prior_sd: float
+    offset_mode: Literal["hierarchical", "none"]
+    multi_start: int
+    q_std: float
+    rng_key: jax.Array
+    prehistory_kernel: Any | None
+    include_field_initial_cov: bool
+    global_offset_prior_sd: float = 200.0
+    lab_offset_prior_sd: float = 1.5
+
+
+class _CBMSpikeOptMeta(NamedTuple):
+    """Spike parameterization and prior vectors for joint CBM+kernel optimization."""
+
+    spike_ref: MiyakeSpike | None
+    spike_name: str | None
+    has_spike: bool
+    opt_full_spike: bool
+    sp_mu_vec: jax.Array
+    sp_sd_vec: jax.Array
+
+
+def _init_cbm_kernel_starts(
+    spec: _CBMKernelOptSpec,
+    lin_op: LinearizedDCTOperator,
+    alpha_init: jax.Array | None,
+    spike_init_term: MiyakeSpike | None,
+) -> tuple[jax.Array, _CBMSpikeOptMeta]:
+    """Build multi-start array and spike metadata for CBM+kernel optimization."""
+    n_k = int(spec.phi0.shape[0])
+    m_modes = int(spec.cbm.n_modes)
+    t0, t1 = lin_op.t_start, lin_op.t_end
+    spike_orig, spike_name = _extract_spike_from_extra(spec.extra_production)
+    spike_ref = spike_init_term if spike_init_term is not None else spike_orig
+    has_spike = spike_ref is not None
+    opt_full_spike = bool(has_spike and spec.optimize_spike)
+
+    sp_means, sp_sds = _parse_spike_priors(spec.spike_priors, t0, t1)
+    eff_fl_mu, eff_fl_sd = (
+        float(spec.spike_log_fluence_prior[0]),
+        float(spec.spike_log_fluence_prior[1]),
+    )
+    if (
+        spec.spike_priors is not None
+        and spec.spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
+        and ("fluence" in spec.spike_priors or "log_fluence" in spec.spike_priors)
+    ):
+        eff_fl_mu, eff_fl_sd = float(sp_means[2]), float(sp_sds[2])
+
+    a0 = jnp.asarray(
+        spec.cbm.alpha if alpha_init is None else alpha_init, dtype=jnp.float64
+    ).reshape(m_modes)
+    if opt_full_spike:
+        assert spike_ref is not None
+        sp_u0 = jnp.array(
+            [
+                float(spike_ref.t_start),
+                math.log(max(float(spike_ref.duration), 1e-3)),
+                math.log(max(float(spike_ref.fluence), 1e-3)),
+            ],
+            dtype=jnp.float64,
+        )
+        sp_mu_vec, sp_sd_vec = sp_means, sp_sds
+        u0 = jnp.concatenate([spec.phi0, a0, sp_u0], axis=0)
+    elif has_spike:
+        assert spike_ref is not None
+        sp_u0 = jnp.array(
+            [math.log(max(float(spike_ref.fluence), 1e-3))], dtype=jnp.float64
+        )
+        sp_mu_vec = jnp.array([eff_fl_mu], dtype=jnp.float64)
+        sp_sd_vec = jnp.array([eff_fl_sd], dtype=jnp.float64)
+        u0 = jnp.concatenate([spec.phi0, a0, sp_u0], axis=0)
+    else:
+        sp_mu_vec = jnp.zeros((0,), dtype=jnp.float64)
+        sp_sd_vec = jnp.ones((0,), dtype=jnp.float64)
+        u0 = jnp.concatenate([spec.phi0, a0], axis=0)
+
+    d_u = int(u0.shape[0])
+    n_starts = max(int(spec.multi_start), 1)
+    if n_starts == 1:
+        starts = u0[None, :]
+    else:
+        pert = jax.random.normal(spec.rng_key, (n_starts - 1, d_u), dtype=jnp.float64)
+        scale_vec = np.full(d_u, 0.35, dtype=np.float64)
+        scale_vec[n_k : n_k + m_modes] = 0.15
+        if opt_full_spike:
+            scale_vec[n_k + m_modes :] = np.array([0.1, 0.15, 0.15], dtype=np.float64)
+        elif has_spike:
+            scale_vec[n_k + m_modes :] = 0.15
+        starts = jnp.concatenate(
+            [u0[None, :], u0[None, :] + pert * jnp.asarray(scale_vec)[None, :]],
+            axis=0,
+        )
+    return starts, _CBMSpikeOptMeta(
+        spike_ref=spike_ref,
+        spike_name=spike_name,
+        has_spike=has_spike,
+        opt_full_spike=opt_full_spike,
+        sp_mu_vec=sp_mu_vec,
+        sp_sd_vec=sp_sd_vec,
+    )
+
+
+class _CBMNLLContext(NamedTuple):
+    """Static/array context passed to module-level ``_cbm_kern_nll_vg``."""
+
+    cbm_template: SubspaceCBM
+    ds: Dataset
+    extra_production: ProductionTerm | None
+    spike_ref: MiyakeSpike | None
+    x_off_base: jax.Array
+    pm_off: jax.Array
+    ps_off: jax.Array
+    box_indices_flat: jax.Array
+    trop_idx: jax.Array
+    prehistory_kernel: Any | None
+    spike_name: str | None
+    offset_mode: str
+    has_spike: bool
+    opt_full_spike: bool
+    include_field_initial_cov: bool
+    q_std: float
+    n_g: int
+    t0: float
+    t1: float
+
+
+@eqx.filter_jit
+def _cbm_kern_nll_vg(
+    dyn_k: Any,
+    alpha: jax.Array,
+    sp_u: jax.Array,
+    static_k: Any,
+    cur_op: LinearizedDCTOperator,
+    ctx: _CBMNLLContext,
+) -> tuple[jax.Array, tuple[Any, jax.Array, jax.Array]]:
+    """Shared module-level JIT negative log-evidence + gradients wrt ``(dyn_k, alpha, sp_u)``."""
+    solver = ExactLinearSolver()
+
+    def _nll(dk_in: Any, alpha_in: jax.Array, sp_in: jax.Array) -> jax.Array:
+        alpha_like = jnp.clip(alpha_in, -12.0, 12.0)
+        cbm_a = eqx.tree_at(lambda c: c.alpha, ctx.cbm_template, alpha_like)
+        kern_a = eqx.combine(dk_in, static_k)
+        sp_a = _unpack_spike_from_vec(
+            sp_in,
+            ctx.spike_ref,
+            has_spike=ctx.has_spike,
+            opt_full_spike=ctx.opt_full_spike,
+            t0=ctx.t0,
+            t1=ctx.t1,
+            clip_like=True,
+        )
+        det_prod = _replace_spike_in_extra(
+            ctx.extra_production, ctx.spike_name, sp_a, ctx.q_std
+        )
+        pred_det = RadiocarbonModel(
+            cbm_a, det_prod, solver, q_std=ctx.q_std
+        ).predict_d14c(ctx.ds, concat=True)
+        resid = ctx.ds.d14c_flat - pred_det
+        gf_a = GaussianField(
+            jnp.zeros((ctx.n_g,), dtype=jnp.float64),
+            ctx.t0,
+            ctx.t1,
+            kernel=kern_a,
+            zero_mode=False,
+        )
+        h_field, _ = _build_field_cov_columns(
+            cbm_a,
+            ctx.ds,
+            gf_a,
+            cur_op,
+            q_std=ctx.q_std,
+            alpha_unit=ALPHA_ATOMS_CM2_S_TO_KG_YR,
+            prehistory_kernel=ctx.prehistory_kernel,
+            include_field_initial_cov=ctx.include_field_initial_cov,
+        )
+        n_fc = h_field.shape[1]
+        if ctx.offset_mode == "hierarchical":
+            y_ss = cbm_a.steady_state_c14(
+                q_std=ctx.q_std, alpha_unit=ALPHA_ATOMS_CM2_S_TO_KG_YR
+            )
+            r_ratio = (y_ss / jnp.sum(y_ss[ctx.trop_idx])) / cbm_a.relative_reservoir_masses()
+            x_off = ctx.x_off_base.at[:, 0].set(r_ratio[ctx.box_indices_flat])
+            x_mat = jnp.concatenate([x_off, h_field], axis=1)
+        else:
+            x_mat = h_field
+        pm_all = jnp.concatenate([ctx.pm_off, jnp.zeros((n_fc,), dtype=jnp.float64)])
+        ps_all = jnp.concatenate([ctx.ps_off, jnp.ones((n_fc,), dtype=jnp.float64)])
+        return -LinearMarginal(
+            x_mat, prior_mean=pm_all, prior_sd=ps_all, method="cholesky"
+        ).loglike(resid, ctx.ds.sigma_flat)
+
+    return jax.value_and_grad(_nll, argnums=(0, 1, 2))(dyn_k, alpha, sp_u)
+
+
+def _make_cbm_nll_context(
+    spec: _CBMKernelOptSpec,
+    lin_op0: LinearizedDCTOperator,
+    spike_meta: _CBMSpikeOptMeta,
+) -> _CBMNLLContext:
+    """Assemble static/array ``_CBMNLLContext`` for ``_cbm_kern_nll_vg``."""
+    box_indices_flat = jnp.array(
+        [
+            int(spec.cbm.box_index(s.box_name, hemisphere=s.hemisphere))
+            for s in spec.ds.series
+            for _ in range(s.n_obs)
+        ],
+        dtype=jnp.int32,
+    )
+    trop_idx = jnp.asarray(spec.cbm.topology.trop_box_indices, dtype=jnp.int32)
+    if spec.offset_mode == "hierarchical":
+        x_off_base, pm_off, ps_off = hierarchical_offset_design(
+            spec.ds.series_indices,
+            spec.ds.n_series,
+            global_prior_mean=0.0,
+            global_prior_sd=float(spec.global_offset_prior_sd),
+            lab_prior_sd=float(spec.lab_offset_prior_sd),
+        )
+    elif spec.offset_mode == "none":
+        x_off_base = jnp.zeros((spec.ds.n_obs, 0), dtype=jnp.float64)
+        pm_off = jnp.zeros((0,), dtype=jnp.float64)
+        ps_off = jnp.ones((0,), dtype=jnp.float64)
+    else:
+        raise ValueError(
+            f"offset_mode must be 'hierarchical' or 'none', got {spec.offset_mode!r}."
+        )
+    return _CBMNLLContext(
+        cbm_template=spec.cbm,
+        ds=spec.ds,
+        extra_production=spec.extra_production,
+        spike_ref=spike_meta.spike_ref,
+        x_off_base=x_off_base,
+        pm_off=pm_off,
+        ps_off=ps_off,
+        box_indices_flat=box_indices_flat,
+        trop_idx=trop_idx,
+        prehistory_kernel=spec.prehistory_kernel,
+        spike_name=spike_meta.spike_name,
+        offset_mode=spec.offset_mode,
+        has_spike=spike_meta.has_spike,
+        opt_full_spike=spike_meta.opt_full_spike,
+        include_field_initial_cov=spec.include_field_initial_cov,
+        q_std=float(spec.q_std),
+        n_g=lin_op0.n_grid,
+        t0=lin_op0.t_start,
+        t1=lin_op0.t_end,
+    )
+
+
+def _build_cbm_kernel_eval_vg(
+    spec: _CBMKernelOptSpec,
+    lin_op0: LinearizedDCTOperator,
+    spike_meta: _CBMSpikeOptMeta,
+) -> Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]]:
+    """Build module-JIT-cached joint negative log-hyper-posterior + gradient evaluator."""
+    n_k = int(spec.phi0.shape[0])
+    m_modes = int(spec.cbm.n_modes)
+    cbm_sd_f = float(spec.cbm_prior_sd)
+    _, static_k = eqx.partition(spec.build_kernel_fn(spec.phi0), eqx.is_inexact_array)
+    ctx = _make_cbm_nll_context(spec, lin_op0, spike_meta)
+    prior_vg_fn = jax.jit(jax.value_and_grad(spec.prior_fn))
+
+    def _phi_to_dyn_k(p_vec: jax.Array) -> Any:
+        return eqx.partition(
+            spec.build_kernel_fn(jnp.clip(p_vec, -20.0, 20.0)), eqx.is_inexact_array
+        )[0]
+
+    def _eval_vg(u_np: np.ndarray, cur_lin_op: LinearizedDCTOperator) -> tuple[float, np.ndarray]:
+        u_j = jnp.asarray(u_np, dtype=jnp.float64)
+        phi_j = u_j[:n_k]
+        alpha_j = u_j[n_k : n_k + m_modes]
+        sp_j = u_j[n_k + m_modes :]
+
+        dyn_k, vjp_k = jax.vjp(_phi_to_dyn_k, phi_j)
+        nll, (g_dk, g_alpha_nll, g_sp_nll) = _cbm_kern_nll_vg(
+            dyn_k, alpha_j, sp_j, static_k, cur_lin_op, ctx
+        )
+        g_phi_nll = vjp_k(g_dk)[0]
+        lp_phi, g_phi_lp = prior_vg_fn(phi_j)
+        lp_alpha = jnp.sum(_normal_logpdf(alpha_j, 0.0, cbm_sd_f))
+        g_alpha_lp = -alpha_j / (cbm_sd_f * cbm_sd_f)
+        if spike_meta.has_spike:
+            lp_sp = jnp.sum(
+                _normal_logpdf(sp_j, spike_meta.sp_mu_vec, spike_meta.sp_sd_vec)
+            )
+            g_sp_lp = -(sp_j - spike_meta.sp_mu_vec) / jnp.square(spike_meta.sp_sd_vec)
+        else:
+            lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
+            g_sp_lp = jnp.zeros((0,), dtype=jnp.float64)
+
+        val_f = float(nll - (lp_phi + lp_alpha + lp_sp))
+        g_arr = np.asarray(
+            jnp.concatenate(
+                [g_phi_nll - g_phi_lp, g_alpha_nll - g_alpha_lp, g_sp_nll - g_sp_lp],
+                axis=0,
+            ),
+            dtype=np.float64,
+        )
+        if not (math.isfinite(val_f) and np.all(np.isfinite(g_arr))):
+            return 1e30, np.zeros_like(u_np)
+        return val_f, g_arr
+
+    return _eval_vg
+
+
+def _run_cbm_kernel_bfgs(
+    eval_vg: Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]],
+    cur_lin_op: LinearizedDCTOperator,
+    init_starts: jax.Array,
+    maxiter: int = 160,
+) -> tuple[np.ndarray, bool]:
+    """Run multi-start BFGS with L-BFGS-B fallback polish for CBM+kernel MAP-II."""
+    def _obj_np(u_np: np.ndarray) -> tuple[float, np.ndarray]:
+        return eval_vg(u_np, cur_lin_op)
+
+    best_val = float("inf")
+    best_x = np.asarray(init_starts[0], dtype=np.float64)
+    best_conv = False
+    for s_idx in range(int(init_starts.shape[0])):
+        res_s = _scipy_minimize(
+            _obj_np,
+            np.asarray(init_starts[s_idx], dtype=np.float64),
+            method="BFGS",
+            jac=True,
+            options={"gtol": 1e-5, "maxiter": maxiter},
+        )
+        if not res_s.success and int(getattr(res_s, "nit", maxiter)) < maxiter:
+            res_l = _scipy_minimize(
+                _obj_np,
+                np.asarray(res_s.x, dtype=np.float64),
+                method="L-BFGS-B",
+                jac=True,
+                options={"ftol": 1e-12, "gtol": 1e-5, "maxiter": maxiter},
+            )
+            if math.isfinite(float(res_l.fun)) and float(res_l.fun) <= float(res_s.fun) + 1e-11:
+                res_s = res_l
+        vf, cv = float(res_s.fun), bool(res_s.success)
+        if math.isfinite(vf) and ((cv and not best_conv) or (cv == best_conv and vf < best_val)):
+            best_val, best_x, best_conv = vf, np.asarray(res_s.x, dtype=np.float64), cv
+    return best_x, best_conv
+
+
+def _fit_exact_wiener_at_cbm_opt(
+    spec: _CBMKernelOptSpec,
+    active_lin_op: LinearizedDCTOperator,
+    u_opt: jax.Array,
+    spike_meta: _CBMSpikeOptMeta,
+) -> tuple[SpectralKernel, SubspaceCBM, IFTFieldFitResult, jax.Array, jax.Array]:
+    """Build exact ``DCTResponseOperator`` and Wiener ``fit_ift_field`` at ``u_opt``."""
+    n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
+    n_g, t0, t1 = active_lin_op.n_grid, active_lin_op.t_start, active_lin_op.t_end
+    phi_opt = u_opt[:n_k]
+    alpha_opt = u_opt[n_k : n_k + m_modes]
+    kern_opt = spec.build_kernel_fn(phi_opt)
+    cbm_opt = eqx.tree_at(lambda c: c.alpha, spec.cbm, alpha_opt)
+    sp_opt = _unpack_spike_from_vec(
+        u_opt[n_k + m_modes :],
+        spike_meta.spike_ref,
+        has_spike=spike_meta.has_spike,
+        opt_full_spike=spike_meta.opt_full_spike,
+        t0=t0,
+        t1=t1,
+        clip_like=False,
+    )
+    final_extra = (
+        None
+        if spec.extra_production is None
+        else _replace_spike_in_extra(
+            spec.extra_production, spike_meta.spike_name, sp_opt, float(spec.q_std)
+        )
+    )
+    op_opt = build_dct_response_operator(
+        cbm_opt, spec.ds, t_start=t0, t_end=t1, n_grid=n_g, q_std=spec.q_std
+    )
+    gf_init = GaussianField(
+        jnp.zeros((n_g,), dtype=jnp.float64),
+        t0,
+        t1,
+        kernel=kern_opt,
+        zero_mode=getattr(kern_opt, "zero_mode", False),
+    )
+    prod_opt = gf_init if final_extra is None else (final_extra + gf_init)
+    fit_res = fit_ift_field(
+        RadiocarbonModel(cbm_opt, prod_opt, ExactLinearSolver(), q_std=spec.q_std),
+        spec.ds,
+        offset_mode=spec.offset_mode,
+        global_offset_prior_sd=float(spec.global_offset_prior_sd),
+        lab_offset_prior_sd=float(spec.lab_offset_prior_sd),
+        operator=op_opt,
+        prehistory_kernel=spec.prehistory_kernel,
+        include_field_initial_cov=spec.include_field_initial_cov,
+    )
+    return kern_opt, cbm_opt, fit_res, phi_opt, alpha_opt
+
+
+def _finalize_cbm_kernel_laplace(
+    spec: _CBMKernelOptSpec,
+    best_u_np: np.ndarray,
+    active_lin_op: LinearizedDCTOperator,
+    eval_vg: Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]],
+    converged: bool,
+    spike_meta: _CBMSpikeOptMeta,
+) -> OptimizedKernelResult:
+    """Evaluate exact Wiener fit and Laplace hyper-evidence at the CBM+kernel MAP."""
+    has_spike = spike_meta.has_spike
+    opt_full_spike = spike_meta.opt_full_spike
+    sp_mu_vec, sp_sd_vec = spike_meta.sp_mu_vec, spike_meta.sp_sd_vec
+    n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
+    u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
+    kern_opt, cbm_opt, fit_res, phi_opt, alpha_opt = _fit_exact_wiener_at_cbm_opt(
+        spec, active_lin_op, u_opt, spike_meta
+    )
+    ln_z_val, gamma_val = fit_res.log_evidence, fit_res.gamma
+
+    d_u = int(u_opt.shape[0])
+    lap_idx = (
+        list(range(n_k + m_modes)) + [n_k + m_modes + 2]
+        if opt_full_spike
+        else list(range(d_u))
+    )
+    d_lap = len(lap_idx)
+
+    def _grad_lap_np(v_lap_np: np.ndarray) -> np.ndarray:
+        u_full_np = best_u_np.copy()
+        u_full_np[lap_idx] = v_lap_np
+        return eval_vg(u_full_np, active_lin_op)[1][lap_idx]
+
+    hess_lap = _finite_diff_hessian_from_grad(_grad_lap_np, best_u_np[lap_idx], eps=1e-5)
+    hess_lap_sym = 0.5 * (hess_lap + hess_lap.T)
+    if d_lap > n_k:
+        h_pp, h_pn, h_nn = (
+            hess_lap_sym[:n_k, :n_k],
+            hess_lap_sym[:n_k, n_k:],
+            hess_lap_sym[n_k:, n_k:],
+        )
+        evals_nn = jnp.linalg.eigvalsh(h_nn)
+        h_sym = (
+            0.5 * ((h_pp - h_pn @ jnp.linalg.solve(h_nn, h_pn.T)) + (h_pp - h_pn @ jnp.linalg.solve(h_nn, h_pn.T)).T)
+            if bool(jnp.all(jnp.isfinite(evals_nn)) and jnp.all(evals_nn > 0.0))
+            else h_pp
+        )
+    else:
+        h_sym = hess_lap_sym
+
+    lp_val = spec.prior_fn(phi_opt) + jnp.sum(
+        _normal_logpdf(alpha_opt, 0.0, float(spec.cbm_prior_sd))
+    )
+    if has_spike:
+        log_fl = u_opt[n_k + m_modes + 2] if opt_full_spike else u_opt[n_k + m_modes]
+        fl_mu = sp_mu_vec[2] if opt_full_spike else sp_mu_vec[0]
+        fl_sd = sp_sd_vec[2] if opt_full_spike else sp_sd_vec[0]
+        lp_val = lp_val + _normal_logpdf(log_fl, fl_mu, fl_sd)
+
+    ln_joint = ln_z_val + lp_val
+    evals_lap = jnp.linalg.eigvalsh(hess_lap_sym)
+    if converged and bool(jnp.all(jnp.isfinite(evals_lap)) and jnp.all(evals_lap > 0.0) and jnp.isfinite(ln_joint)):
+        _, logdet_h_lap = jnp.linalg.slogdet(hess_lap_sym)
+        ln_hyper = ln_joint + 0.5 * d_lap * math.log(2.0 * math.pi) - 0.5 * logdet_h_lap
+    else:
+        converged = False
+        ln_hyper = jnp.asarray(-jnp.inf, dtype=jnp.float64)
+
+    return OptimizedKernelResult(
+        name=spec.label,
+        kernel=kern_opt,
+        fit=fit_res,
+        phi_map=phi_opt,
+        hyperparameters=_summarize_hyperparams(kern_opt),
+        log_evidence=ln_z_val,
+        log_hyperprior=lp_val,
+        log_joint_hyper=ln_joint,
+        log_hyper_evidence=ln_hyper,
+        hyper_hessian=h_sym,
+        gamma=gamma_val,
+        aic=-2.0 * ln_z_val + 2.0 * d_lap,
+        bic=-2.0 * ln_z_val + float(d_lap) * math.log(max(spec.ds.n_obs, 1)),
+        n_hyperparams=n_k + m_modes,
+        converged=converged,
+        cbm_opt=cbm_opt,
+        alpha_opt=alpha_opt,
+    )
+
+
+def _optimize_single_kernel_with_cbm(
+    spec: _CBMKernelOptSpec,
+    lin_op: LinearizedDCTOperator,
+    *,
+    alpha_init: jax.Array | None = None,
+    spike_init_term: MiyakeSpike | None = None,
+    recenter_threshold: float = 1e-3,
+) -> OptimizedKernelResult:
+    """Jointly optimize ``(phi, cbm.alpha[, spike])`` with tangent-linear ``W_DCT(alpha)``."""
+    n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
+    n_g, t0, t1 = lin_op.n_grid, lin_op.t_start, lin_op.t_end
+    starts, spike_meta = _init_cbm_kernel_starts(
+        spec, lin_op, alpha_init, spike_init_term
+    )
+    eval_vg = _build_cbm_kernel_eval_vg(spec, lin_op, spike_meta)
+    active_lin_op = lin_op
+    best_u_np, converged = _run_cbm_kernel_bfgs(eval_vg, active_lin_op, starts)
+
+    for max_it in (80, 30):
+        alpha_cur = best_u_np[n_k : n_k + m_modes]
+        shift = float(np.linalg.norm(alpha_cur - np.asarray(active_lin_op.alpha_ref)))
+        thresh = float(recenter_threshold) if max_it == 80 else 1e-3
+        if recenter_threshold >= 1e8 or shift <= thresh:
+            break
+        cbm_cur = eqx.tree_at(
+            lambda c: c.alpha, spec.cbm, jnp.asarray(alpha_cur, dtype=jnp.float64)
+        )
+        active_lin_op = build_linearized_dct_operator(
+            cbm_cur, spec.ds, t_start=t0, t_end=t1, n_grid=n_g, q_std=spec.q_std
+        )
+        best_u_np, converged = _run_cbm_kernel_bfgs(
+            eval_vg,
+            active_lin_op,
+            jnp.asarray(best_u_np, dtype=jnp.float64)[None, :],
+            maxiter=max_it,
+        )
+
+    alpha_fin = best_u_np[n_k : n_k + m_modes]
+    if recenter_threshold < 1e8 and float(
+        np.linalg.norm(alpha_fin - np.asarray(active_lin_op.alpha_ref))
+    ) > 1e-4:
+        cbm_fin = eqx.tree_at(
+            lambda c: c.alpha, spec.cbm, jnp.asarray(alpha_fin, dtype=jnp.float64)
+        )
+        active_lin_op = build_linearized_dct_operator(
+            cbm_fin, spec.ds, t_start=t0, t_end=t1, n_grid=n_g, q_std=spec.q_std
+        )
+
+    return _finalize_cbm_kernel_laplace(
+        spec, best_u_np, active_lin_op, eval_vg, converged, spike_meta
+    )
+
+
+def optimize_gp_kernel(  # shape-exempt(carbon): public kernel optimizer adding optimize_cbm and cbm_prior_sd keyword options
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
     kernel: str | SpectralKernel = "matern32",
@@ -5364,6 +6411,8 @@ def optimize_gp_kernel(
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
     optimize_spike: bool = False,
+    optimize_cbm: bool = False,
+    cbm_prior_sd: float = 1.0,
     spike_priors: Mapping[str, Any] | None = None,
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     spike_log_fluence_prior: tuple[float, float] = DEFAULT_SPIKE_LOG_FLUENCE_PRIOR,
@@ -5383,7 +6432,10 @@ def optimize_gp_kernel(
     When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
     first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
     :class:`GaussianField` using ``spike_priors`` before profiling ``fluence`` jointly with
-    each kernel's spectral hyperparameters.
+    each kernel's spectral hyperparameters. When ``optimize_cbm=True`` and ``cbm`` is a
+    :class:`SubspaceCBM`, jointly optimizes ``cbm.alpha`` under ``N(0, cbm_prior_sd^2 I)``
+    alongside kernel hyperparameters (and spike parameters) and includes the ``cbm.alpha``
+    prior and Laplace Occam determinant in ``log_hyper_evidence`` and ``n_hyperparams``.
 
     .. math::
 
@@ -5397,6 +6449,43 @@ def optimize_gp_kernel(
         kernel, zero_mode=zm, hyperprior_override=hyperprior
     )
     label = kernel if isinstance(kernel, str) else type(kernel).__name__
+
+    if optimize_cbm:
+        _check_positive_concrete("cbm_prior_sd", cbm_prior_sd)
+        if not isinstance(cbm, SubspaceCBM):
+            warnings.warn(
+                "optimize_cbm=True requires a SubspaceCBM; proceeding with fixed CBM.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            if field_kind != "gaussian":
+                raise NotImplementedError(
+                    "optimize_cbm=True is currently supported for field_kind='gaussian'."
+                )
+            lin_op0 = build_linearized_dct_operator(
+                cbm, ds, pad_years=pad_years, n_grid=n_grid, q_std=q_std
+            )
+            spec_opt = _CBMKernelOptSpec(
+                label=label,
+                build_kernel_fn=build_fn,
+                prior_fn=prior_fn,
+                phi0=phi0,
+                cbm=cbm,
+                ds=ds,
+                extra_production=extra_production,
+                optimize_spike=optimize_spike,
+                spike_priors=spike_priors,
+                spike_log_fluence_prior=spike_log_fluence_prior,
+                cbm_prior_sd=float(cbm_prior_sd),
+                offset_mode=offset_mode,
+                multi_start=multi_start,
+                q_std=q_std,
+                rng_key=key,
+                prehistory_kernel=prehistory_kernel,
+                include_field_initial_cov=bool(include_field_initial_cov),
+            )
+            return _optimize_single_kernel_with_cbm(spec_opt, lin_op0)
 
     op = build_dct_response_operator(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
@@ -5577,7 +6666,63 @@ class KernelSelectionResult(zdx.Base):
         return self.format_table()
 
 
-def select_gp_kernel(
+def _select_gp_kernels_with_cbm(
+    cand_items: list[tuple[str, str | SpectralKernel]],
+    base_spec: _CBMKernelOptSpec,
+    lin_op0: LinearizedDCTOperator,
+    hyperprior: Callable[[jax.Array], jax.Array] | None,
+    hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None,
+) -> tuple[list[OptimizedKernelResult], jax.Array, jax.Array]:
+    """Optimize and rank candidate GP kernels jointly with ``SubspaceCBM.alpha``."""
+    subkeys = jax.random.split(base_spec.rng_key, len(cand_items) + 2)
+    ref_spec = base_spec._replace(multi_start=1, rng_key=subkeys[-2])
+    ref_res = _optimize_single_kernel_with_cbm(ref_spec, lin_op0, recenter_threshold=1e9)
+    alpha_ref_shared = ref_res.alpha_opt
+    assert alpha_ref_shared is not None
+    cbm_ref_shared = eqx.tree_at(lambda c: c.alpha, base_spec.cbm, alpha_ref_shared)
+    lin_op_shared = build_linearized_dct_operator(
+        cbm_ref_shared,
+        base_spec.ds,
+        t_start=lin_op0.t_start,
+        t_end=lin_op0.t_end,
+        n_grid=lin_op0.n_grid,
+        q_std=base_spec.q_std,
+    )
+    spike_ref_shared, _ = _extract_spike_from_extra(ref_res.fit.model.production)
+    results: list[OptimizedKernelResult] = []
+    for idx, (label, spec_item) in enumerate(cand_items):
+        hp_override = (
+            hyperpriors[label]
+            if hyperpriors is not None and label in hyperpriors
+            else hyperprior
+        )
+        try:
+            build_fn, prior_fn, _, phi0, _ = _kernel_builders_from_spec(
+                spec_item, zero_mode=False, hyperprior_override=hp_override
+            )
+        except TypeError as exc:
+            raise TypeError(
+                f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
+            ) from exc
+        cand_spec = base_spec._replace(
+            label=label,
+            build_kernel_fn=build_fn,
+            prior_fn=prior_fn,
+            phi0=phi0,
+            rng_key=subkeys[idx],
+        )
+        results.append(
+            _optimize_single_kernel_with_cbm(
+                cand_spec,
+                lin_op_shared,
+                alpha_init=alpha_ref_shared,
+                spike_init_term=spike_ref_shared,
+            )
+        )
+    return results, lin_op_shared.t_grid, subkeys[-1]
+
+
+def select_gp_kernel(  # shape-exempt(carbon): public kernel selector adding optimize_cbm and cbm_prior_sd keyword options
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
     candidates: Sequence[str | SpectralKernel] | Mapping[str, str | SpectralKernel] | None = None,
@@ -5585,6 +6730,8 @@ def select_gp_kernel(
     field_kind: Literal["gaussian", "log_gaussian"] = "gaussian",
     extra_production: ProductionTerm | None = None,
     optimize_spike: bool = False,
+    optimize_cbm: bool = False,
+    cbm_prior_sd: float = 1.0,
     spike_priors: Mapping[str, Any] | None = None,
     hyperprior: Callable[[jax.Array], jax.Array] | None = None,
     hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None = None,
@@ -5608,6 +6755,10 @@ def select_gp_kernel(
     When ``optimize_spike=True`` and ``extra_production`` contains a :class:`MiyakeSpike`,
     first profiles ``(t_start, duration, fluence)`` on top of a marginalized reference
     :class:`GaussianField` using ``spike_priors`` before ranking all candidate kernels.
+    When ``optimize_cbm=True`` and ``cbm`` is a :class:`SubspaceCBM`, jointly optimizes
+    ``cbm.alpha`` under ``N(0, cbm_prior_sd^2 I)`` alongside each candidate kernel's
+    hyperparameters (and spike parameters) and includes the ``cbm.alpha`` prior and
+    Laplace Occam determinant in ``log_hyper_evidence`` and ``n_hyperparams``.
     """
     ds = _as_dataset(dataset)
     key = jax.random.PRNGKey(0) if rng_key is None else rng_key
@@ -5626,145 +6777,193 @@ def select_gp_kernel(
     if not cand_items:
         raise ValueError("candidates must contain at least one kernel.")
 
-    op = build_dct_response_operator(
-        cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
-    )
-    root_y0 = _resolve_prehistory_root_y0(
-        cbm,
-        ALPHA_ATOMS_CM2_S_TO_KG_YR,
-        prehistory_kernel,
-        omega_bounds=_field_omega_bounds(op.n_grid, op.dt),
-    )
-    dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
-    eff_fluence_prior = spike_log_fluence_prior
-    if (
-        spike_priors is not None
-        and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
-        and ("fluence" in spike_priors or "log_fluence" in spike_priors)
-    ):
-        sp_m, sp_s = _parse_spike_priors(spike_priors, op.t_start, op.t_end)
-        eff_fluence_prior = (float(sp_m[2]), float(sp_s[2]))
-
-    if extra_production is not None:
-        upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
-            cbm,
-            ds,
-            extra_production,
-            op,
-            offset_mode,
-            q_std,
-            optimize_spike=optimize_spike,
-            spike_priors=spike_priors,
-            prehistory_root_y0=root_y0,
-            include_field_initial_cov=include_field_initial_cov,
-        )
-    else:
-        upd_extra = None
-        fixed_exc = jnp.zeros((ds.n_obs,), dtype=jnp.float64)
-        unit_sp = None
-        sp_fl = 0.0
-
-    x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
-        ds,
-        op.box_activity_ratios,
-        offset_mode=offset_mode,
-        global_offset_prior_sd=200.0,
-        lab_offset_prior_sd=1.5,
-        prehistory_root_y0=root_y0,
-        init_state_basis=op.init_state_basis,
-    )
-    inv_sig = 1.0 / ds.sigma_flat
-    log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
-    nuis_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
-    x_raw_base = inv_sig * (ds.d14c_flat - op.ss_d14c - fixed_exc - nuis_shift)
-    w_dct_scaled = inv_sig[:, None] * op.w_dct
-    w_grid_scaled = inv_sig[:, None] * op.w_grid
-    n_g = op.n_grid
-    n_b = op.init_state_basis.shape[1]
-
-    blocks_to_whiten = [w_dct_scaled, w_grid_scaled]
-    if dynamic_prehistory:
-        blocks_to_whiten.append(inv_sig[:, None] * op.init_state_basis)
-    if unit_sp is not None:
-        blocks_to_whiten.append((inv_sig * unit_sp)[:, None])
-    aug_mat = jnp.concatenate(blocks_to_whiten, axis=1)
-    x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
-        x_raw_base, aug_mat, u_nuis
-    )
-    w_dct_eff = aug_eff[:, :n_g]
-    w_grid_eff = aug_eff[:, n_g : 2 * n_g]
-    cursor_eff = 2 * n_g
-    init_eff: jax.Array | None = None
-    pre_resolvents: tuple[jax.Array, jax.Array, jax.Array, jax.Array] | None = None
-    if dynamic_prehistory:
-        init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
-        cursor_eff += n_b
-        om_q, dw_q = _spectral_quad_grid(
-            0.5, n_quad=128, omega_bounds=_field_omega_bounds(n_g, op.dt)
-        )
-        u_r, v_r = _solve_complex_resolvents(
-            cbm.matrix_A(),
-            ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
-            om_q,
-        )
-        pre_resolvents = (om_q, dw_q, u_r, v_r)
-    unit_sp_eff: jax.Array | None = aug_eff[:, cursor_eff] if unit_sp is not None else None
-
-    subkeys = jax.random.split(key, len(cand_items) + 1)
-    sample_key = subkeys[-1]
+    use_cbm_opt = False
+    if optimize_cbm:
+        _check_positive_concrete("cbm_prior_sd", cbm_prior_sd)
+        if not isinstance(cbm, SubspaceCBM):
+            warnings.warn(
+                "optimize_cbm=True requires a SubspaceCBM; proceeding with fixed CBM.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            if field_kind != "gaussian":
+                raise NotImplementedError(
+                    "optimize_cbm=True is currently supported for field_kind='gaussian'."
+                )
+            use_cbm_opt = True
 
     results: list[OptimizedKernelResult] = []
-    for idx, (label, spec_item) in enumerate(cand_items):
-        hp_override = (
-            hyperpriors[label]
-            if hyperpriors is not None and label in hyperpriors
-            else hyperprior
-        )
-        try:
-            build_fn, prior_fn, _, phi0, cache_tag = _kernel_builders_from_spec(
-                spec_item, zero_mode=zm, hyperprior_override=hp_override
-            )
-        except TypeError as exc:
-            raise TypeError(
-                f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
-            ) from exc
 
-        res_k = _optimize_single_kernel_precomputed(
-            label=label,
-            cache_tag=cache_tag,
-            build_kernel_fn=build_fn,
-            prior_fn=prior_fn,
-            phi0=phi0,
+    if use_cbm_opt:
+        assert isinstance(cbm, SubspaceCBM)
+        lin_op0 = build_linearized_dct_operator(
+            cbm, ds, pad_years=pad_years, n_grid=n_grid, q_std=q_std
+        )
+        ref_build, ref_prior, _, ref_phi0, _ = _kernel_builders_from_spec(
+            "matern32", zero_mode=False
+        )
+        base_spec = _CBMKernelOptSpec(
+            label="_ref_matern32",
+            build_kernel_fn=ref_build,
+            prior_fn=ref_prior,
+            phi0=ref_phi0,
             cbm=cbm,
             ds=ds,
-            op=op,
-            x_eff_base=x_eff_base,
-            w_dct_eff=w_dct_eff,
-            w_grid_eff=w_grid_eff,
-            unit_spike_eff=unit_sp_eff,
-            fixed_exc=fixed_exc,
-            unit_sp_raw=unit_sp,
-            x_nuis=x_nuis,
-            mu_nuis=mu_nuis,
-            root_nuis=root_nuis,
-            u_nuis=u_nuis,
-            spike_fluence_init=sp_fl,
-            spike_log_fluence_prior=eff_fluence_prior,
-            updated_extra=upd_extra,
-            log_norm_d=log_norm_d,
-            half_logdet_nuis=half_logdet_nuis,
-            field_kind=field_kind,
+            extra_production=extra_production,
+            optimize_spike=optimize_spike,
+            spike_priors=spike_priors,
+            spike_log_fluence_prior=spike_log_fluence_prior,
+            cbm_prior_sd=float(cbm_prior_sd),
             offset_mode=offset_mode,
             multi_start=multi_start,
             q_std=q_std,
-            rng_key=subkeys[idx],
-            prehistory_root_y0=root_y0,
+            rng_key=key,
             prehistory_kernel=prehistory_kernel,
-            include_field_initial_cov=include_field_initial_cov,
-            init_eff=init_eff,
-            pre_resolvents=pre_resolvents,
+            include_field_initial_cov=bool(include_field_initial_cov),
         )
-        results.append(res_k)
+        results, t_grid_out, sample_key = _select_gp_kernels_with_cbm(
+            cand_items, base_spec, lin_op0, hyperprior, hyperpriors
+        )
+    else:
+        subkeys = jax.random.split(key, len(cand_items) + 1)
+        sample_key = subkeys[-1]
+        op = build_dct_response_operator(
+            cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
+        )
+        t_grid_out = op.t_grid
+        root_y0 = _resolve_prehistory_root_y0(
+            cbm,
+            ALPHA_ATOMS_CM2_S_TO_KG_YR,
+            prehistory_kernel,
+            omega_bounds=_field_omega_bounds(op.n_grid, op.dt),
+        )
+        dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
+        eff_fluence_prior = spike_log_fluence_prior
+        if (
+            spike_priors is not None
+            and spike_log_fluence_prior == DEFAULT_SPIKE_LOG_FLUENCE_PRIOR
+            and ("fluence" in spike_priors or "log_fluence" in spike_priors)
+        ):
+            sp_m, sp_s = _parse_spike_priors(spike_priors, op.t_start, op.t_end)
+            eff_fluence_prior = (float(sp_m[2]), float(sp_s[2]))
+
+        if extra_production is not None:
+            upd_extra, fixed_exc, unit_sp, sp_fl = _preoptimize_extra_production(
+                cbm,
+                ds,
+                extra_production,
+                op,
+                offset_mode,
+                q_std,
+                optimize_spike=optimize_spike,
+                spike_priors=spike_priors,
+                prehistory_root_y0=root_y0,
+                include_field_initial_cov=include_field_initial_cov,
+            )
+        else:
+            upd_extra = None
+            fixed_exc = jnp.zeros((ds.n_obs,), dtype=jnp.float64)
+            unit_sp = None
+            sp_fl = 0.0
+
+        x_nuis, mu_nuis, root_nuis, u_nuis = _build_offset_whitening(
+            ds,
+            op.box_activity_ratios,
+            offset_mode=offset_mode,
+            global_offset_prior_sd=200.0,
+            lab_offset_prior_sd=1.5,
+            prehistory_root_y0=root_y0,
+            init_state_basis=op.init_state_basis,
+        )
+        inv_sig = 1.0 / ds.sigma_flat
+        log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
+        nuis_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
+        x_raw_base = inv_sig * (ds.d14c_flat - op.ss_d14c - fixed_exc - nuis_shift)
+        w_dct_scaled = inv_sig[:, None] * op.w_dct
+        w_grid_scaled = inv_sig[:, None] * op.w_grid
+        n_g = op.n_grid
+        n_b = op.init_state_basis.shape[1]
+
+        blocks_to_whiten = [w_dct_scaled, w_grid_scaled]
+        if dynamic_prehistory:
+            blocks_to_whiten.append(inv_sig[:, None] * op.init_state_basis)
+        if unit_sp is not None:
+            blocks_to_whiten.append((inv_sig * unit_sp)[:, None])
+        aug_mat = jnp.concatenate(blocks_to_whiten, axis=1)
+        x_eff_base, aug_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
+            x_raw_base, aug_mat, u_nuis
+        )
+        w_dct_eff = aug_eff[:, :n_g]
+        w_grid_eff = aug_eff[:, n_g : 2 * n_g]
+        cursor_eff = 2 * n_g
+        init_eff: jax.Array | None = None
+        pre_resolvents: tuple[jax.Array, jax.Array, jax.Array, jax.Array] | None = None
+        if dynamic_prehistory:
+            init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
+            cursor_eff += n_b
+            om_q, dw_q = _spectral_quad_grid(
+                0.5, n_quad=128, omega_bounds=_field_omega_bounds(n_g, op.dt)
+            )
+            u_r, v_r = _solve_complex_resolvents(
+                cbm.matrix_A(),
+                ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
+                om_q,
+            )
+            pre_resolvents = (om_q, dw_q, u_r, v_r)
+        unit_sp_eff: jax.Array | None = aug_eff[:, cursor_eff] if unit_sp is not None else None
+
+        for idx, (label, spec_item) in enumerate(cand_items):
+            hp_override = (
+                hyperpriors[label]
+                if hyperpriors is not None and label in hyperpriors
+                else hyperprior
+            )
+            try:
+                build_fn, prior_fn, _, phi0, cache_tag = _kernel_builders_from_spec(
+                    spec_item, zero_mode=zm, hyperprior_override=hp_override
+                )
+            except TypeError as exc:
+                raise TypeError(
+                    f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
+                ) from exc
+
+            res_k = _optimize_single_kernel_precomputed(
+                label=label,
+                cache_tag=cache_tag,
+                build_kernel_fn=build_fn,
+                prior_fn=prior_fn,
+                phi0=phi0,
+                cbm=cbm,
+                ds=ds,
+                op=op,
+                x_eff_base=x_eff_base,
+                w_dct_eff=w_dct_eff,
+                w_grid_eff=w_grid_eff,
+                unit_spike_eff=unit_sp_eff,
+                fixed_exc=fixed_exc,
+                unit_sp_raw=unit_sp,
+                x_nuis=x_nuis,
+                mu_nuis=mu_nuis,
+                root_nuis=root_nuis,
+                u_nuis=u_nuis,
+                spike_fluence_init=sp_fl,
+                spike_log_fluence_prior=eff_fluence_prior,
+                updated_extra=upd_extra,
+                log_norm_d=log_norm_d,
+                half_logdet_nuis=half_logdet_nuis,
+                field_kind=field_kind,
+                offset_mode=offset_mode,
+                multi_start=multi_start,
+                q_std=q_std,
+                rng_key=subkeys[idx],
+                prehistory_root_y0=root_y0,
+                prehistory_kernel=prehistory_kernel,
+                include_field_initial_cov=include_field_initial_cov,
+                init_eff=init_eff,
+                pre_resolvents=pre_resolvents,
+            )
+            results.append(res_k)
 
     ranked = tuple(
         sorted(
@@ -5843,7 +7042,7 @@ def select_gp_kernel(
         posterior_latents=draws["latents"],
         posterior_q=draws["q"],
         posterior_spectrum=post_spec,
-        t_grid=op.t_grid,
+        t_grid=t_grid_out,
         error_scale_global=s_glob,
         error_scale_by_series=s_by_ser,
     )
