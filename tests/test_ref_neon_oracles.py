@@ -1,7 +1,7 @@
 """Independent numerical reference tests (Neon oracle suite) for ``ticktack 2.0``.
 
 Verifies four core guarantees against genuinely independent NumPy/SciPy
-implementations and literature paper transcriptions:
+implementations and keyed literature preset tables:
 
 1. **Full-spectrum Fisher matrix vs central-difference ``J^T Sigma^-1 J``**:
    ``expected_fisher`` and ``cbm_fisher_spectrum`` (unmarginalized and
@@ -9,23 +9,24 @@ implementations and literature paper transcriptions:
    Richardson-extrapolated central-difference Jacobians and explicit Schur
    complements, checking all matrix entries, all eigenvalues, and full
    eigenvector/subspace alignment.
-2. **Preset flux and mass tables vs independent paper transcriptions**:
+2. **Preset flux and mass tables vs keyed literature tables and bundled ``.hd5``**:
    ``Guttler15``, ``Brehm21``, ``Buntgen18``, and ``Miyake17`` checked against
-   keyed literature tables (box counts, masses, total inventory, production
-   fractions, directed fluxes, hemisphere symmetry/asymmetry, and exact
-   per-box Kirchhoff flux balance).
+   keyed reference tables cross-verified with bundled ``src/ticktack/data/*.hd5``
+   archives and physical identities (box counts, masses, total inventory,
+   production fractions, directed fluxes, residence times, hemisphere splits,
+   and per-box Kirchhoff flux balance).
 3. **Seasonal window averaging vs 20,000-point composite trapezoid quadrature**:
    ``RadiocarbonModel.predict_d14c`` / ``ExactLinearSolver`` on NH summer,
    SH year-boundary wrap-around (``schulman_start`` and ``end_year``), and
-   multi-subwindow weights across sub-annual spikes, multi-harmonic solar
-   modulation, and realized GP production against independent SciPy
-   ``expm`` / ``DOP853`` trajectories and composite trapezoid integration,
-   including explicit ``O(h^2)`` convergence-order verification.
+   multi-subwindow weights across all four sub-annual spike profiles,
+   multi-harmonic solar modulation, and realized GP production against
+   independent SciPy ``expm`` / ``DOP853`` trajectories integrated over literal
+   calendar intervals, including explicit ``O(h^2)`` convergence-order checks.
 4. **Solver eager vs ``jax.jit`` consistency (modal & Van Loan paths)**:
    ``ExactLinearSolver`` (all four spike profiles, pointwise and binned,
    nominal real spectrum, complex-eigenvalue non-normal spectrum, and
-   near-degenerate Van Loan fallback, plus ``EffectiveCBM``) and
-   ``DiffraxSolver`` (``Tsit5`` and ``Kvaerno5``), asserting ``rtol=1e-13``
+   near-degenerate Van Loan fallback, plus ``Guttler15`` and ``EffectiveCBM``)
+   and ``DiffraxSolver`` (``Tsit5`` and ``Kvaerno5``), asserting ``rtol=1e-13``
    agreement of both forward predictions and ``jax.grad`` gradients between
    eager execution and ``jax.jit``.
 """
@@ -54,6 +55,7 @@ import pytest
 import scipy.integrate as spi
 import scipy.linalg as spl
 import scipy.optimize as spo
+import scipy.special as sps
 import tinygp.kernels as tgk
 
 from ticktack.cbm import BalancedCBM, EffectiveCBM, FixedCBM, Topology
@@ -318,8 +320,8 @@ def _check_schur_spectrum_case(
     np.testing.assert_allclose(np.asarray(res.flux_loadings), j_log_f @ loadings, rtol=1e-8, atol=1e-9)
 
 
-def test_cbm_fisher_spectrum_unmarginalized_and_schur_effective_cbm() -> None:
-    """Verify full-spectrum ``cbm_fisher_spectrum`` (all modes + loadings) on ``EffectiveCBM``."""
+def _build_effective_cbm_fisher_fixture() -> tuple:
+    """Build ``EffectiveCBM(K=4)`` forward model, priors, and Richardson FD Fisher blocks."""
     ds = _make_nh_dataset(np.arange(772.0, 788.0, 1.0))
     solver = ExactLinearSolver()
     cbm0 = EffectiveCBM(K=4)
@@ -376,16 +378,6 @@ def test_cbm_fisher_spectrum_unmarginalized_and_schur_effective_cbm() -> None:
     f_tp_fd = j_th_fd.T @ sig_inv @ j_psi_fd
     f_pp_fd = j_psi_fd.T @ sig_inv @ j_psi_fd
 
-    res_unmarg = cbm_fisher_spectrum(
-        lambda c: forward_joint(c, psi0), cbm0, sigma, prior_cbm_cov=prior_cbm_cov
-    )
-    _assert_full_spectral_agreement(
-        np.asarray(res_unmarg.whitened_fisher),
-        l_pi.T @ f_tt_fd @ l_pi,
-        np.asarray(res_unmarg.eigenvalues),
-        np.asarray(res_unmarg.prior_whitened_modes),
-    )
-
     src_e = np.asarray(cbm0.topology.edges_src, dtype=np.int64)
     dst_e = np.asarray(cbm0.topology.edges_dst, dtype=np.int64)
     j_log_m = _central_diff_jacobian(
@@ -403,7 +395,26 @@ def test_cbm_fisher_spectrum_unmarginalized_and_schur_effective_cbm() -> None:
         np.asarray(flat_th0, dtype=np.float64),
     )
     fd_blocks = (sigma, f_joint_fd, f_tt_fd, f_tp_fd, f_pp_fd, (j_log_m, j_log_f))
+    return cbm0, psi0, forward_joint, fd_blocks, prior_cbm_cov, l_pi, prior_psi_cov
 
+
+def test_cbm_fisher_spectrum_unmarginalized_and_schur_effective_cbm() -> None:
+    """Verify full-spectrum ``cbm_fisher_spectrum`` (all modes + loadings) on ``EffectiveCBM``."""
+    cbm0, psi0, forward_joint, fd_blocks, prior_cbm_cov, l_pi, prior_psi_cov = (
+        _build_effective_cbm_fisher_fixture()
+    )
+    sigma, _, f_tt_fd, _, _, _ = fd_blocks
+    p_psi = prior_psi_cov.shape[0]
+
+    res_unmarg = cbm_fisher_spectrum(
+        lambda c: forward_joint(c, psi0), cbm0, sigma, prior_cbm_cov=prior_cbm_cov
+    )
+    _assert_full_spectral_agreement(
+        np.asarray(res_unmarg.whitened_fisher),
+        l_pi.T @ f_tt_fd @ l_pi,
+        np.asarray(res_unmarg.eigenvalues),
+        np.asarray(res_unmarg.prior_whitened_modes),
+    )
     _check_schur_spectrum_case(
         forward_joint, cbm0, psi0, fd_blocks, (prior_cbm_cov, l_pi, None, np.zeros((p_psi, p_psi)))
     )
@@ -500,7 +511,11 @@ def _canonical_box_key(name: str, hemisphere: str) -> tuple[str, str]:
     return (norm_name, norm_hem)
 
 
-# 1. Güttler et al. (2015), EPSL 411, 290–297, Fig. 1 / Table 1 (11 boxes, 24 fluxes)
+# Keyed reference preset tables cross-checked against bundled src/ticktack/data/*.hd5
+# archives, per-box Kirchhoff flux balance, residence times, and hemisphere splits
+# (published parameterizations; not freshly re-read from external PDF page scans here).
+#
+# 1. Güttler et al. (2015), EPSL 411, 290–297 (11 boxes, 24 fluxes)
 _REF_GUTTLER15_MASSES: dict[tuple[str, str], float] = {
     ("stratosphere", "none"): 88.5,
     ("troposphere", "none"): 501.5,
@@ -581,7 +596,7 @@ _REF_TWO_HEM_PROD: dict[tuple[str, str], float] = {
     ("troposphere", "north"): 0.15,
 }
 
-# 2. Brehm et al. (2021), Nature Geoscience 14, 10–15, Supplementary Table 1 (56 edges)
+# 2. Brehm et al. (2021), Nature Geoscience 14, 10–15 (56 directed edges)
 _REF_BREHM21_FLUXES: dict[tuple[tuple[str, str], tuple[str, str]], float] = {
     (("stratosphere", "south"), ("troposphere", "south")): 22.5,
     (("troposphere", "south"), ("stratosphere", "south")): 22.5,
@@ -702,7 +717,7 @@ _PAPER_TABLES = {
 
 @pytest.mark.parametrize("preset_name", ("Guttler15", "Brehm21", "Buntgen18", "Miyake17"))
 def test_preset_tables_vs_independent_paper_transcriptions(preset_name: str) -> None:
-    """Check masses, production fractions, fluxes, and Kirchhoff balance vs paper tables."""
+    """Check masses, production fractions, fluxes, and Kirchhoff balance vs keyed reference tables."""
     exp_n_boxes, exp_total_mass, ref_masses, ref_prod, ref_fluxes = _PAPER_TABLES[preset_name]
     spec = get_preset_spec(preset_name)
     cbm = load_preset(preset_name, kind="fixed")
@@ -958,12 +973,11 @@ def _brehm21_numpy_state() -> tuple[FixedCBM, np.ndarray, np.ndarray, np.ndarray
     return cbm, A, b_scaled, masses, y_ss, r_ref
 
 
-def test_seasonal_window_spikes_vs_20k_trapezoid_nh_and_sh_wraparound() -> None:
-    """Compare ``predict_d14c`` against 20,000-point SciPy trapezoid on NH & SH windows."""
-    cbm, A, b_scaled, masses, y_ss, r_ref = _brehm21_numpy_state()
-    years = np.array([774.0, 775.0, 776.0], dtype=np.float64)
+def _make_nh_sh_literal_dataset(
+    years: np.ndarray,
+) -> tuple[Dataset, dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]]]:
+    """Build NH/SH ``Dataset`` alongside independent literal calendar intervals and weights."""
     zeros, ones = np.zeros_like(years), np.ones_like(years)
-
     sw_sh_nonunif = SeasonalWeights.from_subannual_weights(
         [1.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0, 3.0],
         year_convention="schulman_start",
@@ -988,97 +1002,150 @@ def test_seasonal_window_spikes_vs_20k_trapezoid_nh_and_sh_wraparound() -> None:
             ),
         ]
     )
-    solver = ExactLinearSolver()
+    m_off = np.arange(9, 15, dtype=np.float64) / 12.0
+    literal_windows = {
+        "nh": (
+            (years + 3.0 / 12.0)[:, None],
+            (years + 9.0 / 12.0)[:, None],
+            np.array([1.0], dtype=np.float64),
+        ),
+        "sh_sch": (
+            (years + 9.0 / 12.0)[:, None],
+            (years + 15.0 / 12.0)[:, None],
+            np.array([1.0], dtype=np.float64),
+        ),
+        "sh_end": (
+            (years - 4.0 / 12.0)[:, None],
+            (years + 2.0 / 12.0)[:, None],
+            np.array([1.0], dtype=np.float64),
+        ),
+        # Six un-coalesced monthly sub-intervals (Oct..Mar) so coalescing bugs are caught
+        "sh_multi": (
+            years[:, None] + m_off[None, :],
+            years[:, None] + m_off[None, :] + 1.0 / 12.0,
+            np.array([1.0, 3.0, 3.0, 1.0, 2.0, 2.0], dtype=np.float64) / 12.0,
+        ),
+    }
+    return ds, literal_windows
 
-    def _d14c(dy: np.ndarray, bi: int) -> np.ndarray:
-        return 1000.0 * (((y_ss[bi] + dy[..., bi]) / masses[bi]) / r_ref - 1.0)
 
-    # 1. Sub-annual boxcar spike inside NH summer (774.45 .. 774.60)
-    spike_box = MiyakeSpike(t_start=774.45, duration=0.15, fluence=6.4, profile="boxcar")
-    box_eval = _scipy_boxcar_eval(A, b_scaled, 774.45, 0.15, 6.4)
-    pred_box = RadiocarbonModel(cbm, spike_box, solver).predict_d14c(ds, concat=False)
-    for series, pred_s in zip(ds.series, pred_box):
-        bi = cbm.box_index("Troposphere", hemisphere=series.hemisphere)
-        ref_s = _trapezoid_window_average(
-            lambda g, b_i=bi: _d14c(box_eval(g), b_i),
-            np.asarray(series.sub_t_starts),
-            np.asarray(series.sub_t_ends),
-            np.asarray(series.seasonal_weights.weights),
-        )
-        np.testing.assert_allclose(np.asarray(pred_s), ref_s, rtol=1e-8, atol=1e-7)
-
-    # 2. Smooth supergaussian spike straddling 775.0 year boundary
-    ts_sg, dur_sg, fl_sg, p_sg = 774.92, 0.20, 5.8, 10.0
+def _scipy_spike_oracle(
+    profile: str,
+    A: np.ndarray,
+    b_scaled: np.ndarray,
+) -> tuple[MiyakeSpike, Callable[[np.ndarray], np.ndarray], float]:
+    """Build ``MiyakeSpike`` plus independent pure-SciPy ``dy(t)`` trajectory evaluator."""
+    n_boxes = A.shape[0]
     ln2 = math.log(2.0)
-    norm_sg = (ln2 ** (1.0 / p_sg)) / math.gamma(1.0 + 1.0 / p_sg)
 
-    def dq_sg(t: float) -> float:
-        x = 2.0 * (t - ts_sg) / dur_sg - 1.0
-        xp = x**10
-        return (fl_sg / dur_sg) * norm_sg * math.exp(-ln2 * xp) if xp < 700.0 else 0.0
+    if profile == "boxcar":
+        spike = MiyakeSpike(t_start=774.45, duration=0.15, fluence=6.4, profile="boxcar")
+        return spike, _scipy_boxcar_eval(A, b_scaled, 774.45, 0.15, 6.4), 1e-8
 
-    sol_sg = _scipy_ode_dense((A, b_scaled), dq_sg, (772.0, 778.5), np.zeros(cbm.n_boxes), max_step=0.01)
-    spike_sg = MiyakeSpike(ts_sg, dur_sg, fl_sg, profile="supergaussian", exponent=p_sg)
-    pred_sg = RadiocarbonModel(cbm, spike_sg, solver).predict_d14c(ds, concat=False)
-    for series, pred_s in zip(ds.series, pred_sg):
-        bi = cbm.box_index("Troposphere", hemisphere=series.hemisphere)
-        ref_s = _trapezoid_window_average(
-            lambda g, b_i=bi: _d14c(sol_sg.sol(g).T, b_i),
-            np.asarray(series.sub_t_starts),
-            np.asarray(series.sub_t_ends),
-            np.asarray(series.seasonal_weights.weights),
-        )
-        np.testing.assert_allclose(np.asarray(pred_s), ref_s, rtol=1e-9, atol=1e-9)
+    if profile == "supergaussian":
+        ts, dur, fl, p_exp = 774.92, 0.20, 5.8, 10.0
+        norm = (ln2 ** (1.0 / p_exp)) / math.gamma(1.0 + 1.0 / p_exp)
 
-    # 3. Causal Gamma(k=3) spike (pure SciPy FWHM root + pure math forcing)
-    ts_g, dur_g, fl_g = 774.30, 0.25, 5.2
+        def dq_sg(t: float) -> float:
+            xp = (2.0 * (t - ts) / dur - 1.0) ** 10
+            return (fl / dur) * norm * math.exp(-ln2 * xp) if xp < 700.0 else 0.0
+
+        sol = _scipy_ode_dense((A, b_scaled), dq_sg, (772.0, 778.5), np.zeros(n_boxes), max_step=0.01)
+        spike = MiyakeSpike(ts, dur, fl, profile="supergaussian", exponent=p_exp)
+        return spike, lambda g: sol.sol(g).T, 1e-9
+
+    if profile == "skewgaussian":
+        ts, dur, fl, alpha = 774.65, 0.22, 6.0, 2.5
+        inv_sqrt2pi = 1.0 / math.sqrt(2.0 * math.pi)
+        inv_sqrt2 = 1.0 / math.sqrt(2.0)
+
+        def _skew_pdf(z: float) -> float:
+            return inv_sqrt2pi * math.exp(-0.5 * z * z) * float(sps.erfc(-alpha * z * inv_sqrt2))
+
+        def _dlog_pdf(z: float) -> float:
+            erfc_val = float(sps.erfc(-alpha * z * inv_sqrt2))
+            return -z + alpha * math.sqrt(2.0 / math.pi) * math.exp(-0.5 * (alpha * z) ** 2) / erfc_val
+
+        z_mode = float(spo.brentq(_dlog_pdf, -4.0, 4.0, xtol=1e-15, rtol=1e-15))
+        pdf_max = _skew_pdf(z_mode)
+        z_l = float(spo.brentq(lambda z: _skew_pdf(z) - 0.5 * pdf_max, z_mode - 5.0, z_mode, xtol=1e-15))
+        z_r = float(spo.brentq(lambda z: _skew_pdf(z) - 0.5 * pdf_max, z_mode, z_mode + 5.0, xtol=1e-15))
+        fwhm_z = z_r - z_l
+
+        def dq_sk(t: float) -> float:
+            z = z_mode + fwhm_z * ((t - ts) / dur - 0.5)
+            return (fl / dur) * _skew_pdf(z) * fwhm_z if z * z < 700.0 else 0.0
+
+        sol = _scipy_ode_dense((A, b_scaled), dq_sk, (773.5, 778.5), np.zeros(n_boxes), max_step=0.005)
+        spike = MiyakeSpike(ts, dur, fl, profile="skewgaussian", skewness=alpha)
+        return spike, lambda g: sol.sol(g).T, 1e-8
+
+    ts, dur, fl = 774.30, 0.25, 5.2
     x_l = spo.brentq(lambda x: 2.0 * math.log(x / 2.0) - (x - 2.0) + ln2, 1e-6, 2.0)
     x_r = spo.brentq(lambda x: 2.0 * math.log(x / 2.0) - (x - 2.0) + ln2, 2.0, 20.0)
     c_gam = float(x_r - x_l)
 
     def dq_gam(t: float) -> float:
-        u = (t - ts_g) / dur_g
-        if u <= 0.0:
-            return 0.0
-        return (fl_g / dur_g) * (0.5 * c_gam**3) * (u * u) * math.exp(-c_gam * u)
+        u = (t - ts) / dur
+        return 0.0 if u <= 0.0 else (fl / dur) * (0.5 * c_gam**3) * (u * u) * math.exp(-c_gam * u)
 
-    sol_gam = _scipy_ode_dense(
-        (A, b_scaled), dq_gam, (ts_g, 778.5), np.zeros(cbm.n_boxes), max_step=0.01
-    )
-    spike_gam = MiyakeSpike(ts_g, dur_g, fl_g, profile="gamma", gamma_shape=3.0)
-    pred_gam = RadiocarbonModel(cbm, spike_gam, solver).predict_d14c(ds, concat=False)
-    for series, pred_s in zip(ds.series, pred_gam):
-        bi = cbm.box_index("Troposphere", hemisphere=series.hemisphere)
+    sol = _scipy_ode_dense((A, b_scaled), dq_gam, (ts, 778.5), np.zeros(n_boxes), max_step=0.01)
+    spike = MiyakeSpike(ts, dur, fl, profile="gamma", gamma_shape=3.0)
 
-        def _eval_gam(g: np.ndarray, b_i: int = bi) -> np.ndarray:
-            dy = np.zeros((g.size, cbm.n_boxes), dtype=np.float64)
-            mask = g >= ts_g
-            if np.any(mask):
-                dy[mask] = sol_gam.sol(g[mask]).T
-            return _d14c(dy, b_i)
+    def _eval_gam(g: np.ndarray) -> np.ndarray:
+        dy = np.zeros((g.size, n_boxes), dtype=np.float64)
+        mask = g >= ts
+        if np.any(mask):
+            dy[mask] = sol.sol(g[mask]).T
+        return dy
 
-        ref_s = _trapezoid_window_average(
-            _eval_gam,
-            np.asarray(series.sub_t_starts),
-            np.asarray(series.sub_t_ends),
-            np.asarray(series.seasonal_weights.weights),
-        )
-        np.testing.assert_allclose(np.asarray(pred_s), ref_s, rtol=1e-8, atol=1e-8)
+    return spike, _eval_gam, 1e-8
 
 
-def test_seasonal_window_harmonic_and_gp_vs_20k_trapezoid_and_convergence_order() -> None:
-    """Verify harmonic & GP seasonal averaging vs 20k trapezoid and ``O(h^2)`` convergence."""
+def test_seasonal_window_literal_intervals_and_weights() -> None:
+    """Verify ``TreeRingSeries`` and ``SeasonalWeights`` calendar bounds and coalescing explicitly."""
+    years = np.array([774.0, 775.0, 776.0], dtype=np.float64)
+    ds, literal_windows = _make_nh_sh_literal_dataset(years)
+
+    for series in ds.series:
+        if series.name == "sh_multi":
+            exp_starts = years[:, None] + np.array([9.0, 10.0, 12.0, 13.0]) / 12.0
+            exp_ends = years[:, None] + np.array([10.0, 12.0, 13.0, 15.0]) / 12.0
+            exp_w = np.array([1.0, 6.0, 1.0, 4.0], dtype=np.float64) / 12.0
+        else:
+            exp_starts, exp_ends, exp_w = literal_windows[series.name]
+        np.testing.assert_allclose(np.asarray(series.sub_t_starts), exp_starts, atol=1e-14)
+        np.testing.assert_allclose(np.asarray(series.sub_t_ends), exp_ends, atol=1e-14)
+        np.testing.assert_allclose(np.asarray(series.seasonal_weights.weights), exp_w, atol=1e-14)
+
+
+@pytest.mark.parametrize("profile", ("boxcar", "supergaussian", "skewgaussian", "gamma"))
+def test_seasonal_window_spikes_vs_20k_trapezoid_nh_and_sh_wraparound(profile: str) -> None:
+    """Compare ``predict_d14c`` against 20,000-point SciPy trapezoid on literal NH & SH windows."""
     cbm, A, b_scaled, masses, y_ss, r_ref = _brehm21_numpy_state()
     years = np.array([774.0, 775.0, 776.0], dtype=np.float64)
-    zeros, ones = np.zeros_like(years), np.ones_like(years)
-    s_nh = TreeRingSeries(
-        years, zeros, ones, hemisphere="north", seasonal_weights="april-september", name="nh"
-    )
-    s_sh = TreeRingSeries(
-        years, zeros, ones, hemisphere="south",
-        year_convention="schulman_start", seasonal_weights="october-march", name="sh",
-    )
-    ds = Dataset([s_nh, s_sh])
+    ds, literal_windows = _make_nh_sh_literal_dataset(years)
+    spike, eval_dy, tol = _scipy_spike_oracle(profile, A, b_scaled)
+
+    pred = RadiocarbonModel(cbm, spike, ExactLinearSolver()).predict_d14c(ds, concat=False)
+    for series, pred_s in zip(ds.series, pred):
+        bi = cbm.box_index("Troposphere", hemisphere=series.hemisphere)
+        starts, ends, weights = literal_windows[series.name]
+        ref_s = _trapezoid_window_average(
+            lambda g, b_i=bi: 1000.0 * (((y_ss[b_i] + eval_dy(g)[..., b_i]) / masses[b_i]) / r_ref - 1.0),
+            starts,
+            ends,
+            weights,
+        )
+        np.testing.assert_allclose(np.asarray(pred_s), ref_s, rtol=tol, atol=1e-7 if profile == "boxcar" else tol)
+
+
+def test_seasonal_window_harmonic_vs_20k_trapezoid_and_convergence_order() -> None:
+    """Verify multi-harmonic seasonal averaging vs 20k literal trapezoid and ``O(h^2)`` order."""
+    cbm, A, b_scaled, masses, y_ss, r_ref = _brehm21_numpy_state()
+    years = np.array([774.0, 775.0, 776.0], dtype=np.float64)
+    ds_all, literal_windows = _make_nh_sh_literal_dataset(years)
+    ds = Dataset([ds_all.series[0], ds_all.series[1]])
 
     def _d14c(dy: np.ndarray, bi: int) -> np.ndarray:
         return 1000.0 * (((y_ss[bi] + dy[..., bi]) / masses[bi]) / r_ref - 1.0)
@@ -1104,27 +1171,32 @@ def test_seasonal_window_harmonic_and_gp_vs_20k_trapezoid_and_convergence_order(
     pred_harm = RadiocarbonModel(cbm, solar, ExactLinearSolver()).predict_d14c(ds, concat=False)
     for series, pred_s in zip(ds.series, pred_harm):
         bi = cbm.box_index("Troposphere", hemisphere=series.hemisphere)
+        starts, ends, weights = literal_windows[series.name]
         ref_s = _trapezoid_window_average(
-            lambda g, b_i=bi: _d14c(sol_harm.sol(g).T, b_i),
-            np.asarray(series.sub_t_starts),
-            np.asarray(series.sub_t_ends),
-            np.asarray(series.seasonal_weights.weights),
+            lambda g, b_i=bi: _d14c(sol_harm.sol(g).T, b_i), starts, ends, weights
         )
         np.testing.assert_allclose(np.asarray(pred_s), ref_s, rtol=1e-9, atol=1e-9)
 
-    # Explicit O(h^2) trapezoid convergence-order verification on NH 774 window
+    # Explicit O(h^2) trapezoid convergence-order verification on literal NH 775 April–September window
     box_nh = cbm.box_index("Troposphere", hemisphere="north")
-    exact_nh_774 = float(pred_harm[0][1])
-    a_w, b_w = float(s_nh.sub_t_starts[1, 0]), float(s_nh.sub_t_ends[1, 0])
+    exact_nh_775 = float(pred_harm[0][1])
+    a_w, b_w = 775.0 + 3.0 / 12.0, 775.0 + 9.0 / 12.0
     errs = []
     for n_pts in (17, 33, 65, 129, 257):
         g = np.linspace(a_w, b_w, n_pts, dtype=np.float64)
-        errs.append(abs(float(np.trapezoid(_d14c(sol_harm.sol(g).T, box_nh), g) / (b_w - a_w)) - exact_nh_774))
+        errs.append(abs(float(np.trapezoid(_d14c(sol_harm.sol(g).T, box_nh), g) / (b_w - a_w)) - exact_nh_775))
     orders = [math.log2(errs[i] / errs[i + 1]) for i in range(len(errs) - 1)]
     for p_obs in orders:
         assert 1.98 <= p_obs <= 2.02, f"Expected O(h^2) trapezoid order, got {orders}"
 
-    # Realized GPProduction (Solin–Särkkä Matern-3/2 in pure NumPy)
+
+def test_seasonal_window_gp_vs_20k_trapezoid_and_foh_convergence() -> None:
+    """Verify realized Solin–Särkkä GP seasonal averaging vs 20k literal trapezoid and ``O(dt^2)`` FOH order."""
+    cbm, A, b_scaled, masses, y_ss, r_ref = _brehm21_numpy_state()
+    years = np.array([774.0, 775.0, 776.0], dtype=np.float64)
+    ds_all, literal_windows = _make_nh_sh_literal_dataset(years)
+    ds = Dataset([ds_all.series[0], ds_all.series[1]])
+
     rng = np.random.default_rng(314)
     coeffs = rng.standard_normal(12)
     a_dom, b_dom = 772.0, 778.0
@@ -1144,12 +1216,9 @@ def test_seasonal_window_harmonic_and_gp_vs_20k_trapezoid_and_convergence_order(
     ref_gp = np.concatenate(
         [
             _trapezoid_window_average(
-                lambda g, b_i=cbm.box_index("Troposphere", hemisphere=s.hemisphere): _d14c(
-                    sol_gp.sol(g).T, b_i
-                ),
-                np.asarray(s.sub_t_starts),
-                np.asarray(s.sub_t_ends),
-                np.asarray(s.seasonal_weights.weights),
+                lambda g, b_i=cbm.box_index("Troposphere", hemisphere=s.hemisphere): 1000.0
+                * (((y_ss[b_i] + sol_gp.sol(g).T[..., b_i]) / masses[b_i]) / r_ref - 1.0),
+                *literal_windows[s.name],
             )
             for s in ds.series
         ]
@@ -1245,37 +1314,27 @@ def test_exact_linear_solver_eager_vs_jit_all_profiles_and_regimes(profile: str)
     p_init = jnp.array([774.40, 0.24, 6.3], dtype=jnp.float64)
     w_obs = jnp.array([1.3, 0.8], dtype=jnp.float64)
 
-    def loss_pw(cbm_in, p_in: jax.Array) -> tuple[jax.Array, jax.Array]:
+    def loss_both(cbm_in, p_in: jax.Array) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
         spike = _make_spike(profile, p_in)
         y0_arg = (cbm_in.steady_state_c14() + dy0_3) if use_subwin else None
         pw = solver.solve_delta_trajectory(cbm_in, spike, t_eval, t0=773.5, y0=y0_arg)
-        return jnp.sum(jnp.square(pw[:, 1])), pw
-
-    def loss_bn(cbm_in, p_in: jax.Array) -> tuple[jax.Array, jax.Array]:
-        spike = _make_spike(profile, p_in)
-        y0_arg = (cbm_in.steady_state_c14() + dy0_3) if use_subwin else None
         bn = solver.solve_delta_binned(
             cbm_in, spike, a_win, b_win, sub_weights=sub_w, t0=773.0, y0=y0_arg
         )
-        return jnp.sum(w_obs * jnp.square(bn[:, 1])), bn
+        return jnp.sum(jnp.square(pw[:, 1])) + jnp.sum(w_obs * jnp.square(bn[:, 1])), (pw, bn)
 
-    # Shared XLA compilations per profile reused across all 3 spectral regimes:
+    # Shared XLA compilation per profile reused across all 3 spectral regimes:
     # eager closes over concrete cbm (modal path for real/complex, Van Loan for near_degenerate);
     # filter_jit traces cbm (always Van Loan path).
-    jit_vag_pw = eqx.filter_jit(jax.value_and_grad(loss_pw, argnums=1, has_aux=True))
-    jit_vag_bn = eqx.filter_jit(jax.value_and_grad(loss_bn, argnums=1, has_aux=True))
+    jit_vag = eqx.filter_jit(jax.value_and_grad(loss_both, argnums=1, has_aux=True))
 
     for regime in ("real", "complex", "near_degenerate"):
         cbm = _make_three_box_regime_cbm(regime)
-        (_, pw_e), g_pw_e = jax.value_and_grad(lambda p: loss_pw(cbm, p), has_aux=True)(p_init)
-        (_, pw_j), g_pw_j = jit_vag_pw(cbm, p_init)
+        (_, (pw_e, bn_e)), g_e = jax.value_and_grad(lambda p: loss_both(cbm, p), has_aux=True)(p_init)
+        (_, (pw_j, bn_j)), g_j = jit_vag(cbm, p_init)
         _assert_norm_close(np.asarray(pw_e), np.asarray(pw_j))
-        _assert_norm_close(np.asarray(g_pw_e), np.asarray(g_pw_j))
-
-        (_, bn_e), g_bn_e = jax.value_and_grad(lambda p: loss_bn(cbm, p), has_aux=True)(p_init)
-        (_, bn_j), g_bn_j = jit_vag_bn(cbm, p_init)
         _assert_norm_close(np.asarray(bn_e), np.asarray(bn_j))
-        _assert_norm_close(np.asarray(g_bn_e), np.asarray(g_bn_j))
+        _assert_norm_close(np.asarray(g_e), np.asarray(g_j))
     jax.clear_caches()
 
 
@@ -1299,15 +1358,19 @@ def test_exact_linear_solver_eager_vs_jit_guttler15_and_effective_cbm() -> None:
         bn = solver.solve_delta_binned(c, prod, a_win, b_win)
         return jnp.sum(jnp.square(pw[:, 1])) + jnp.sum(jnp.square(bn[:, 1])), (pw, bn)
 
-    (_, (pw_e, bn_e)), g_e = jax.value_and_grad(lambda p: g15_loss(guttler, p), has_aux=True)(p_init)
+    (_, (pw_e, bn_e)), g_e = jax.value_and_grad(g15_loss, argnums=(0, 1), has_aux=True)(guttler, p_init)
     (_, (pw_j, bn_j)), g_j = eqx.filter_jit(
-        jax.value_and_grad(g15_loss, argnums=1, has_aux=True)
+        jax.value_and_grad(g15_loss, argnums=(0, 1), has_aux=True)
     )(guttler, p_init)
     _assert_norm_close(np.asarray(pw_e), np.asarray(pw_j))
     _assert_norm_close(np.asarray(bn_e), np.asarray(bn_j))
-    _assert_norm_close(np.asarray(g_e), np.asarray(g_j))
+    _assert_norm_close(np.asarray(g_e[1]), np.asarray(g_j[1]))
+    g15_cbm_e, _ = jax.flatten_util.ravel_pytree(eqx.filter(g_e[0], eqx.is_inexact_array))
+    g15_cbm_j, _ = jax.flatten_util.ravel_pytree(eqx.filter(g_j[0], eqx.is_inexact_array))
+    assert g15_cbm_e.size == 25
+    _assert_norm_close(np.asarray(g15_cbm_e), np.asarray(g15_cbm_j))
 
-    # 2. EffectiveCBM (symmetric eigh modal path both eagerly and under jit, CBM + spike grad)
+    # 2. EffectiveCBM (symmetric eigh modal path both eagerly and under jit, all 6 CBM + spike grads)
     eff = EffectiveCBM(K=4)
     assert _modal_decomposition(eff.matrix_A(), cbm=eff) is not None
 
@@ -1324,9 +1387,10 @@ def test_exact_linear_solver_eager_vs_jit_guttler15_and_effective_cbm() -> None:
     )(eff, p_init)
     _assert_norm_close(np.asarray(eb_e), np.asarray(eb_j))
     _assert_norm_close(np.asarray(eg_e[1]), np.asarray(eg_j[1]))
-    _assert_norm_close(
-        np.asarray(eg_e[0].log_k_trop_to_sinks), np.asarray(eg_j[0].log_k_trop_to_sinks)
-    )
+    eff_cbm_e, _ = jax.flatten_util.ravel_pytree(eqx.filter(eg_e[0], eqx.is_inexact_array))
+    eff_cbm_j, _ = jax.flatten_util.ravel_pytree(eqx.filter(eg_j[0], eqx.is_inexact_array))
+    assert eff_cbm_e.size == 6
+    _assert_norm_close(np.asarray(eff_cbm_e), np.asarray(eff_cbm_j))
     jax.clear_caches()
 
 
@@ -1363,24 +1427,37 @@ def test_diffrax_solver_eager_vs_jit_forward_and_non_spike_grad(method: str) -> 
 
 @pytest.mark.xfail(
     strict=True,
-    reason="DiffraxSolver PIDController step_ts lacks lax.stop_gradient on smooth spikes (solvers.py:1667-1716)",
+    raises=AssertionError,
+    reason=(
+        "DiffraxSolver PIDController step_ts lacks lax.stop_gradient on smooth spikes "
+        "(solvers.py:1667-1716): eager and jit grads diverge ~2x and are ~6800x wrong vs ExactLinearSolver"
+    ),
 )
 def test_diffrax_solver_smooth_spike_grad_eager_vs_jit_stepts_bug() -> None:
     """Document ``DiffraxSolver`` ``step_ts`` differentiation bug on smooth ``MiyakeSpike`` ``grad``."""
     cbm = _make_three_box_regime_cbm("near_degenerate")
     solver = DiffraxSolver(method="Tsit5", rtol=1e-12, atol=1e-12, dt0=0.05)
+    exact_solver = ExactLinearSolver()
     t_eval = jnp.array([773.8, 774.5, 775.2, 776.4], dtype=jnp.float64)
     p_init = jnp.array([774.40, 0.25, 5.5], dtype=jnp.float64)
     solar = HarmonicSolar(periods=11.0, c_cos=0.2, c_sin=-0.15, t_ref=774.0)
 
-    def loss_spike(p: jax.Array) -> jax.Array:
-        prod = ProductionSum(
+    def _make_prod(p: jax.Array) -> ProductionSum:
+        return ProductionSum(
             steady=SteadyProduction(),
             spike=MiyakeSpike(p[0], p[1], p[2], profile="supergaussian", exponent=10.0),
             solar=solar,
         )
-        return jnp.sum(jnp.square(solver.solve_delta_trajectory(cbm, prod, t_eval, t0=773.5)[:, 1]))
 
+    def loss_spike(p: jax.Array) -> jax.Array:
+        return jnp.sum(jnp.square(solver.solve_delta_trajectory(cbm, _make_prod(p), t_eval, t0=773.5)[:, 1]))
+
+    def loss_exact(p: jax.Array) -> jax.Array:
+        return jnp.sum(jnp.square(exact_solver.solve_delta_trajectory(cbm, _make_prod(p), t_eval, t0=773.5)[:, 1]))
+
+    g_ref = np.asarray(jax.jit(jax.grad(loss_exact))(p_init))
     g_eager = np.asarray(jax.grad(loss_spike)(p_init))
     g_jit = np.asarray(jax.jit(jax.grad(loss_spike))(p_init))
-    _assert_norm_close(g_eager, g_jit, rtol=1e-13)
+    _assert_norm_close(g_eager, g_ref, rtol=1e-6)
+    _assert_norm_close(g_jit, g_ref, rtol=1e-6)
+    _assert_norm_close(g_eager, g_jit, rtol=1e-11)
