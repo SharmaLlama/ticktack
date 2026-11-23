@@ -1,26 +1,32 @@
 # Fisher Information & EffectiveCBMs
 
-Published multi-reservoir carbon box models contain up to 22 boxes and more than 50 exchange rates (`Brehm21` has 22 boxes and 56 directed flow-balanced rates, or 52 under N/S symmetry tying; `Guttler15` has 11 boxes and 20 rates). Yet tree-ring $\Delta^{14}\text{C}$ observations measure only **one** (or in two-hemisphere compilations, two closely coupled) tropospheric reservoir(s) over a finite window of decades. Attempting to infer all 56 transfer rates jointly with cosmic-ray production $Q(t)$ produces severe posterior ridges and non-identifiability.
+Published multi-reservoir carbon box models contain up to 22 boxes and more than 50 exchange rates (`Brehm21` has 22 boxes and 56 directed flow-balanced rates, or 39 when the 17 equal-rate N/S pairs are tied via `tie_symmetric_edges=True`; `Guttler15` has 11 boxes and 24 directed rates). Yet tree-ring $\Delta^{14}\text{C}$ observations measure only **one** (or in two-hemisphere compilations, two closely coupled) tropospheric reservoir(s) over a finite window of decades. Attempting to infer all 56 transfer rates jointly with cosmic-ray production $Q(t)$ produces severe posterior ridges and ill-conditioning.
 
-`ticktack.fisher`, `EffectiveCBM`, `SubspaceCBM`, and `sample_smc` turn this structural ill-conditioning into a quantitative, gauge-free model-selection and subspace-inference framework.
+`ticktack.fisher`, `EffectiveCBM`, `SubspaceCBM`, and `sample_smc` turn this ill-conditioning into a quantitative model-selection and subspace-inference framework.
 
 ---
 
 ## 1. Why Multi-Box Carbon Models Are Ill-Conditioned
 
-### Control-Theory Identifiability Bound ($2n - 2$)
+### Single-Port Identifiability ($2n - 2$) vs Multi-Port Ill-Conditioning
 
-In single-hemisphere radiocarbon inversion, cosmic-ray $^{14}\text{C}$ enters through a fixed normalized allocation vector $\mathbf{b}$ (stratosphere + troposphere) and tree rings sample a single linear readout $\mathbf{c}^\top \mathbf{y}(t)$ (tropospheric specific activity). The forward LTI transfer function in the Laplace domain $s \in \mathbb{C}$ is
+In single-hemisphere (single-port) radiocarbon inversion, cosmic-ray $^{14}\text{C}$ enters through a fixed normalized allocation vector $\mathbf{b}$ (stratosphere + troposphere) and tree rings sample a single linear readout $\mathbf{c}^\top \mathbf{y}(t)$ (tropospheric specific activity). The forward LTI transfer function in the Laplace domain $s \in \mathbb{C}$ is
 
 $$
 H(s) = \mathbf{c}^\top (s I_n - A)^{-1}\mathbf{b} = \frac{p_{n-1}(s)}{q_n(s)},
 $$
 
-a strictly proper rational function of degree at most $n$. Even with **noiseless continuous measurements over $t \in [0, \infty)$**, an arbitrary $n$-box CBM has a continuous similarity gauge group $\{P \in \operatorname{GL}_n(\mathbb{R}) : P\mathbf{b} = \mathbf{b},\;\mathbf{c}^\top P^{-1} = \mathbf{c}^\top\}$ of dimension $(n - 1)^2$ that leaves $H(s)$ – and hence every tropospheric $\Delta^{14}\text{C}(t)$ curve for *every* cosmic-ray input $Q(t)$ – **identically invariant** ([Bellman & Åström 1970](https://doi.org/10.1016/0025-5564(70)90069-X)). Taking into account the steady-state normalization against $R_{\text{ref}}$ (which fixes global total mass $M_{\text{tot}}$ as an exact zero-Fisher gauge mode when $Q_{\text{std}}$ is scaled), at most **$2n - 2$** independent combinations of box parameters (for distinct real relaxation modes: $(n - 1)$ decay rates plus $(n - 1)$ relative amplitudes) are observable in principle.
+a strictly proper rational function of degree at most $n$. Even with **noiseless continuous measurements over $t \in [0, \infty)$**, an arbitrary $n$-box single-port CBM has a continuous similarity gauge group $\{P \in \operatorname{GL}_n(\mathbb{R}) : P\mathbf{b} = \mathbf{b},\;\mathbf{c}^\top P^{-1} = \mathbf{c}^\top\}$ of dimension $(n - 1)^2$ that leaves $H(s)$ – and hence every tropospheric $\Delta^{14}\text{C}(t)$ curve for *every* cosmic-ray input $Q(t)$ – invariant ([Bellman & Åström 1970](https://doi.org/10.1016/0025-5564(70)90069-X)). Taking into account the steady-state normalization against $R_{\text{ref}}$ (which leaves global total mass $M_{\text{tot}}$ as an exact zero-Fisher gauge mode when $Q_{\text{std}}$ is scaled), at most **$2n - 2$** independent combinations of box parameters are identifiable in principle for a single-port model.
+
+The two main literature presets illustrate the sharp distinction between exact single-port gauge directions and multi-port ill-conditioning:
+
+- **Single-port `Guttler15` (`11` boxes, `24` directed rates)**: Confirmed transfer-function rank **`20`** ($2n - 2 = 20$) with **`4` exact gauge directions** (in addition to global total mass $\ln M_{\text{tot}}$).
+- **Two-port untied `Brehm21` (`22` boxes, `56` directed rates)**: Measuring both Northern and Southern Hemisphere tropospheres yields a two-port transfer function whose Jacobian has **full rank `56`**; its singular values fall smoothly to about $10^{-21}$ with no spectral gap, so its `float64` numerical rank is `38`–`50` depending on tolerance. Untied `Brehm21` is therefore **severely ill-conditioned** rather than rank-deficient with exact zero modes (beyond global total mass). Moreover, a full north/south quotient of `Brehm21` is only **approximate**: the published rate matrix is about `6%` asymmetric between hemispheres, with some paired rates differing by `30–60%`.
+- **Spectrum realness**: For non-reversible `BalancedCBM` presets (`Brehm21`, `Guttler15`), all eigenvalues of $A$ are real at the nominal published rates, but realness is a property of the nominal rates only — about `23%` of `Brehm21` draws and `0.3%` of `Guttler15` draws from the assumed fiducial `prior_cbm_sd = 0.35` log-rate prior have complex-conjugate eigenvalue pairs. Only detailed-balance models (`ReversibleCBM`, `EffectiveCBM`) guarantee strictly real negative eigenvalues everywhere.
 
 ### Exponential Singular-Value Decay of the Laplace Transform
 
-Even within that $(2n - 2)$-dimensional identifiable subspace, reconstructing the distribution of reservoir relaxation rates $\gamma > 0$ from noisy time-domain $\Delta^{14}\text{C}(t)$ data is a **real Laplace-transform inversion**:
+Even where parameters are formally identifiable, reconstructing the distribution of reservoir relaxation rates $\gamma > 0$ from noisy time-domain $\Delta^{14}\text{C}(t)$ data is a **real Laplace-transform inversion**:
 
 $$
 g_{\text{trop}}(\tau) = \int_0^\infty e^{-\gamma \tau}\,\rho(\gamma)\,\mathrm{d}\gamma, \qquad \tau > 0.
@@ -32,23 +38,25 @@ $$
 \sigma(\omega_{\ln}) = \sqrt{\frac{\pi}{\cosh(\pi \omega_{\ln})}} \;\sim\; \sqrt{2\pi}\,\exp\!\left(-\frac{\pi}{2}|\omega_{\ln}|\right) \quad (|\omega_{\ln}| \to \infty).
 $$
 
-Because $\sigma(\omega_{\ln})$ decays **exponentially** with log-timescale frequency $\omega_{\ln}$, resolving $m$ distinct carbon-cycle relaxation modes separated across a finite observational baseline $[t_{\min}, t_{\max}]$ of span $T \sim 30$–$100\text{ yr}$ at AMS signal-to-noise ratio $\text{SNR}$ obeys a logarithmic capacity bound:
+Because $\sigma(\omega_{\ln})$ decays **exponentially** with log-timescale frequency $\omega_{\ln}$, resolving $m$ distinct carbon-cycle relaxation modes separated across a finite observational baseline $[t_{\min}, t_{\max}]$ of span $T \sim 30$–$100\text{ yr}$ at AMS signal-to-noise ratio $\text{SNR}$ obeys a logarithmic capacity scaling:
 
 $$
-d_{\text{eff}} \;\lesssim\; \frac{1}{\pi}\ln\!\left(\frac{T}{\Delta t}\right)\,\ln(\text{SNR}) \;\approx\; 2\text{--}3\text{ modes}.
+d_{\text{eff}} \;\lesssim\; \frac{1}{\pi}\ln\!\left(\frac{T}{\Delta t}\right)\,\ln(\text{SNR}),
 $$
 
-Physically, decadal tree-ring data around a Miyake spike sharply constrain:
+which gives $d_{\text{eff}} \approx 2$–$3$ on decadal tree-ring compilations (with exact numerical values depending on the dataset and assumed log-rate prior width).
+
+Physically, decadal tree-ring data around a Miyake spike constrain:
 
 1. **Fast stratosphere–troposphere–biosphere dilution** ($\tau_1 \sim 1$–$3\text{ yr}$), governing the peak amplitude and initial sharp drop of the spike;
 2. **Intermediate mixed-layer / thermocline ocean uptake** ($\tau_2 \sim 10$–$30\text{ yr}$), governing the multi-decadal tail; and
-3. At high SNR or multi-century baselines, **collective deep-ocean exchange** ($\tau_3 \gtrsim 100\text{ yr}$), whereas fine subdivisions among 22 internal biospheric and abyssal boxes lie deep inside the prior-dominated null space ($\mu_k \ll 1$).
+3. At high SNR or multi-century baselines, **collective deep-ocean exchange** ($\tau_3 \gtrsim 100\text{ yr}$), whereas fine subdivisions among 22 internal biospheric and abyssal boxes lie deep inside the prior-dominated tail ($\mu_k \ll 1$).
 
 ---
 
 ## 2. Schur-Marginalized Fisher Information (`ticktack.fisher`)
 
-`ticktack.fisher` computes exact, numerically stable local Fisher information spectra on any `zodiax` PyTree model without ever forming ill-conditioned normal-equation products $J^\top \Sigma_n^{-1} J$ directly.
+`ticktack.fisher` computes numerically stable local Fisher information spectra on any `zodiax` PyTree model without forming ill-conditioned normal-equation products $J^\top \Sigma_n^{-1} J$ directly.
 
 ### QR-Stabilized Expected Fisher & Schur Nuisance Marginalization
 
@@ -80,17 +88,18 @@ To connect reservoir loadings directly to observable time-domain signals, `cbm_m
 
 Rendering these trajectories with `plot_cbm_mode_impulse_responses` across `0–30 yr` with the `0–6.5 yr` post-spike observation window shaded makes the rank structure visually transparent: Modes $1\text{--}3$ peak sharply inside `0–6.5 yr`, Modes $4\text{--}6$ straddle the `3–15 yr` boundary, and slow deep-water directions such as Mode $9$ live primarily in the `> 10 yr` tail.
 
-### Small-Eigenvalue Fisher Modes ($10^{-9} < \mu_k < 1$) vs the Observation-Span Nullspace
+### Small-Eigenvalue Fisher Modes ($10^{-9} < \mu_k < 1$) and Finite-Dataset Conditioning
 
-Evaluating `cbm_fisher_spectrum` for `Brehm21` (22 boxes, 56 directed free rates) on the 774 CE compilation (`775CE`) illustrates the separation between data-dominated modes, weakly informed physical modes, and the exact observation-span nullspace:
+Every quoted $d_{\text{eff}}$ and information-gain figure in bits depends directly on both the **tree-ring compilation** (series and ring count) and the **assumed log-rate prior width** (`prior_cbm_sd = 0.35`, an assumed fiducial width with no cited literature source; see [Bundled Datasets](data.md) for the three 774 CE compilations of `313`, `432`, and `531` rings). Evaluating `cbm_fisher_spectrum` for untied `Brehm21` (`22` boxes, `56` directed free rates) on the bundled `775CE` compilation (`load_bundled_event("775CE")`: `28` series, `313` rings, `760.25–781.25 CE`) with fiducial `prior_cbm_sd = 0.35` separates three regimes:
 
-- **Data-dominated modes ($\mu_k > 1$, modes $1\text{--}3$)**: Only the top three modes cross the prior-to-data threshold $\mu_k = 1$ ($\mu_1 \approx 34.3$ down to $\mu_3 \gtrsim 1$), giving $d_{\text{eff}} \approx 2\text{--}3$ and driving fast stratosphere–troposphere–biosphere and mixed-layer dilution.
-- **Small-eigenvalue physical modes ($10^{-9} < \mu_k < 1$, modes $4\text{--}12$)**: A further nine genuine eigenmodes remain well above numerical noise (down to $\mu_{12} \approx 2.1 \times 10^{-8}$) before a 21-decade rank cliff ($\mu_{13} \sim 10^{-29}$) imposed by the finite observation span and the 14 post-spike NH/SH seasonal sampling bins (`k > 12`). Although prior-dominated at the nominal $\sigma_0 = 0.35$ log-rate width on a decadal spike, modes $4\text{--}12$ capture physical surface-ocean, litter, biospheric, and inter-hemispheric asymmetry directions that matter under broader rate priors or when published transfer rates are misspecified, shifting the inferred fit and coupling to spike duration and fluence.
+- **Data-dominated modes ($\mu_k > 1$, modes $1\text{--}3$)**: At the MAP-like boxcar spike of Tutorial 2 (`t_start = 774.11 CE`, `duration = 1.175 yr`, `fluence = 6.16`), three modes exceed $\mu_k = 1$ ($\mu_1 = 39.96$, $\mu_2 = 13.9$, $\mu_3 = 6.53$), yielding $d_{\text{eff}} = 3.16$ and $I = 6.40\text{ bits}$ (at the snippet's `t_start = 774.5 CE`, `duration = 0.35 yr`, `fluence = 6.5`, $\mu_1 = 46.71$, $d_{\text{eff}} = 3.18$, and $I = 6.61\text{ bits}$).
+- **Small-eigenvalue physical modes ($10^{-9} < \mu_k < 1$, modes $4\text{--}12$ in Tutorial 2)**: Nine further modes lie above $10^{-9}$ (down to $\mu_{12} = 2.52 \times 10^{-8}$) before dropping to numerical precision ($\mu_{13} \approx 3.2 \times 10^{-29}$). That drop is a finite-sample consequence of the discrete post-spike NH/SH seasonal bins and nuisance projection on this 28-series, 313-ring compilation — not a set of exact structural zero modes of untied `Brehm21`, whose continuous two-port transfer function has full rank `56` and is severely ill-conditioned. Although prior-dominated at `prior_cbm_sd = 0.35`, modes $4\text{--}12$ capture surface-ocean, litter, biospheric, and inter-hemispheric directions that shift inferred spike duration and fluence under broader rate priors.
 
 ```python
 import jax.numpy as jnp
 import ticktack as tt
 
+# Bundled 775CE compilation: 28 series, 313 rings (760.25-781.25 CE)
 dataset = tt.load_bundled_event("775CE")
 spike0 = tt.MiyakeSpike(t_start=774.5, duration=0.35, fluence=6.5, profile="boxcar")
 psi0 = {"spike": spike0, "offsets": jnp.zeros(dataset.n_series)}
@@ -99,24 +108,31 @@ fwd = lambda cbm_v, psi: tt.RadiocarbonModel(
 ).predict_d14c(dataset, offsets=psi["offsets"])
 
 cbm_brehm = tt.load_preset("Brehm21", kind="balanced")
+# Assumed fiducial log-rate prior width: prior_cbm_sd = 0.35 (no cited source)
 sd_brehm = jnp.append(jnp.full(cbm_brehm.log_rates_free.size, 0.35), jnp.inf)
 spec = tt.cbm_fisher_spectrum(fwd, cbm_brehm, dataset.sigma_flat, psi_nuisance=psi0, prior_cbm_sd=sd_brehm)
-print(f"Brehm21 ({cbm_brehm.log_rates_free.size} free rates): d_eff = {float(spec.d_eff):.2f}, I = {float(spec.info_bits):.2f} bits")
+print(
+    f"Brehm21 ({cbm_brehm.log_rates_free.size} free rates) on 775CE "
+    f"({dataset.n_series} series, {dataset.n_obs} rings; fiducial prior_cbm_sd=0.35): "
+    f"d_eff = {float(spec.d_eff):.2f}, I = {float(spec.info_bits):.2f} bits"
+)
 ```
 
 ---
 
 ## 3. Canonical Minimal Models (`EffectiveCBM(K)`)
 
-Because at most $2K - 2$ carbon-cycle parameters are identifiable from tropospheric $\Delta^{14}\text{C}(t)$, `EffectiveCBM(K)` (`K >= 2`) provides a **gauge-free canonical mammillary topology**: `Stratosphere <-> Troposphere <-> {Sink_1, ..., Sink_{K-2}}` (`box 0` Stratosphere, `box 1` Troposphere, and $K - 2$ reversible biospheric/marine exchange sinks).
+In single-port settings where at most $2K - 2$ carbon-cycle parameters are identifiable from tropospheric $\Delta^{14}\text{C}(t)$, `EffectiveCBM(K)` (`K >= 2`) provides a **gauge-free canonical mammillary (star) topology**: `Stratosphere <-> Troposphere <-> {Sink_1, ..., Sink_{K-2}}` (`box 0` Stratosphere, `box 1` Troposphere, and $K - 2$ reversible biospheric/marine exchange sinks).
 
-### Exact Parameter Counting & Smooth Deep-Sink Calibration
+An arbitrary multi-box carbon web reduces to a star (mammillary) model in exact arithmetic **only when the web is reversible** (detailed balance). For general non-reversible directed webs such as `Brehm21` or `Guttler15`, a mammillary `EffectiveCBM(K)` is an **approximation** (achieving `0.044‰` RMS in tests against full non-reversible models).
+
+### Parameter Counting & Smooth Deep-Sink Calibration
 
 1. **Fixed stratospheric production split ($\eta_{\text{strat}} = 0.70$)**: Fixes $\mathbf{b} = (0.70, 0.30, 0, \dots, 0)^\top$, eliminating the continuous $(k_{0 \to 1}, k_{1 \to 0}, \eta_{\text{strat}})$ three-into-two similarity gauge mode.
 2. **`2` stratosphere–troposphere log exchange rates**: `log_k_strat_to_trop` ($\ln k_{0 \to 1}$) and `log_k_trop_to_strat` ($\ln k_{1 \to 0}$).
 3. **`2(K - 2)` ordered sink parameters (`K >= 3`)**:
    - $K - 2$ unconstrained log uptake rates $\ln k_{1 \to j}$ (`log_k_trop_to_sinks`).
-   - $K - 2$ unconstrained residence-time coordinates (`sink_tau_params`) mapped via cumulative positive `softplus` increments $\ln\tau_j = \ln\tau_{j-1} + \operatorname{softplus}(\delta_j)$ (`cbm.sink_timescales()`), enforcing strict ordering $\tau_1 < \tau_2 < \dots < \tau_{K-2}$ and eliminating all $(K - 2)!$ discrete sink-permutation modes!
+   - $K - 2$ unconstrained residence-time coordinates (`sink_tau_params`) mapped via cumulative positive `softplus` increments $\ln\tau_j = \ln\tau_{j-1} + \operatorname{softplus}(\delta_j)$ (`cbm.sink_timescales()`), enforcing strict ordering $\tau_1 < \tau_2 < \dots < \tau_{K-2}$ and eliminating all $(K - 2)!$ discrete sink-permutation modes.
 4. **Dynamic deep-sink calibration (`calibrate_deep_sink=True`, default)**: Given fixed tropospheric mass $M_{\text{trop}} = 501.5\text{ GtC}$ (`GUTTLER15_TROP_MASS_GTC`) and target reference activity $R_{\text{ref}}$ (`GUTTLER15_R_REF_KG_PER_GTC`), an open sequestration loss rate $k_{\text{deep}} \ge 0$ on the slowest reservoir (`Sink_{K-2}` for $K \ge 3$, or `Troposphere` for $K = 2$) is solved analytically via $C^\infty$ `softplus` barriers so steady-state tropospheric $^{14}\text{C}$ matches pre-industrial $R_{\text{ref}}$ across all PyTree updates and autodiff passes.
 
 The total dynamic parameter count is therefore **$1 + 1 + (K - 2) + (K - 2) = 2K - 2$** (`2` parameters for $K = 2$, `4` for $K = 3$, `6` for $K = 4$; for a single-box $K = 1$ baseline, use a 1-box `OpenCBM` as in [Tutorial 2](tutorials.md)). Inspect the active open loss vector `(0, ..., 0, k_deep)` via `cbm.sink_rates()`, the scalar calibrated loss via `cbm.deep_sink_rate`, and the ordered sink residence times via `cbm.sink_timescales()`.
@@ -125,21 +141,23 @@ The total dynamic parameter count is therefore **$1 + 1 + (K - 2) + (K - 2) = 2K
 
 ## 4. Fisher Subspace Parametrization (`SubspaceCBM`)
 
-Rather than discarding all carbon-cycle uncertainty outside a minimal star graph, `SubspaceCBM` (aliased as `FisherSubspaceCBM`) restricts a flow-balanced Perron–Frobenius model to its top $m$ Schur-marginalized Fisher log-rate eigenmodes while maintaining exact Kirchhoff mass balance everywhere:
+Rather than discarding carbon-cycle uncertainty outside a minimal star graph, `SubspaceCBM` (aliased as `FisherSubspaceCBM`) restricts a flow-balanced Perron–Frobenius model to its top $m$ Schur-marginalized Fisher log-rate eigenmodes while maintaining Kirchhoff mass balance to machine precision:
 
 $$
 \ln \mathbf{k}_{\text{free}}(\boldsymbol{\alpha}) = \ln \mathbf{k}_{\text{free},0} + B\,\boldsymbol{\alpha}, \qquad \boldsymbol{\alpha} \in \mathbb{R}^m.
 $$
 
-Constructed via `SubspaceCBM.from_fisher(base_cbm, spectrum, n_modes)`, the static basis matrix $B$ equals `spectrum.parameter_loadings[:p_free, :n_modes]` (where `p_free` is the number of free log rates in `base_cbm`). Only `alpha` is dynamic (`alpha = 0` reproduces `base_cbm` to machine precision, and `to_balanced_cbm()` converts any sample back to a `BalancedCBM`), leaving zero gauge nullspace in `ParameterSpace` and `cbm_fisher_spectrum`. Because $B = L_{\Pi} V_{:,:m}$, placing an independent standard normal prior `ParamSpec("cbm.alpha", "identity", prior_mean=0.0, prior_sd=1.0)` on `alpha` is mathematically identical to restricting the $\mathcal{N}(\ln \mathbf{k}_0, \Sigma_0)$ prior of `BalancedCBM` to its leading $m$ Schur-marginalized Fisher eigenmodes – letting joint `fit_map` or `sample_nuts` fits include small-eigenvalue modes ($10^{-9} < \mu_k < 1$, e.g. $m = 6$ or $m = 12$) without exploring the $k > 12$ nullspace. Full parametric posteriors over `alpha` and spike coordinates from either `sample_nuts` or weighted `sample_smc` ensembles can then be inspected with `plot_corner` (`ChainConsumer >= 1.0`).
+Constructed via `SubspaceCBM.from_fisher(base_cbm, spectrum, n_modes)`, the static basis matrix $B$ equals `spectrum.parameter_loadings[:p_free, :n_modes]` (where `p_free` is the number of free log rates in `base_cbm`). Only `alpha` is dynamic (`alpha = 0` reproduces `base_cbm` to machine precision, and `to_balanced_cbm()` converts any sample back to a `BalancedCBM`), avoiding poorly conditioned directions in `ParameterSpace` and `cbm_fisher_spectrum`. Because $B = L_{\Pi} V_{:,:m}$, placing an independent standard normal prior `ParamSpec("cbm.alpha", "identity", prior_mean=0.0, prior_sd=1.0)` on `alpha` matches restricting the $\mathcal{N}(\ln \mathbf{k}_0, \Sigma_0)$ prior of `BalancedCBM` to its leading $m$ Schur-marginalized Fisher eigenmodes – letting joint `fit_map` or `sample_nuts` fits include small-eigenvalue modes ($10^{-9} < \mu_k < 1$, e.g. $m = 6$ or $m = 12$) without exploring poorly constrained directions. Full parametric posteriors over `alpha` and spike coordinates from either `sample_nuts` or weighted `sample_smc` ensembles can then be inspected with `plot_corner` (`ChainConsumer >= 1.0`).
+
+**Validation scope**: Synthetic recovery tests in which the synthetic truth is drawn from the same `SubspaceCBM` subspace being fitted verify only in-subspace recovery and numerical conditioning. Validating robustness against model misspecification requires synthetic tests in which the true rate perturbation lies outside the fitted subspace.
 
 ---
 
 ## 5. Tempered Sequential Monte Carlo & Bayesian Evidence (`sample_smc`)
 
-To select the reservoir count $K \in \{1, 2, 3, 4\}$ (or compare competing spike profiles and CBMs) via exact Bayes factors $B_{K, K'} = Z_K / Z_{K'}$ without harmonic-mean or Laplace approximations, `ticktack.sampling.sample_smc` wraps [`BlackJAX`](https://blackjax-devs.github.io/blackjax/)'s **adaptive tempered Sequential Monte Carlo** sampler:
+To select the reservoir count $K \in \{1, 2, 3, 4\}$ (or compare competing spike profiles and CBMs) via Monte Carlo Bayes factors $B_{K, K'} = Z_K / Z_{K'}$ without harmonic-mean or Laplace approximations, `ticktack.sampling.sample_smc` wraps [`BlackJAX`](https://blackjax-devs.github.io/blackjax/)'s **adaptive tempered Sequential Monte Carlo** sampler:
 
-- Constructs a thermodynamic bridge $\pi_\beta(\mathbf{u}) \propto p(\mathbf{u})\,L(\mathbf{u})^{\beta}$ from the normalized unconstrained prior ($\beta_0 = 0$, where $\int p(\mathbf{u})\,\mathrm{d}\mathbf{u} = 1$ exactly) to the full posterior ($\beta_T = 1$), choosing each inverse-temperature increment $\Delta\beta_t$ adaptively so the effective sample size (ESS) equals `target_ess * num_particles` (default `0.75`).
+- Constructs a thermodynamic bridge $\pi_\beta(\mathbf{u}) \propto p(\mathbf{u})\,L(\mathbf{u})^{\beta}$ from the normalized unconstrained prior ($\beta_0 = 0$, where $\int p(\mathbf{u})\,\mathrm{d}\mathbf{u} = 1$) to the full posterior ($\beta_T = 1$), choosing each inverse-temperature increment $\Delta\beta_t$ adaptively so the effective sample size (ESS) equals `target_ess * num_particles` (default `0.75`).
 - Rejuvenates particles at every tempering stage using a non-interacting random-walk Metropolis Markov kernel preconditioned by tempered Laplace curvature $( \Lambda_0 + \beta H_{\text{lik}} )^{-1}$ (`proposal_mode="laplace_tempered"`).
 - Uses **multinomial resampling** (`blackjax.smc.resampling.multinomial`) alongside genealogy-tracked ancestor indices so the telescoping product of incremental normalizing constants provides an asymptotically unbiased log-evidence $\ln \widehat{Z}$ together with the non-negative **[Lee & Whiteley (2018)](https://doi.org/10.1093/biomet/asy028)** single-run standard-error estimator $\widehat{\sigma}_{\ln Z}$ (`SMCResult.log_evidence_err`):
 
@@ -147,4 +165,4 @@ $$
 \ln \widehat{Z} = \sum_{t=1}^T \ln\!\left(\frac{1}{N}\sum_{i=1}^N w_t^{(i)}\right).
 $$
 
-On the 774 CE compilation (see [Tutorial 2](tutorials.md)), $\ln \widehat{Z}_K$ rises sharply from $K = 1$ to $K = 2$ and $K = 3$, then plateaus or declines for $K \ge 4$ due to the automatic Occam penalty on unconstrained slow-exchange parameters – matching the $d_{\text{eff}} \approx 2$–$3$ prediction of `cbm_fisher_spectrum`.
+On the bundled `775CE` compilation (`28` series, `313` rings) under the assumed fiducial log-rate prior width `prior_cbm_sd = 0.35` (see [Tutorial 2](tutorials.md)), $\ln \widehat{Z}_K$ rises sharply to $K = 3$ and then plateaus at $K = 4$ due to the Occam penalty on unconstrained slow-exchange parameters – consistent with `EffectiveCBM` $d_{\text{eff}} = 1.59$ (`I = 3.17 bits`) at $K = 3$ and $d_{\text{eff}} = 1.50$ (`I = 2.90 bits`) at $K = 4$ (`Brehm21`: $d_{\text{eff}} = 3.16$, `I = 6.40 bits`).

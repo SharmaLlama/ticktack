@@ -28,6 +28,18 @@ for key, entry in list(tt.BUNDLED_DATASET_CATALOGUE.items())[:5]:
 
 When working inside a full git checkout of the repository, pass `include_repo_notebooks=True` to `load_bundled_event("775CE", include_repo_notebooks=True)` to also include the supplementary CSV records stored under `notebooks/775CE/` (such as `Guttler15_Kauri.csv`, `Miyake12_Cedar.csv`, `Jull14_Bristlecone.csv`, and `Rakowski15_Oak.csv`).
 
+### 774 CE Compilations Used Across Documentation and Notebooks
+
+Different tutorials and analyses use distinct subsets of the 774–775 CE tree-ring records. Always record which compilation is used when reporting Fisher statistics (`d_eff`, `info_bits`), evidences, or posterior summaries:
+
+| Compilation | Loader / Source | Series | Rings | Span (CE) | Where Used |
+| :--- | :--- | :---: | :---: | :--- | :--- |
+| Bundled `775CE` | `load_bundled_event("775CE")` | 28 | 313 | `760.25–781.25` | `v2/01`, `v2/02`, `v2/03`, `v2/05`, Fisher examples |
+| Multi-decade `775CE` | `load_bundled_event("775CE")` + 4 long repo series (`Miyake12_Cedar`, `Rakowski15_Oak`, `Jull14_Bristlecone`, `Guttler15_Kauri`) | 32 | 432 | `760.25–800.67` | `v2/04` (`select_gp_kernel`) |
+| Full repo `775CE` | `load_bundled_event("775CE", include_repo_notebooks=True)` | 42 | 531 | `760.25–800.67` | Full combined compilation |
+| Legacy `v1` multi-series | All 14 `notebooks/775CE/*.csv` series | 14 | 218 | `760.42–800.67` | `docs_examples/02` |
+| Single discovery series | `notebooks/miyake12.csv` (`Miyake12_Cedar`) | 1 | 28 | `760.25–787.75` | `docs_examples/01`, `03`, `05`, `06` |
+
 ---
 
 ## Audited Dataset Catalogue
@@ -52,7 +64,7 @@ When working inside a full git checkout of the repository, pass `include_repo_no
 
 | Catalogue Key | Hemisphere | `calendar` | `year_convention` | `growth_season` | Audit Notes & Provenance |
 | :--- | :---: | :--- | :--- | :--- | :--- |
-| `notebooks/775CE/Guttler15_Kauri.csv` | `"south"` | `"astronomical_ce"` | **`"end_year"`** | `"october-march"` | [Güttler et al. (2015)](https://doi.org/10.1016/j.epsl.2014.11.048) New Zealand kauri; ring `775` spans Oct 774–Mar 775 CE ($774.75$–$775.25$), identical in physical time to Schulman ring `774` in `Büntgen18_TAS01.csv`! |
+| `notebooks/775CE/Guttler15_Kauri.csv` | `"south"` | `"astronomical_ce"` | **`"end_year"`** | `"october-march"` | [Güttler et al. (2015)](https://doi.org/10.1016/j.epsl.2014.11.048) New Zealand kauri; ring `775` spans Oct 774–Mar 775 CE ($774.75$–$775.25$), matching the physical time of Schulman ring `774` in `Büntgen18_TAS01.csv`. |
 | `notebooks/775CE/Jull14_Bristlecone.csv` | `"north"` | `"astronomical_ce"` | `"schulman_start"` | `"june-august"` | [Jull et al. (2014)](https://doi.org/10.1002/2014GL059874) high-altitude California bristlecone pine. |
 | `notebooks/775CE/Miyake12_Cedar.csv` | `"north"` | `"astronomical_ce"` | `"schulman_start"` | `"april-september"` | [Miyake et al. (2012)](https://doi.org/10.1038/nature11123) Japanese cedar discovery series. |
 | `notebooks/775CE/Rakowski15_Oak.csv` | `"north"` | `"astronomical_ce"` | `"schulman_start"` | `"april-september"` | [Rakowski et al. (2015)](https://doi.org/10.1016/j.nimb.2015.05.031) Polish oak series. |

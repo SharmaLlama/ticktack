@@ -24,7 +24,7 @@ def from_fisher(
 ) -> SubspaceCBM
 ```
 
-- **`alpha`**: Dynamic `(m,)` unconstrained subspace coordinates (`alpha = 0` reproduces `base_cbm` to machine precision). Under `ParamSpec("cbm.alpha", "identity", prior_mean=0.0, prior_sd=1.0)`, the prior matches the $\mathcal{N}(\ln \mathbf{k}_0, \Sigma_0)$ prior of `BalancedCBM` restricted to the top $m$ Fisher modes, with zero gauge nullspace.
+- **`alpha`**: Dynamic `(m,)` unconstrained subspace coordinates (`alpha = 0` reproduces `base_cbm` to machine precision). Under `ParamSpec("cbm.alpha", "identity", prior_mean=0.0, prior_sd=1.0)`, the prior matches the $\mathcal{N}(\ln \mathbf{k}_0, \Sigma_0)$ prior of `BalancedCBM` restricted to the top $m$ Fisher modes, excluding the global total-mass gauge mode.
 - **`base_log_rates_free`, `basis_rows`, `base_log_total_mass`**: Static `equinox` fields storing $\ln \mathbf{k}_{\text{free},0}$, `spectrum.parameter_loadings[:p_free, :n_modes]`, and $\ln M_{\text{tot}}$.
 - **`to_balanced_cbm()`**: Materializes the corresponding `BalancedCBM` at the current `alpha`.
 

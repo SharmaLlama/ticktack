@@ -81,4 +81,4 @@ If you use `ticktack` in academic work, please cite [Sharma et al. (2023), JOSS 
 
 ## Name
 
-The 'little boxes' in [Malvina Reynolds' famous song](https://www.youtube.com/watch?v=2_2lGkEU4Xs) are all made of ticky-tacky, and they all look just the same. Here we provide an open-source toolkit for reproducing and extending carbon box models for radiocarbon analysis, and we expect they will be as interchangeable as Malvina Reynolds' boxes!
+The 'little boxes' in [Malvina Reynolds' famous song](https://www.youtube.com/watch?v=2_2lGkEU4Xs) are all made of ticky-tacky, and they all look just the same. Here we provide an open-source toolkit for reproducing and extending carbon box models for radiocarbon analysis, and we expect they will be as interchangeable as Malvina Reynolds' boxes.
