@@ -87,11 +87,11 @@ $$
 Because stationary covariance on a reflecting grid has slightly inhomogeneous knot-wise marginal variance near the boundaries, `dct_knot_variance` evaluates exact diagonal variances $\sigma_\eta^2(t_i) = \sum_{k=0}^{N-1} C_{ki}^2\,s_k$ in closed form:
 
 - **`GaussianField`**: Linear cosmic-ray production $Q(t) = q_{\text{mean}} + \eta(t)$. Under Gaussian AMS errors, MAP optimization (`fit_ift_field`), posterior sampling (`laplace_samples`), and marginal log-evidence (`log_evidence`) are **closed-form exact**.
-- **`LogGaussianField(..., ito_corrected=True)`**: Strictly positive cosmic-ray production
+- **`LogGaussianField`** (`ito_corrected=True` by default): Strictly positive cosmic-ray production
   $$
   Q(t_i) = \max(m_i, m_{\text{floor}})\,\exp\!\left(\eta_i - \frac{1}{2}\sigma_\eta^2(t_i)\right),
   $$
-  using `dct_knot_variance` when `ito_corrected=True` so that $\mathbb{E}[Q(t_i)] = q_{\text{mean}}$ identically across every interior and boundary knot!
+  applying `dct_knot_variance` by default (`ito_corrected=True`) so that $\mathbb{E}[Q(t_i)] = q_{\text{mean}}$ identically across every interior and boundary knot (pass `ito_corrected=False` for median-anchored $\operatorname{med}[Q(t_i)] = q_{\text{mean}}$).
 
 ### Composable Spectral Kernels (`SpectralKernel`)
 

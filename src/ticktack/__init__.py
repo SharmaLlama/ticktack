@@ -218,6 +218,7 @@ from .fields import (  # noqa: E402
     optimize_gp_kernel,
     predict_field_d14c,
     select_gp_kernel,
+    stationary_cbm_spectral_cov,
 )
 
 __all__ = [
@@ -360,4 +361,5 @@ __all__ = [
     "optimize_gp_kernel",
     "predict_field_d14c",
     "select_gp_kernel",
+    "stationary_cbm_spectral_cov",
 ]
