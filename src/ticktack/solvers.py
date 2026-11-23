@@ -161,6 +161,9 @@ def _cached_eig_concrete(
     )
 
 
+PropagationBackend = Literal["modal_symmetric", "modal_general", "van_loan"]
+
+
 def _modal_decomposition(
     A: jax.Array,
     cbm: CarbonBoxModel | None = None,
@@ -443,6 +446,75 @@ def _eval_trend_binned(
     return jax.vmap(_single_win)(a_r, b_r)
 
 
+def _clamp_spike_panels(
+    spike: MiyakeSpike, lo: jax.Array | None, hi: jax.Array, dirac_mask: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Clamp ``spike.unit_support_panels()`` onto ``(-inf, hi]`` or ``[lo, hi]``."""
+    ts, tau_d = spike.t_start, jnp.maximum(spike.duration, 0.0)
+    is_tiny = tau_d <= 1e-12
+    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+    panels = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
+    u_los, du = panels[:, 0], panels[:, 1] - panels[:, 0]
+    p_a, p_b = ts + tau_d * u_los, ts + tau_d * panels[:, 1]
+    hi_e = hi[..., None]
+    sub_a = jnp.minimum(p_a, hi_e) if lo is None else jnp.clip(p_a, lo[..., None], hi_e)
+    sub_b = jnp.minimum(p_b, hi_e) if lo is None else jnp.clip(p_b, lo[..., None], hi_e)
+    span = sub_b - sub_a
+    scale = spike.fluence * jnp.where(is_tiny, jnp.where(dirac_mask[..., None], du, 0.0), span / safe_tau)
+    return sub_a, sub_b, span, scale, u_los, du
+
+
+def _boxcar_clamped_interval(
+    spike: MiyakeSpike, lo: jax.Array | None, hi: jax.Array, dirac_mask: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Clamp single-panel boxcar support onto ``(-inf, hi]`` or ``[lo, hi]``."""
+    _, sub_b, span, scale, _, _ = _clamp_spike_panels(spike, lo, hi, dirac_mask)
+    return span[..., 0], hi - sub_b[..., 0], scale[..., 0]
+
+
+def _smooth_clamped_panels(
+    spike: MiyakeSpike, lo: jax.Array | None, hi: jax.Array, dirac_mask: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Map 16-point Gauss–Legendre nodes onto clamped smooth-spike sub-panels."""
+    ts, tau_d = spike.t_start, jnp.maximum(spike.duration, 0.0)
+    is_tiny = tau_d <= 1e-12
+    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+    sub_a, sub_b, span, scale, u_los, du = _clamp_spike_panels(spike, lo, hi, dirac_mask)
+    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
+    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
+    lin_q = sub_a[..., None] + span[..., None] * xi
+    u_q = jnp.where(is_tiny, u_los[:, None] + du[:, None] * xi, (lin_q - ts) / safe_tau)
+    tau_q = jnp.where(is_tiny, ts + tau_d * u_q, lin_q)
+    return sub_b, tau_q, scale, wq * spike.unit_profile(u_q)
+
+
+def _smooth_prefix_van_loan_one(
+    A: jax.Array, b_scaled: jax.Array, spike: MiyakeSpike, cutoff: jax.Array, dirac_mask: jax.Array
+) -> jax.Array:
+    """Propagate smooth-spike forcing on ``(-inf, cutoff]`` to ``cutoff`` via ``expm``."""
+    sub_b, tau_q, scale, w_phi = _smooth_clamped_panels(spike, None, cutoff, dirac_mask)
+
+    def _panel(sb: jax.Array, tq: jax.Array, sc: jax.Array, wp: jax.Array) -> jax.Array:
+        lags = jnp.maximum(sb - tq, 0.0)
+        vecs = jax.vmap(lambda lag: jax.scipy.linalg.expm(A * lag) @ b_scaled)(lags)
+        Phi_shift = jax.scipy.linalg.expm(A * (cutoff - sb))
+        return sc * (Phi_shift @ (wp @ vecs))
+
+    return jnp.sum(jax.vmap(_panel)(sub_b, tau_q, scale, w_phi), axis=0)
+
+
+def _smooth_prefix_modes(
+    spike: MiyakeSpike, cutoff: jax.Array, dirac_mask: jax.Array, lam: jax.Array
+) -> jax.Array:
+    """Propagate smooth-spike forcing on ``(-inf, cutoff]`` to ``cutoff`` in modal coordinates."""
+    sub_b, tau_q, scale, w_phi = _smooth_clamped_panels(spike, None, cutoff, dirac_mask)
+    lags = jnp.maximum(sub_b[..., None] - tau_q, 0.0)
+    exp_lags = jnp.exp(lags[..., None] * lam)
+    panel_modes = jnp.einsum("mpq,mpqn->mpn", w_phi.astype(lam.dtype), exp_lags)
+    shift = cutoff[:, None] - sub_b
+    return jnp.sum(scale[:, :, None] * jnp.exp(shift[:, :, None] * lam) * panel_modes, axis=1)
+
+
 @eqx.filter_jit
 def _eval_boxcar_pointwise_van_loan(
     A: jax.Array,
@@ -451,25 +523,13 @@ def _eval_boxcar_pointwise_van_loan(
     t: jax.Array,
 ) -> jax.Array:
     """Van Loan ``expm`` fallback for pointwise boxcar spike evaluation."""
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
+    delta_act, delta_post, scale = _boxcar_clamped_interval(spike, None, t, t >= spike.t_start)
 
-    def _one_t(ti: jax.Array) -> jax.Array:
-        delta_act = jnp.clip(ti - ts, 0.0, tau_d)
-        delta_post = jnp.maximum(ti - (ts + tau_d), 0.0)
-        frac = jnp.where(
-            is_tiny,
-            jnp.where(ti >= ts, 1.0, 0.0),
-            delta_act / safe_tau,
-        )
-        _, psi1_act_b = van_loan_psi1_vec(A * delta_act, b_scaled, 1.0)
-        Phi_post = jax.scipy.linalg.expm(A * delta_post)
-        return fluence * frac * (Phi_post @ psi1_act_b)
+    def _one_t(da: jax.Array, dp: jax.Array, sc: jax.Array) -> jax.Array:
+        _, psi1_act_b = van_loan_psi1_vec(A * da, b_scaled, 1.0)
+        return sc * (jax.scipy.linalg.expm(A * dp) @ psi1_act_b)
 
-    return jax.vmap(_one_t)(t)
+    return jax.vmap(_one_t)(delta_act, delta_post, scale)
 
 
 def _eval_boxcar_pointwise(
@@ -488,22 +548,9 @@ def _eval_boxcar_pointwise(
 
     lam, v_mat, v_inv = eff_modal
     b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
-
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
-
-    delta_act = jnp.clip(t - ts, 0.0, tau_d)
-    delta_post = jnp.maximum(t - (ts + tau_d), 0.0)
-    frac = jnp.where(
-        is_tiny,
-        jnp.where(t >= ts, 1.0, 0.0),
-        delta_act / safe_tau,
-    )
+    delta_act, delta_post, scale = _boxcar_clamped_interval(spike, None, t, t >= spike.t_start)
     y_tilde = (
-        (fluence * frac)[:, None]
+        scale[:, None]
         * jnp.exp(delta_post[:, None] * lam[None, :])
         * _scalar_psi1(delta_act[:, None] * lam[None, :])
         * b_tilde[None, :]
@@ -520,39 +567,19 @@ def _eval_boxcar_binned_van_loan(
     b_r: jax.Array,
 ) -> jax.Array:
     """Van Loan ``expm`` fallback for seasonal-window averaged boxcar pulse."""
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
 
     def _one_win(ar: jax.Array, br: jax.Array) -> jax.Array:
         width = br - ar
-        u0 = jnp.minimum(ts, ar)
-        u1 = jnp.minimum(ts + tau_d, ar)
-        delta_pre = u1 - u0
-        f_pre = jnp.where(
-            is_tiny,
-            jnp.where(ts < ar, 1.0, 0.0),
-            delta_pre / safe_tau,
-        )
+        delta_pre, lag_pre, s_pre = _boxcar_clamped_interval(spike, None, ar, spike.t_start < ar)
         _, psi1_pre_b = van_loan_psi1_vec(A * delta_pre, b_scaled, 1.0)
-        Phi_to_ar = jax.scipy.linalg.expm(A * (ar - u1))
-        dy_ar = fluence * f_pre * (Phi_to_ar @ psi1_pre_b)
+        dy_ar = s_pre * (jax.scipy.linalg.expm(A * lag_pre) @ psi1_pre_b)
         _, int_pre = van_loan_psi1_vec(A, dy_ar, width)
 
-        t1 = jnp.clip(ts, ar, br)
-        t2 = jnp.clip(ts + tau_d, ar, br)
-        delta_in = t2 - t1
-        delta_post = br - t2
-        f_in = jnp.where(
-            is_tiny,
-            jnp.where((ts >= ar) & (ts < br), 1.0, 0.0),
-            delta_in / safe_tau,
-        )
+        in_mask = (spike.t_start >= ar) & (spike.t_start < br)
+        delta_in, delta_post, s_in = _boxcar_clamped_interval(spike, ar, br, in_mask)
         _, psi1_in_b, g1_in = van_loan_foh_blocks(A * delta_in, b_scaled, 1.0)
-        int_active = fluence * f_in * delta_in * g1_in
-        dy_t2 = fluence * f_in * psi1_in_b
+        int_active = s_in * delta_in * g1_in
+        dy_t2 = s_in * psi1_in_b
         _, int_post = van_loan_psi1_vec(A, dy_t2, delta_post)
         return (int_pre + int_active + int_post) / width
 
@@ -580,42 +607,22 @@ def _eval_boxcar_binned(
 
     lam, v_mat, v_inv = eff_modal
     b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
-
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
     width = b_r - a_r
 
-    u0 = jnp.minimum(ts, a_r)
-    u1 = jnp.minimum(ts + tau_d, a_r)
-    delta_pre = u1 - u0
-    f_pre = jnp.where(
-        is_tiny,
-        jnp.where(ts < a_r, 1.0, 0.0),
-        delta_pre / safe_tau,
-    )
+    delta_pre, lag_pre, s_pre = _boxcar_clamped_interval(spike, None, a_r, spike.t_start < a_r)
     int_pre_modes = (
-        (fluence * f_pre * width)[:, None]
+        (s_pre * width)[:, None]
         * _scalar_psi1(width[:, None] * lam[None, :])
-        * jnp.exp((a_r - u1)[:, None] * lam[None, :])
+        * jnp.exp(lag_pre[:, None] * lam[None, :])
         * _scalar_psi1(delta_pre[:, None] * lam[None, :])
     )
 
-    t1 = jnp.clip(ts, a_r, b_r)
-    t2 = jnp.clip(ts + tau_d, a_r, b_r)
-    delta_in = t2 - t1
-    delta_post = b_r - t2
-    f_in = jnp.where(
-        is_tiny,
-        jnp.where((ts >= a_r) & (ts < b_r), 1.0, 0.0),
-        delta_in / safe_tau,
-    )
+    in_mask = (spike.t_start >= a_r) & (spike.t_start < b_r)
+    delta_in, delta_post, s_in = _boxcar_clamped_interval(spike, a_r, b_r, in_mask)
     z_in = delta_in[:, None] * lam[None, :]
-    int_active_modes = (fluence * f_in * delta_in)[:, None] * _scalar_psi2(z_in)
+    int_active_modes = (s_in * delta_in)[:, None] * _scalar_psi2(z_in)
     int_post_modes = (
-        (fluence * f_in * delta_post)[:, None]
+        (s_in * delta_post)[:, None]
         * _scalar_psi1(delta_post[:, None] * lam[None, :])
         * _scalar_psi1(z_in)
     )
@@ -633,47 +640,9 @@ def _eval_smooth_spike_pointwise_van_loan(
     t: jax.Array,
 ) -> jax.Array:
     """Van Loan ``expm`` fallback for smooth ``MiyakeSpike`` pointwise evaluation."""
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
-    panels_arr = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
-    u_los = panels_arr[:, 0]
-    u_his = panels_arr[:, 1]
-    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
-    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
-
-    def _one_t(ti: jax.Array) -> jax.Array:
-        def _panel_contrib(u_lo: jax.Array, u_hi: jax.Array) -> jax.Array:
-            p_a = ts + tau_d * u_lo
-            p_b = ts + tau_d * u_hi
-            tilde_a = jnp.minimum(p_a, ti)
-            tilde_b = jnp.minimum(p_b, ti)
-            span = tilde_b - tilde_a
-            ratio = jnp.where(
-                is_tiny,
-                jnp.where(ti >= ts, u_hi - u_lo, 0.0),
-                span / safe_tau,
-            )
-            u_q = jnp.where(
-                is_tiny,
-                u_lo + (u_hi - u_lo) * xi,
-                (tilde_a + span * xi - ts) / safe_tau,
-            )
-            tau_q = jnp.where(is_tiny, ts + tau_d * u_q, tilde_a + span * xi)
-            phi_q = spike.unit_profile(u_q)
-            local_lags = jnp.maximum(tilde_b - tau_q, 0.0)
-            vecs = jax.vmap(lambda lag: jax.scipy.linalg.expm(A * lag) @ b_scaled)(
-                local_lags
-            )
-            panel_vec = (wq * phi_q) @ vecs
-            Phi_shift = jax.scipy.linalg.expm(A * jnp.maximum(ti - tilde_b, 0.0))
-            return fluence * ratio * (Phi_shift @ panel_vec)
-
-        return jnp.sum(jax.vmap(_panel_contrib)(u_los, u_his), axis=0)
-
-    return jax.vmap(_one_t)(t)
+    return jax.vmap(
+        lambda ti: _smooth_prefix_van_loan_one(A, b_scaled, spike, ti, ti >= spike.t_start)
+    )(t)
 
 
 def _eval_smooth_spike_pointwise(
@@ -692,54 +661,7 @@ def _eval_smooth_spike_pointwise(
 
     lam, v_mat, v_inv = eff_modal
     b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
-
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
-    panels_arr = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
-    u_los = panels_arr[:, 0]
-    u_his = panels_arr[:, 1]
-    du = u_his - u_los
-    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
-    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
-
-    p_a = ts + tau_d * u_los
-    p_b = ts + tau_d * u_his
-    tilde_a = jnp.minimum(p_a[None, :], t[:, None])
-    tilde_b = jnp.minimum(p_b[None, :], t[:, None])
-    span = tilde_b - tilde_a
-    ratio = jnp.where(
-        is_tiny,
-        jnp.where(t[:, None] >= ts, du[None, :], 0.0),
-        span / safe_tau,
-    )
-    u_q = jnp.where(
-        is_tiny,
-        u_los[None, :, None] + du[None, :, None] * xi[None, None, :],
-        (tilde_a[:, :, None] + span[:, :, None] * xi[None, None, :] - ts) / safe_tau,
-    )
-    tau_q = jnp.where(
-        is_tiny,
-        ts + tau_d * u_q,
-        tilde_a[:, :, None] + span[:, :, None] * xi[None, None, :],
-    )
-    phi_q = spike.unit_profile(u_q)
-    local_lags = jnp.maximum(tilde_b[:, :, None] - tau_q, 0.0)
-    w_phi = (wq[None, None, :] * phi_q).astype(lam.dtype)
-    panel_modes = jnp.einsum(
-        "tpq,tpqn->tpn",
-        w_phi,
-        jnp.exp(local_lags[..., None] * lam[None, None, None, :]),
-    )
-    shift_lags = jnp.maximum(t[:, None] - tilde_b, 0.0)
-    shifted = (
-        (fluence * ratio)[:, :, None]
-        * jnp.exp(shift_lags[:, :, None] * lam[None, None, :])
-        * panel_modes
-    )
-    y_tilde = jnp.sum(shifted, axis=1) * b_tilde[None, :]
+    y_tilde = _smooth_prefix_modes(spike, t, t >= spike.t_start, lam) * b_tilde[None, :]
     return jnp.real(y_tilde @ v_mat.T)
 
 
@@ -752,72 +674,20 @@ def _eval_smooth_spike_binned_van_loan(
     b_r: jax.Array,
 ) -> jax.Array:
     """Van Loan ``expm`` fallback for seasonal-window smooth ``MiyakeSpike`` profiles."""
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
-    panels_arr = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
-    u_los = panels_arr[:, 0]
-    u_his = panels_arr[:, 1]
-    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
-    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
 
     def _one_win(ar: jax.Array, br: jax.Array) -> jax.Array:
         width = br - ar
-
-        def _panel_win(u_lo: jax.Array, u_hi: jax.Array) -> tuple[jax.Array, jax.Array]:
-            p_a = ts + tau_d * u_lo
-            p_b = ts + tau_d * u_hi
-
-            pre_a = jnp.minimum(p_a, ar)
-            pre_b = jnp.minimum(p_b, ar)
-            pre_span = pre_b - pre_a
-            pre_ratio = jnp.where(
-                is_tiny,
-                jnp.where(ts < ar, u_hi - u_lo, 0.0),
-                pre_span / safe_tau,
-            )
-            u_pre = jnp.where(
-                is_tiny,
-                u_lo + (u_hi - u_lo) * xi,
-                (pre_a + pre_span * xi - ts) / safe_tau,
-            )
-            tau_pre = jnp.where(is_tiny, ts + tau_d * u_pre, pre_a + pre_span * xi)
-            phi_pre = spike.unit_profile(u_pre)
-            lags_pre = jnp.maximum(pre_b - tau_pre, 0.0)
-            vecs_pre = jax.vmap(lambda lag: jax.scipy.linalg.expm(A * lag) @ b_scaled)(
-                lags_pre
-            )
-            panel_pre = (wq * phi_pre) @ vecs_pre
-            Phi_to_ar = jax.scipy.linalg.expm(A * jnp.maximum(ar - pre_b, 0.0))
-            dy_ar_p = fluence * pre_ratio * (Phi_to_ar @ panel_pre)
-
-            in_a = jnp.clip(p_a, ar, br)
-            in_b = jnp.clip(p_b, ar, br)
-            in_span = in_b - in_a
-            in_ratio = jnp.where(
-                is_tiny,
-                jnp.where((ts >= ar) & (ts < br), u_hi - u_lo, 0.0),
-                in_span / safe_tau,
-            )
-            u_in = jnp.where(
-                is_tiny,
-                u_lo + (u_hi - u_lo) * xi,
-                (in_a + in_span * xi - ts) / safe_tau,
-            )
-            tau_in = jnp.where(is_tiny, ts + tau_d * u_in, in_a + in_span * xi)
-            phi_in = spike.unit_profile(u_in)
-            rem = jnp.maximum(br - tau_in, 0.0)
-            int_vecs = jax.vmap(lambda r: van_loan_psi1_vec(A, b_scaled, r)[1])(rem)
-            panel_in = (wq * phi_in) @ int_vecs
-            int_in_p = fluence * in_ratio * panel_in
-            return dy_ar_p, int_in_p
-
-        dy_ar_all, int_in_all = jax.vmap(_panel_win)(u_los, u_his)
-        dy_ar = jnp.sum(dy_ar_all, axis=0)
-        int_in = jnp.sum(int_in_all, axis=0)
+        dy_ar = _smooth_prefix_van_loan_one(A, b_scaled, spike, ar, spike.t_start < ar)
         _, int_pre_total = van_loan_psi1_vec(A, dy_ar, width)
+        in_mask = (spike.t_start >= ar) & (spike.t_start < br)
+        _, tau_in, s_in, w_phi_in = _smooth_clamped_panels(spike, ar, br, in_mask)
+
+        def _panel_in(tq: jax.Array, sc: jax.Array, wp: jax.Array) -> jax.Array:
+            rem = jnp.maximum(br - tq, 0.0)
+            int_vecs = jax.vmap(lambda r: van_loan_psi1_vec(A, b_scaled, r)[1])(rem)
+            return sc * (wp @ int_vecs)
+
+        int_in = jnp.sum(jax.vmap(_panel_in)(tau_in, s_in, w_phi_in), axis=0)
         return (int_pre_total + int_in) / width
 
     return jax.lax.map(
@@ -844,88 +714,21 @@ def _eval_smooth_spike_binned(
 
     lam, v_mat, v_inv = eff_modal
     b_tilde = v_inv @ b_scaled.astype(v_inv.dtype)
-
-    ts = spike.t_start
-    tau_d = jnp.maximum(spike.duration, 0.0)
-    fluence = spike.fluence
-    is_tiny = tau_d <= 1e-12
-    safe_tau = jnp.where(is_tiny, 1.0, tau_d)
-    panels_arr = jnp.asarray(spike.unit_support_panels(), dtype=jnp.float64)
-    u_los = panels_arr[:, 0]
-    u_his = panels_arr[:, 1]
-    du = u_his - u_los
-    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
-    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
-
     width = b_r - a_r
-    p_a = ts + tau_d * u_los
-    p_b = ts + tau_d * u_his
 
-    # (a) Pre-window clamped sub-panels (-inf, a_r]
-    pre_a = jnp.minimum(p_a[None, :], a_r[:, None])
-    pre_b = jnp.minimum(p_b[None, :], a_r[:, None])
-    pre_span = pre_b - pre_a
-    pre_ratio = jnp.where(
-        is_tiny,
-        jnp.where(ts < a_r[:, None], du[None, :], 0.0),
-        pre_span / safe_tau,
-    )
-    u_pre = jnp.where(
-        is_tiny,
-        u_los[None, :, None] + du[None, :, None] * xi[None, None, :],
-        (pre_a[:, :, None] + pre_span[:, :, None] * xi[None, None, :] - ts) / safe_tau,
-    )
-    tau_pre = jnp.where(
-        is_tiny,
-        ts + tau_d * u_pre,
-        pre_a[:, :, None] + pre_span[:, :, None] * xi[None, None, :],
-    )
-    phi_pre = spike.unit_profile(u_pre)
-    lags_pre = jnp.maximum(pre_b[:, :, None] - tau_pre, 0.0)
-    w_phi_pre = (wq[None, None, :] * phi_pre).astype(lam.dtype)
-    panel_pre_modes = jnp.einsum(
-        "wpq,wpqn->wpn",
-        w_phi_pre,
-        jnp.exp(lags_pre[..., None] * lam[None, None, None, :]),
-    )
-    shift_to_ar = jnp.maximum(a_r[:, None] - pre_b, 0.0)
-    dy_ar_modes = jnp.sum(
-        (fluence * pre_ratio)[:, :, None]
-        * jnp.exp(shift_to_ar[:, :, None] * lam[None, None, :])
-        * panel_pre_modes,
-        axis=1,
-    )
+    dy_ar_modes = _smooth_prefix_modes(spike, a_r, spike.t_start < a_r, lam)
     int_pre_modes = (
         width[:, None] * _scalar_psi1(width[:, None] * lam[None, :]) * dy_ar_modes
     )
-
-    # (b) In-window clamped sub-panels [a_r, b_r]
-    in_a = jnp.clip(p_a[None, :], a_r[:, None], b_r[:, None])
-    in_b = jnp.clip(p_b[None, :], a_r[:, None], b_r[:, None])
-    in_span = in_b - in_a
-    in_ratio = jnp.where(
-        is_tiny,
-        jnp.where((ts >= a_r[:, None]) & (ts < b_r[:, None]), du[None, :], 0.0),
-        in_span / safe_tau,
-    )
-    u_in = jnp.where(
-        is_tiny,
-        u_los[None, :, None] + du[None, :, None] * xi[None, None, :],
-        (in_a[:, :, None] + in_span[:, :, None] * xi[None, None, :] - ts) / safe_tau,
-    )
-    tau_in = jnp.where(
-        is_tiny,
-        ts + tau_d * u_in,
-        in_a[:, :, None] + in_span[:, :, None] * xi[None, None, :],
-    )
-    phi_in = spike.unit_profile(u_in)
+    in_mask = (spike.t_start >= a_r) & (spike.t_start < b_r)
+    _, tau_in, s_in, w_phi_in = _smooth_clamped_panels(spike, a_r, b_r, in_mask)
     rem = jnp.maximum(b_r[:, None, None] - tau_in, 0.0)
-    w_phi_in = (wq[None, None, :] * phi_in).astype(lam.dtype)
+    w_phi_in = w_phi_in.astype(lam.dtype)
     rem_psi1 = rem[..., None] * _scalar_psi1(
         rem[..., None] * lam[None, None, None, :]
     )
     panel_in_modes = jnp.einsum("wpq,wpqn->wpn", w_phi_in, rem_psi1)
-    int_in_modes = jnp.sum((fluence * in_ratio)[:, :, None] * panel_in_modes, axis=1)
+    int_in_modes = jnp.sum(s_in[:, :, None] * panel_in_modes, axis=1)
 
     y_tilde = ((int_pre_modes + int_in_modes) / width[:, None]) * b_tilde[None, :]
     return jnp.real(y_tilde @ v_mat.T)
@@ -1229,6 +1032,47 @@ class ExactLinearSolver(AbstractSolver):
         self.oversample = int(oversample)
         self.rfft_threshold = int(rfft_threshold)
         self.foh_method = str(foh_method)
+
+    def propagation_backend(self, cbm: CarbonBoxModel) -> PropagationBackend:
+        """Return the homogeneous/spike propagation backend selected for ``cbm``.
+
+        Parameters
+        ----------
+        cbm : CarbonBoxModel
+            Autonomous carbon box model inspected in the current execution
+            context (concrete or JAX-traced).
+
+        Returns
+        -------
+        {"modal_symmetric", "modal_general", "van_loan"}
+            * ``"modal_symmetric"``: real symmetric ``eigh`` similarity
+              factorization for detailed-balance models (:class:`EffectiveCBM`,
+              :class:`ReversibleCBM`), active both eagerly and under ``jax.jit``.
+            * ``"modal_general"``: cached ``float64``/``complex128``
+              eigendecomposition for concrete non-symmetric models whose
+              eigenvector condition number satisfies ``cond(V) < 1e6`` and
+              relative reconstruction error is at most ``1e-9``.
+            * ``"van_loan"``: block matrix-exponential (``expm``) fallback used
+              when ``cond(V) >= 1e6``, when reconstruction fails, when
+              ``cbm.n_boxes == 0``, or when a non-symmetric ``cbm`` is traced
+              inside ``jax.jit`` / ``equinox.filter_jit``.
+
+        Notes
+        -----
+        Under ``jax.jit`` or ``equinox.filter_jit``, ``cbm.matrix_A()`` is a
+        JAX tracer: detailed-balance models still select ``"modal_symmetric"``,
+        while non-symmetric models select ``"van_loan"`` unless a precomputed
+        concrete ``modal`` tuple is passed explicitly to
+        :meth:`solve_delta_trajectory` or :meth:`solve_delta_binned`. Calling
+        ``solver.propagation_backend(cbm)`` inside traced code never triggers
+        concretization errors (``equinox.filter_jit`` can also return the
+        Python string directly, whereas raw ``jax.jit`` requires array outputs).
+        """
+        if _modal_decomposition(cbm.matrix_A(), cbm=cbm) is None:
+            return "van_loan"
+        if isinstance(cbm, (EffectiveCBM, ReversibleCBM)):
+            return "modal_symmetric"
+        return "modal_general"
 
     def _eval_single_term_pointwise(
         self,
