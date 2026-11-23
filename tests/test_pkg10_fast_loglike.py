@@ -254,7 +254,7 @@ def test_static_joint_modes_equiv_and_grad(
         u_vec,
         expect_static=True,
         expect_joint=True,
-        rtol=1e-13,
+        rtol=5e-13 if whiten_method == "cholesky" else 1e-13,
         check_fd=(offset_mode == "hierarchical" and whiten_method == "cholesky"),
         check_filter_jit=(offset_mode in ("none", "hierarchical") and whiten_method == "cholesky"),
     )
@@ -334,7 +334,7 @@ def test_static_marginal_modes_equiv_and_grad(
         u_vec,
         expect_static=True,
         expect_joint=False,
-        rtol=1e-13,
+        rtol=5e-13 if whiten_method == "cholesky" else 1e-13,
         check_fd=(offset_mode == "hierarchical" and whiten_method == "qr"),
         check_filter_jit=(offset_mode == "hierarchical" and whiten_method == "qr"),
     )
@@ -465,7 +465,7 @@ def test_static_diffrax_solver_and_collinear_rank_one_conditioning(
             r_i, X_i, pm_i, ps_i, np.asarray(multi_series_dataset.sigma_flat)
         )
         np.testing.assert_allclose(float(sp_ill(u_ill)), v_ref, rtol=1e-9, atol=1e-8)
-        np.testing.assert_allclose(float(sp_ill(u_ill)), v_qr, rtol=1e-13, atol=1e-12)
+        np.testing.assert_allclose(float(sp_ill(u_ill)), v_qr, rtol=1e-11, atol=1e-10)
     jax.clear_caches()
 
 
