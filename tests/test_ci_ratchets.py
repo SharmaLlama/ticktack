@@ -391,20 +391,37 @@ def test_check_changed_function_shapes_enforces_limits_and_carbon_exemptions(
     pkg = tmp_path / "src" / "ticktack"
     pkg.mkdir(parents=True)
     mod = pkg / "kernel.py"
-    # Pre-existing legacy oversized function on main must not block unrelated edits
+    # Pre-existing legacy oversized functions on main (wide params, long body, and class __init__)
+    legacy_body = "\n".join(f"    y{idx} = a + {idx}" for idx in range(85))
     mod.write_text(
         "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
-        "    return a + j\n",
+        f"{legacy_body}\n"
+        "    return y84 + j\n"
+        "\n"
+        "class LegacyBox:\n"
+        "    def __init__(self, a, b, c, d, e, f, g, h, i, j):\n"
+        "        self.v = a + j\n",
         encoding="utf-8",
     )
     _git("add", ".")
     _git("commit", "-m", "base")
 
     _git("checkout", "-b", "feature")
-    # Method with self + 8 args passes; unexempted 9-arg function fails
+    # Shrinking legacy_wide (87 -> 84 code lines, 10 -> 10 params) and keeping LegacyBox.__init__
+    # flat pass; new NewBox.__init__ (9 params) and unexempted too_many fail while Ok.method passes.
+    shrunk_body = "\n".join(f"    y{idx} = a + {idx}" for idx in range(82))
     mod.write_text(
         "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
-        "    return a + j\n"
+        f"{shrunk_body}\n"
+        "    return y81 + j\n"
+        "\n"
+        "class LegacyBox:\n"
+        "    def __init__(self, a, b, c, d, e, f, g, h, i, j):\n"
+        "        self.v = a + j + 1\n"
+        "\n"
+        "class NewBox:\n"
+        "    def __init__(self, a, b, c, d, e, f, g, h, i):\n"
+        "        self.v = a + i\n"
         "\n"
         "class Ok:\n"
         "    def method(self, a, b, c, d, e, f, g, h):\n"
@@ -415,17 +432,39 @@ def test_check_changed_function_shapes_enforces_limits_and_carbon_exemptions(
         encoding="utf-8",
     )
     _git("add", ".")
-    _git("commit", "-m", "add wide function")
+    _git("commit", "-m", "shrink legacy and add wide functions")
 
     errs = check_ratchets.check_changed_function_shapes(tmp_path, "main")
-    assert len(errs) == 1
-    assert "too_many" in errs[0]
-    assert "legacy_wide" not in errs[0]
+    assert len(errs) == 2
+    assert any("NewBox.__init__" in e for e in errs)
+    assert any("too_many" in e for e in errs)
+    assert not any("legacy_wide" in e for e in errs)
+    assert not any("LegacyBox.__init__" in e for e in errs)
+
+    # Growing legacy_wide by +1 code line (87 -> 88) or +1 param (10 -> 11) fails
+    grown_body = "\n".join(f"    y{idx} = a + {idx}" for idx in range(86))
+    mod.write_text(
+        "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
+        f"{grown_body}\n"
+        "    return y85 + j\n"
+        "\n"
+        "class LegacyBox:\n"
+        "    def __init__(self, a, b, c, d, e, f, g, h, i, j, k):\n"
+        "        self.v = a + k\n",
+        encoding="utf-8",
+    )
+    _git("add", ".")
+    _git("commit", "-m", "grow legacy oversized functions")
+    grown_errs = check_ratchets.check_changed_function_shapes(tmp_path, "main")
+    assert len(grown_errs) == 2
+    assert any("legacy_wide" in e for e in grown_errs)
+    assert any("LegacyBox.__init__" in e for e in grown_errs)
 
     # Vacuous Carbon exemption still fails both exemption validation and shape check
     mod.write_text(
         "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
-        "    return a + j\n"
+        f"{shrunk_body}\n"
+        "    return y81 + j\n"
         "\n"
         "# shape-exempt(carbon): keep together for readability\n"
         "def too_many(a, b, c, d, e, f, g, h, i):\n"
@@ -441,7 +480,8 @@ def test_check_changed_function_shapes_enforces_limits_and_carbon_exemptions(
     body = "\n".join(f"    x{idx} = a + {idx}" for idx in range(82))
     mod.write_text(
         "def legacy_wide(a, b, c, d, e, f, g, h, i, j):\n"
-        "    return a + j\n"
+        f"{shrunk_body}\n"
+        "    return y81 + j\n"
         "\n"
         "# shape-exempt(carbon): coupled 4-box RK4 loop shares 9 intermediate state arrays\n"
         "def too_many(a, b, c, d, e, f, g, h, i):\n"

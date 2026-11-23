@@ -427,14 +427,58 @@ def count_pr_changed_src_lines(repo_root: Path, base_ref: str) -> tuple[int, lis
     return total_changed, touched_py
 
 
+def _qualified_functions(
+    tree: ast.AST,
+) -> list[tuple[tuple[str, int], ast.FunctionDef | ast.AsyncFunctionDef]]:
+    """Return ``((qualname, occurrence_idx), node)`` for every function in ``tree``."""
+    found: list[tuple[tuple[str, int], ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    seen: dict[str, int] = {}
+
+    def _visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                cls_prefix = f"{prefix}.{child.name}" if prefix else child.name
+                _visit(child, cls_prefix)
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qname = f"{prefix}.{child.name}" if prefix else child.name
+                occ = seen.get(qname, 0)
+                seen[qname] = occ + 1
+                found.append(((qname, occ), child))
+                _visit(child, f"{qname}.<locals>")
+            else:
+                _visit(child, prefix)
+
+    _visit(tree, "")
+    return found
+
+
+def _base_function_shapes(base_src: str | None) -> dict[tuple[str, int], tuple[int, int]]:
+    """Map qualified function keys in ``base_src`` to ``(code_lines, param_count)``."""
+    if base_src is None:
+        return {}
+    base_code = code_line_numbers(base_src)
+    shapes: dict[tuple[str, int], tuple[int, int]] = {}
+    for key, node in _qualified_functions(ast.parse(base_src)):
+        end_ln = node.end_lineno or node.lineno
+        n_code = sum(1 for ln in range(node.lineno, end_ln + 1) if ln in base_code)
+        shapes[key] = (n_code, count_function_params(node))
+    return shapes
+
+
 def check_changed_function_shapes(
     repo_root: Path,
     base_ref: str,
     max_lines: int = DEFAULT_MAX_FUNCTION_CODE_LINES,
     max_params: int = DEFAULT_MAX_FUNCTION_PARAMS,
 ) -> list[str]:
-    """Check new or edited functions under ``src/ticktack/`` against shape limits."""
-    _, per_file = _diff_src_hunks(repo_root, base_ref)
+    """Check new or edited functions under ``src/ticktack/`` against shape limits.
+
+    Pre-existing legacy functions exceeding ``(max_lines, max_params)`` on the merge-base
+    get a monotonic ceiling ``(max(max_lines, base_lines), max(max_params, base_params))``
+    so bugfixes and incremental shrink refactors pass while any growth fails unless
+    Carbon-exempted.
+    """
+    merge_base, per_file = _diff_src_hunks(repo_root, base_ref)
     failures: list[str] = []
     for rel_path, (_, added) in sorted(per_file.items()):
         if not rel_path.endswith(".py") or not added:
@@ -448,31 +492,31 @@ def check_changed_function_shapes(
         if not added_code:
             continue
         exempt_by_line, _ = extract_shape_exemptions(source, filename=rel_path)
-        tree = ast.parse(source)
-        funcs = sorted(
-            (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))),
-            key=lambda n: n.lineno,
-        )
-        for node in funcs:
+        base_shapes = _base_function_shapes(_git_show_text(repo_root, merge_base, rel_path))
+        for key, node in _qualified_functions(ast.parse(source)):
             deco_start = min((d.lineno for d in node.decorator_list), default=node.lineno)
             end_lineno = node.end_lineno or node.lineno
             if not any(deco_start <= ln <= end_lineno for ln in added_code):
                 continue
             n_code = sum(1 for ln in range(node.lineno, end_lineno + 1) if ln in code_lines)
             n_params = count_function_params(node)
-            if n_code <= max_lines and n_params <= max_params:
+            base_lines, base_params = base_shapes.get(key, (0, 0))
+            eff_max_lines = max(max_lines, base_lines)
+            eff_max_params = max(max_params, base_params)
+            if n_code <= eff_max_lines and n_params <= eff_max_params:
                 continue
+            qname = key[0]
             if node.lineno in exempt_by_line:
                 print(
                     f"Shape exemption (carbon) accepted for {rel_path}:{node.lineno} "
-                    f"{node.name} ({n_code} lines, {n_params} params): {exempt_by_line[node.lineno]}"
+                    f"{qname} ({n_code} lines, {n_params} params): {exempt_by_line[node.lineno]}"
                 )
                 continue
             failures.append(
-                f"Function shape limit exceeded: {rel_path}:{node.lineno} {node.name} has "
-                f"{n_code} code lines (limit {max_lines}) and {n_params} params (limit {max_params}). "
-                "Refactor cleanly, or obtain Carbon reviewer approval and add "
-                "'# shape-exempt(carbon): <specific >=15-char technical reason>'."
+                f"Function shape limit exceeded: {rel_path}:{node.lineno} {qname} has "
+                f"{n_code} code lines (limit {eff_max_lines}) and {n_params} params "
+                f"(limit {eff_max_params}). Refactor cleanly, or obtain Carbon reviewer "
+                "approval and add '# shape-exempt(carbon): <specific >=15-char technical reason>'."
             )
     return failures
 
