@@ -52,6 +52,7 @@ from .fields import (
 from .linear import (
     CausalGPProjection,
     LinearMarginal,
+    _concrete,
     _solve_complex_resolvents,
     harmonic_solar_design,
     hierarchical_offset_design,
@@ -655,7 +656,7 @@ def _build_marginal_design_with_projections(
     jax.Array,
     list[CausalGPProjection],
     list[jax.Array | None],
-    list[tuple[slice, jax.Array]],
+    list[tuple[slice, jax.Array, jax.Array]],
 ]:
     """Build ``(X, prior_mean, prior_sd, gp_projections, field_init_roots, init_state_blocks)``."""
     cbm = model.cbm
@@ -787,7 +788,7 @@ def _build_marginal_design_with_projections(
         psd_parts.append(jnp.array([cfg.trend_prior_sd], dtype=jnp.float64))
 
     # 4. Marginalized GPProduction causal Solin-Särkkä columns (dataset-wide!)
-    init_state_blocks: list[tuple[slice, jax.Array]] = []
+    init_state_blocks: list[tuple[slice, jax.Array, jax.Array]] = []
     if gp_terms:
         for gp in gp_terms:
             proj = _project_single_gp_dataset(
@@ -817,6 +818,7 @@ def _build_marginal_design_with_projections(
                     (
                         slice(col_start + r_modes, col_start + r_total),
                         proj.anchor_cov_root,
+                        proj.t_anchor,
                     )
                 )
 
@@ -847,7 +849,11 @@ def _build_marginal_design_with_projections(
                 pmean_parts.append(jnp.zeros((m_rank,), dtype=jnp.float64))
                 psd_parts.append(jnp.ones((m_rank,), dtype=jnp.float64))
                 init_state_blocks.append(
-                    (slice(init_start, init_start + m_rank), root_y0_gf)
+                    (
+                        slice(init_start, init_start + m_rank),
+                        root_y0_gf,
+                        jnp.asarray(gf.t_start, dtype=jnp.float64),
+                    )
                 )
                 field_init_roots.append(root_y0_gf)
             else:
@@ -1672,16 +1678,16 @@ class LinearPosteriorResult(NamedTuple):
     """Joint conditional Gaussian coefficient draws ``(n_draws, k_total)``, or ``None``."""
 
     initial_state_mean: jax.Array | None = None
-    """Posterior mean of initial reservoir perturbation ``delta_y(t_0)`` (``14C kg``), shape ``(n_boxes,)``."""
+    """Posterior mean of initial reservoir perturbation ``delta_y(t_0)`` (``14C kg``), shape ``(n_boxes,)``, or ``None`` when no single shared initial-state anchor exists."""
 
     initial_state_sd: jax.Array | None = None
-    """Exact marginal posterior SD of ``delta_y(t_0)`` (``14C kg``), shape ``(n_boxes,)``."""
+    """Marginal posterior SD of ``delta_y(t_0)`` (``14C kg``), shape ``(n_boxes,)``, or ``None`` when no single shared initial-state anchor exists."""
 
     initial_state_d14c_mean: jax.Array | None = None
-    """Posterior mean of initial reservoir ``Delta14C(t_0)`` perturbation (‰), shape ``(n_boxes,)``."""
+    """Posterior mean of initial reservoir ``Delta14C(t_0)`` perturbation (‰), shape ``(n_boxes,)``, or ``None`` when no single shared initial-state anchor exists."""
 
     initial_state_d14c_sd: jax.Array | None = None
-    """Exact marginal posterior SD of initial reservoir ``Delta14C(t_0)`` (‰), shape ``(n_boxes,)``."""
+    """Marginal posterior SD of initial reservoir ``Delta14C(t_0)`` (‰), shape ``(n_boxes,)``, or ``None`` when no single shared initial-state anchor exists."""
 
 
 def _offset_column_count(cfg: LinearMarginalConfig, n_series: int) -> int:
@@ -1692,6 +1698,64 @@ def _offset_column_count(cfg: LinearMarginalConfig, n_series: int) -> int:
     if cfg.offset_mode == "per_series":
         return n_series
     return 0
+
+
+def _reconstruct_initial_state_posterior(
+    model: RadiocarbonModel,
+    init_state_blocks: list[tuple[slice, jax.Array, jax.Array]],
+    coeff_mean: jax.Array,
+    coeff_cov: jax.Array,
+) -> tuple[
+    jax.Array | None,
+    jax.Array | None,
+    jax.Array | None,
+    jax.Array | None,
+]:
+    """Reconstruct initial-state posterior moments when all blocks share one anchor epoch."""
+    if not init_state_blocks:
+        return None, None, None, None
+    if len(init_state_blocks) == 1:
+        anc_slice, anc_root, _ = init_state_blocks[0]
+        initial_state_mean = anc_root @ coeff_mean[anc_slice]
+        cov_y0 = anc_root @ coeff_cov[anc_slice, anc_slice] @ anc_root.T
+    else:
+        concrete_anchors = [
+            float(c)
+            for _, _, t_anc in init_state_blocks
+            if (c := _concrete(t_anc)) is not None
+        ]
+        if len(concrete_anchors) > 1 and any(
+            abs(t - concrete_anchors[0]) > 1e-9 for t in concrete_anchors[1:]
+        ):
+            return None, None, None, None
+        idx_anc = jnp.concatenate(
+            [
+                jnp.arange(sl.start, sl.stop, dtype=jnp.int32)
+                for sl, _, _ in init_state_blocks
+            ]
+        )
+        anc_root_all = jnp.concatenate([r for _, r, _ in init_state_blocks], axis=1)
+        initial_state_mean = anc_root_all @ coeff_mean[idx_anc]
+        cov_y0 = anc_root_all @ coeff_cov[jnp.ix_(idx_anc, idx_anc)] @ anc_root_all.T
+
+    cov_y0 = 0.5 * (cov_y0 + cov_y0.T)
+    initial_state_sd = jnp.sqrt(jnp.maximum(jnp.diag(cov_y0), 0.0))
+
+    y_ss_init = model.cbm.steady_state_c14(
+        q_std=model.q_std, alpha_unit=model.alpha_unit
+    )
+    trop_idx_init = jnp.asarray(
+        model.cbm.topology.trop_box_indices, dtype=jnp.int32
+    )
+    y_trop_init = jnp.sum(y_ss_init[trop_idx_init])
+    m_rel_init = model.cbm.relative_reservoir_masses()
+    scale_all_boxes = 1000.0 / (y_trop_init * m_rel_init)
+    return (
+        initial_state_mean,
+        initial_state_sd,
+        scale_all_boxes * initial_state_mean,
+        scale_all_boxes * initial_state_sd,
+    )
 
 
 def _linear_posterior_impl(
@@ -1724,39 +1788,14 @@ def _linear_posterior_impl(
     ring_pred_mean = dataset.d14c_flat - resid + X @ coeff_mean
 
     # --- Reconstruct initial-state posterior vector (delta_y(t_0) across all boxes) ---
-    initial_state_mean: jax.Array | None = None
-    initial_state_sd: jax.Array | None = None
-    initial_state_d14c_mean: jax.Array | None = None
-    initial_state_d14c_sd: jax.Array | None = None
-    if init_state_blocks:
-        if len(init_state_blocks) == 1:
-            anc_slice, anc_root = init_state_blocks[0]
-            initial_state_mean = anc_root @ coeff_mean[anc_slice]
-            cov_y0 = anc_root @ coeff_cov[anc_slice, anc_slice] @ anc_root.T
-        else:
-            idx_anc = jnp.concatenate(
-                [
-                    jnp.arange(sl.start, sl.stop, dtype=jnp.int32)
-                    for sl, _ in init_state_blocks
-                ]
-            )
-            anc_root_all = jnp.concatenate([r for _, r in init_state_blocks], axis=1)
-            initial_state_mean = anc_root_all @ coeff_mean[idx_anc]
-            cov_y0 = anc_root_all @ coeff_cov[jnp.ix_(idx_anc, idx_anc)] @ anc_root_all.T
-        cov_y0 = 0.5 * (cov_y0 + cov_y0.T)
-        initial_state_sd = jnp.sqrt(jnp.maximum(jnp.diag(cov_y0), 0.0))
-
-        y_ss_init = model.cbm.steady_state_c14(
-            q_std=model.q_std, alpha_unit=model.alpha_unit
-        )
-        trop_idx_init = jnp.asarray(
-            model.cbm.topology.trop_box_indices, dtype=jnp.int32
-        )
-        y_trop_init = jnp.sum(y_ss_init[trop_idx_init])
-        m_rel_init = model.cbm.relative_reservoir_masses()
-        scale_all_boxes = 1000.0 / (y_trop_init * m_rel_init)
-        initial_state_d14c_mean = scale_all_boxes * initial_state_mean
-        initial_state_d14c_sd = scale_all_boxes * initial_state_sd
+    (
+        initial_state_mean,
+        initial_state_sd,
+        initial_state_d14c_mean,
+        initial_state_d14c_sd,
+    ) = _reconstruct_initial_state_posterior(
+        model, init_state_blocks, coeff_mean, coeff_cov
+    )
 
     # --- Reconstruct offsets ---
     n_series = dataset.n_series
@@ -2020,7 +2059,11 @@ def _linear_posterior_impl(
                     expm_tstart_row = jax.vmap(
                         lambda dt: jax.scipy.linalg.expm(A * dt)[target_box]
                     )(dt_start)
-                phi_d14c_init = scale_box * (expm_tstart_row @ root_y0_gf)
+                phi_d14c_init = jnp.where(
+                    (t_fine_arr >= gf.t_start)[:, None],
+                    scale_box * (expm_tstart_row @ root_y0_gf),
+                    0.0,
+                )
                 phi_d14c_cols.append(phi_d14c_init)
 
         if phi_q_cols:
@@ -2100,8 +2143,31 @@ def linear_posterior(
         else None
     )
     box_int = int(box) if box is not None else None
+    _, _, _, gp_terms, field_terms = _partition_terms_for_cfg(model.production, cfg_eff)
+    field_anchors = (
+        [float(gf.t_start) for gf in field_terms]
+        if cfg_eff.include_field_initial_cov and dataset.n_obs > 0
+        else []
+    )
+    anchors_match = True
+    if len(field_anchors) > 1 and any(
+        abs(t - field_anchors[0]) > 1e-9 for t in field_anchors[1:]
+    ):
+        anchors_match = False
+    elif gp_terms and cfg_eff.include_gp_initial_cov and field_anchors:
+        t0_c = _concrete(
+            jnp.min(
+                jnp.stack(
+                    [jnp.min(s.sub_t_starts) for s in dataset.series if s.n_obs > 0]
+                )
+            )
+        )
+        anchors_match = (
+            t0_c is not None and abs(float(t0_c) - field_anchors[0]) <= 1e-9
+        )
+
     if isinstance(model.solver, ModaxSolver):
-        return _linear_posterior_impl(
+        res = _linear_posterior_impl(
             model,
             dataset,
             cfg_eff,
@@ -2112,14 +2178,23 @@ def linear_posterior(
             box_int,
             jit_arr,
         )
-    return _linear_posterior_jit(
-        model,
-        dataset,
-        cfg_eff,
-        rng_key,
-        n_draws_int,
-        t_fine_arr,
-        hemisphere,
-        box_int,
-        jit_arr,
-    )
+    else:
+        res = _linear_posterior_jit(
+            model,
+            dataset,
+            cfg_eff,
+            rng_key,
+            n_draws_int,
+            t_fine_arr,
+            hemisphere,
+            box_int,
+            jit_arr,
+        )
+    if not anchors_match:
+        return res._replace(
+            initial_state_mean=None,
+            initial_state_sd=None,
+            initial_state_d14c_mean=None,
+            initial_state_d14c_sd=None,
+        )
+    return res

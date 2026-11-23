@@ -1851,6 +1851,17 @@ def predict_field_d14c(
     return pred
 
 
+def _field_omega_bounds(n_grid: int, dt: float) -> tuple[float, float]:
+    """Return ``(omega_1, omega_{N-1})`` non-zero DCT-II angular wavenumber bounds (rad/yr)."""
+    n = int(n_grid)
+    if n <= 1:
+        return (0.02, 4.0)
+    dt_f = float(dt)
+    w_lo = (2.0 / dt_f) * math.sin(0.5 * math.pi / n)
+    w_hi = (2.0 / dt_f) * math.sin(0.5 * math.pi * (n - 1) / n)
+    return (max(w_lo, 1e-150), max(w_hi, 1e-150))
+
+
 def _spectral_part_char_scale(part: SpectralKernel) -> jax.Array:
     """Characteristic correlation timescale ``ell_char`` (yr) for spectral quadrature."""
     if isinstance(part, MaternSpectrum):
@@ -1868,8 +1879,9 @@ def _spectral_quad_grid(
     ell_char: ArrayLike,
     *,
     n_quad: int = 128,
+    omega_hi: float | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Three-zone composite Gauss–Legendre frequency grid matching ``stationary_cbm_gp_cov``."""
+    """Composite Gauss–Legendre frequency grid resolving decay, solar-cycle, and tail regimes."""
     if n_quad == 128:
         gl_x, gl_w = _GLEG128_X, _GLEG128_W
     else:
@@ -1878,32 +1890,99 @@ def _spectral_quad_grid(
     w_xi = 0.5 * jnp.asarray(gl_w, dtype=jnp.float64)
 
     ell = jnp.asarray(ell_char, dtype=jnp.float64).reshape(())
-    w_max = jnp.hypot(1000.0, 40.0 / jnp.hypot(ell, 1e-3))
+    w_max = jnp.hypot(1e5, 2e5 / jnp.hypot(ell, 1e-3))
 
     # Zone 1: [0, 0.05] via sinh map resolving slow radiocarbon decay λ_14 ≈ 1.21e-4 yr⁻¹
     c0_lo = 1e-6
     w_z1_hi = 0.05
     alpha_lo = math.asinh(w_z1_hi / c0_lo)
-    om_z1 = c0_lo * jnp.sinh(alpha_lo * xi)
-    dw_z1 = w_xi * (c0_lo * alpha_lo * jnp.cosh(alpha_lo * xi))
+    om_parts: list[jax.Array] = [c0_lo * jnp.sinh(alpha_lo * xi)]
+    dw_parts: list[jax.Array] = [w_xi * (c0_lo * alpha_lo * jnp.cosh(alpha_lo * xi))]
 
-    # Zone 2: [0.05, 4.0] linear GL resolving solar-cycle harmonics (11 yr, 5.5 yr, ...)
+    # Zone 2: [0.05, 4.0] log-spaced GL panels (constant Δln ω for narrow solar-cycle peaks)
     w_z2_hi = 4.0
-    om_z2 = w_z1_hi + (w_z2_hi - w_z1_hi) * xi
-    dw_z2 = w_xi * (w_z2_hi - w_z1_hi)
+    z2_edges = [w_z1_hi, 0.5, w_z2_hi]
+    if omega_hi is not None and w_z1_hi < float(omega_hi) < w_z2_hi:
+        w_cut = float(omega_hi)
+        if all(abs(w_cut - e) > 1e-9 for e in z2_edges):
+            z2_edges = sorted([*z2_edges, w_cut])
+    for e_lo, e_hi in zip(z2_edges[:-1], z2_edges[1:]):
+        ln_span = math.log(e_hi / e_lo)
+        om_seg = e_lo * jnp.exp(ln_span * xi)
+        om_parts.append(om_seg)
+        dw_parts.append(w_xi * om_seg * ln_span)
 
     # Zone 3: [4.0, w_max] via shifted sinh map resolving high-frequency tails ω >> 1/ℓ
     c0_hi = 0.2
     alpha_hi = jnp.arcsinh((w_max - w_z2_hi) / c0_hi)
-    om_z3 = w_z2_hi + c0_hi * jnp.sinh(alpha_hi * xi)
-    dw_z3 = w_xi * (c0_hi * alpha_hi * jnp.cosh(alpha_hi * xi))
+    om_parts.append(w_z2_hi + c0_hi * jnp.sinh(alpha_hi * xi))
+    dw_parts.append(w_xi * (c0_hi * alpha_hi * jnp.cosh(alpha_hi * xi)))
 
-    omegas = jnp.concatenate([om_z1, om_z2, om_z3])
-    dw_total = jnp.concatenate([dw_z1, dw_z2, dw_z3])
-    return omegas, dw_total
+    return jnp.concatenate(om_parts), jnp.concatenate(dw_parts)
 
 
-def _spectral_part_log_raw(part: SpectralKernel, omegas: jax.Array) -> jax.Array:
+def _part_quad_grid(
+    part: SpectralKernel,
+    *,
+    n_quad: int = 128,
+    omega_bounds: tuple[float, float] | None = None,
+) -> tuple[jax.Array, jax.Array]:
+    """Return an accurate composite Gauss–Legendre frequency grid tailored to one kernel part."""
+    if not isinstance(part, (QuasiPeriodicSpectrum, CorrelatedFieldSpectrum)):
+        return _spectral_quad_grid(_spectral_part_char_scale(part), n_quad=n_quad)
+
+    if n_quad == 128:
+        gl_x, gl_w = _GLEG128_X, _GLEG128_W
+    else:
+        gl_x, gl_w = np.polynomial.legendre.leggauss(n_quad)
+    xi = 0.5 * (jnp.asarray(gl_x, dtype=jnp.float64) + 1.0)
+    w_xi = 0.5 * jnp.asarray(gl_w, dtype=jnp.float64)
+    c0_lo = 1e-6
+
+    if isinstance(part, QuasiPeriodicSpectrum):
+        w0 = 2.0 * math.pi / jnp.asarray(part.period_yr, dtype=jnp.float64).reshape(())
+        q_val = jnp.asarray(part.quality, dtype=jnp.float64).reshape(())
+        gamma = jnp.maximum(w0 / (2.0 * q_val), 1e-9)
+        w_split = jnp.minimum(0.05, 0.5 * w0)
+        w_max = jnp.maximum(1e5, 200.0 * w0)
+
+        alpha_0 = jnp.arcsinh(w_split / c0_lo)
+        om_0 = c0_lo * jnp.sinh(alpha_0 * xi)
+        dw_0 = w_xi * (c0_lo * alpha_0 * jnp.cosh(alpha_0 * xi))
+
+        alpha_lo = jnp.arcsinh((w0 - w_split) / gamma)
+        om_lo = w0 - gamma * jnp.sinh(alpha_lo * (1.0 - xi))
+        dw_lo = w_xi * (gamma * alpha_lo * jnp.cosh(alpha_lo * (1.0 - xi)))
+
+        alpha_hi = jnp.arcsinh((w_max - w0) / gamma)
+        om_hi = w0 + gamma * jnp.sinh(alpha_hi * xi)
+        dw_hi = w_xi * (gamma * alpha_hi * jnp.cosh(alpha_hi * xi))
+        return jnp.concatenate([om_0, om_lo, om_hi]), jnp.concatenate([dw_0, dw_lo, dw_hi])
+
+    # CorrelatedFieldSpectrum: integrate strictly over [0, w_hi] with no step discontinuity
+    w_lo, w_hi = (0.02, 4.0) if omega_bounds is None else omega_bounds
+    w_lo_f = max(float(w_lo), 1e-12)
+    w_hi_f = max(float(w_hi), w_lo_f * (1.0 + 1e-9))
+    w_split_f = min(0.05, w_lo_f)
+    alpha_0 = math.asinh(w_split_f / c0_lo)
+    om_parts_cf: list[jax.Array] = [c0_lo * jnp.sinh(alpha_0 * xi)]
+    dw_parts_cf: list[jax.Array] = [w_xi * (c0_lo * alpha_0 * jnp.cosh(alpha_0 * xi))]
+    if w_lo_f > w_split_f * (1.0 + 1e-9):
+        om_parts_cf.append(w_split_f + (w_lo_f - w_split_f) * xi)
+        dw_parts_cf.append(w_xi * (w_lo_f - w_split_f))
+    ln_span = math.log(w_hi_f / w_lo_f)
+    om_band = w_lo_f * jnp.exp(ln_span * xi)
+    om_parts_cf.append(om_band)
+    dw_parts_cf.append(w_xi * om_band * ln_span)
+    return jnp.concatenate(om_parts_cf), jnp.concatenate(dw_parts_cf)
+
+
+def _spectral_part_log_raw(
+    part: SpectralKernel,
+    omegas: jax.Array,
+    *,
+    omega_bounds: tuple[float, float] | None = None,
+) -> jax.Array:
     """Continuous unnormalized log-power shape ``ln P_tilde(omega^2)`` on ``omegas``."""
     lam = jnp.square(omegas)
     if isinstance(part, MaternSpectrum):
@@ -1918,14 +1997,14 @@ def _spectral_part_log_raw(part: SpectralKernel, omegas: jax.Array) -> jax.Array
         denom = jnp.square(lam - w0_sq) + (w0_sq * lam) / jnp.square(part.quality)
         return -jnp.log(jnp.maximum(denom, 1e-300))
     if isinstance(part, CorrelatedFieldSpectrum):
-        # Smooth infrared cutoff ω_min = 0.02 rad/yr (~314 yr) so power-law spectra
-        # remain integrable near ω = 0 while preserving high-ω decay.
-        w_min = 0.02
-        ln_w_min = math.log(w_min)
-        ln_w_ref_max = math.log(4.0)
-        log_w = 0.5 * jnp.log(lam + w_min * w_min)
-        centred = log_w - 0.5 * (ln_w_min + ln_w_ref_max)
-        u = jnp.clip((log_w - ln_w_min) / (ln_w_ref_max - ln_w_min), 0.0, 1.0)
+        w_lo, w_hi = (0.02, 4.0) if omega_bounds is None else omega_bounds
+        w_lo_f = max(float(w_lo), 1e-12)
+        w_hi_f = max(float(w_hi), w_lo_f * (1.0 + 1e-9))
+        ln_w_lo = math.log(w_lo_f)
+        ln_w_hi = math.log(w_hi_f)
+        log_w = jnp.log(jnp.maximum(omegas, w_lo_f))
+        centred = log_w - 0.5 * (ln_w_lo + ln_w_hi)
+        u = jnp.clip((log_w - ln_w_lo) / max(ln_w_hi - ln_w_lo, 1e-12), 0.0, 1.0)
         m_idx = jnp.arange(1, part.log_deviations.shape[0] + 1, dtype=jnp.float64)
         basis = (math.sqrt(2.0) / m_idx[:, None]) * jnp.cos(
             math.pi * m_idx[:, None] * u[None, :]
@@ -1942,15 +2021,23 @@ def _spectral_kernel_quad_weights(
     dw_total: jax.Array,
     *,
     variance_scale: ArrayLike = 1.0,
+    omega_bounds: tuple[float, float] | None = None,
 ) -> jax.Array:
     """Normalized quadrature weights ``w_q`` summing to ``variance_scale * sum_p sigma_p^2``."""
     parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
     v_scale = jnp.asarray(variance_scale, dtype=jnp.float64).reshape(())
     total_weights = jnp.zeros_like(omegas, dtype=jnp.float64)
+    w_hi_cf = 4.0 if omega_bounds is None else float(omega_bounds[1])
     for part in parts:
-        log_raw = _spectral_part_log_raw(part, omegas)
-        shift = jnp.max(log_raw)
-        raw = jnp.exp(log_raw - shift)
+        log_raw = _spectral_part_log_raw(part, omegas, omega_bounds=omega_bounds)
+        if isinstance(part, CorrelatedFieldSpectrum):
+            in_band = omegas <= w_hi_cf * (1.0 + 1e-12)
+            masked_log = jnp.where(in_band, log_raw, -jnp.inf)
+            shift = jnp.max(masked_log)
+            raw = jnp.where(in_band, jnp.exp(log_raw - jnp.where(jnp.isfinite(shift), shift, 0.0)), 0.0)
+        else:
+            shift = jnp.max(log_raw)
+            raw = jnp.exp(log_raw - shift)
         dw_raw = dw_total * raw
         denom = jnp.sum(dw_raw)
         sig = jnp.asarray(part.sigma, dtype=jnp.float64).reshape(())
@@ -1972,6 +2059,7 @@ def stationary_cbm_spectral_cov(
     variance_scale: ArrayLike = 1.0,
     n_quad: int = 128,
     jitter: float = 1e-13,
+    omega_bounds: tuple[float, float] | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     r"""Stationary pre-history CBM covariance ``(Sigma_{y,0}, root_y0)`` from a :class:`SpectralKernel`.
 
@@ -1983,9 +2071,23 @@ def stationary_cbm_spectral_cov(
             (i\omega I - A)^{-1} b_{\mathrm{eff}} b_{\mathrm{eff}}^\top (-i\omega I - A^\top)^{-1}
         \right] \frac{S(\omega)}{\pi}\,d\omega
 
-    on the same three-zone composite Gauss–Legendre grid as :func:`stationary_cbm_gp_cov`,
-    normalizing each elementary spectral component directly on the quadrature grid so that
-    its integrated stationary variance equals ``variance_scale * sigma^2`` identically.
+    using composite Gauss–Legendre quadrature tailored to each elementary spectral component
+    (sinh-clustered around the Lorentzian peak for :class:`QuasiPeriodicSpectrum`, band-limited
+    to ``omega_bounds`` for :class:`CorrelatedFieldSpectrum`, and three-zone decay/log/tail
+    quadrature for Matérn and squared-exponential spectra), normalizing each component on its
+    quadrature domain to integrated variance ``variance_scale * sigma^2``.
+
+    Notes
+    -----
+    - For :class:`CorrelatedFieldSpectrum`, ``omega_bounds`` (default ``(0.02, 4.0)`` rad/yr,
+      or the field's DCT wavenumber band ``(omega_1, omega_{N-1})`` when derived from a field)
+      sets both the cosine-deviation coordinate ``u in [0, 1]`` and the upper band cutoff so
+      that ``sigma`` retains the same meaning as in-window for all power-law slopes including
+      ``slope > -1``.
+    - In field fits, the resulting pre-history state ``delta_y(t_start)`` is modelled as a
+      zero-mean Gaussian independent of the in-window DCT modes (a modelling choice that
+      neglects pre-history/in-window cross-correlation for ``length_yr >> window`` and any
+      non-zero steady production offset ``q_mean * template[0] - q_std``).
     """
     if not isinstance(spectral_kernel, SpectralKernel):
         raise TypeError(
@@ -1995,16 +2097,24 @@ def stationary_cbm_spectral_cov(
     b_eff = jnp.asarray(alpha_unit, dtype=jnp.float64) * jnp.asarray(
         b, dtype=jnp.float64
     ).reshape(-1)
+    n_b = a_mat.shape[0]
     parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
-    ell_char = jnp.min(jnp.stack([_spectral_part_char_scale(p) for p in parts]))
-    omegas, dw_total = _spectral_quad_grid(ell_char, n_quad=n_quad)
-    u_mat, v_mat = _solve_complex_resolvents(a_mat, b_eff, omegas)
-    quad_weights = _spectral_kernel_quad_weights(
-        spectral_kernel, omegas, dw_total, variance_scale=variance_scale
-    )
-    sigma_y0 = (u_mat * quad_weights[None, :]) @ u_mat.T + (
-        v_mat * quad_weights[None, :]
-    ) @ v_mat.T
+    sigma_y0 = jnp.zeros((n_b, n_b), dtype=jnp.float64)
+    for part in parts:
+        omegas, dw_total = _part_quad_grid(part, n_quad=n_quad, omega_bounds=omega_bounds)
+        u_mat, v_mat = _solve_complex_resolvents(a_mat, b_eff, omegas)
+        quad_weights = _spectral_kernel_quad_weights(
+            part,
+            omegas,
+            dw_total,
+            variance_scale=variance_scale,
+            omega_bounds=omega_bounds,
+        )
+        sigma_y0 = (
+            sigma_y0
+            + (u_mat * quad_weights[None, :]) @ u_mat.T
+            + (v_mat * quad_weights[None, :]) @ v_mat.T
+        )
     sigma_y0 = 0.5 * (sigma_y0 + sigma_y0.T)
     root_y0 = _safe_psd_root(sigma_y0, jitter=jitter)
     return sigma_y0, root_y0
@@ -2016,7 +2126,16 @@ def _log_gaussian_variance_scale(
     template: jax.Array | None = None,
     mean_floor: float = 1e-3,
 ) -> jax.Array:
-    """Stationary ``Q(t)`` variance multiplier ``q_mean^2 * expm1(sigma^2) / sigma^2``."""
+    """Moment-matched ``Q(t)`` variance multiplier ``q_mean^2 * expm1(sigma^2) / sigma^2``.
+
+    Notes
+    -----
+    This is a second-order moment-matched approximation that preserves the Gaussian
+    log-field spectral shape rather than expanding the full log-normal autocovariance
+    series ``sum_{k >= 1} (sigma^{2k} / k!) rho(tau)^k``; on reservoir variances the
+    approximation differs from the exact log-normal series by ~3% at ``sigma = 0.35``
+    and ~30% at ``sigma = 1.0``.
+    """
     parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
     sq = jnp.asarray(0.0, dtype=jnp.float64)
     for part in parts:
@@ -2058,6 +2177,7 @@ def _field_prehistory_root_y0(
         field.effective_kernel,
         alpha_unit=alpha_unit,
         variance_scale=_field_variance_scale(field),
+        omega_bounds=_field_omega_bounds(field.n_grid, field.dt),
     )
     return root_y0
 
@@ -3954,7 +4074,10 @@ def evidence_grid(
             )
             w_dct_eff = aug_eff[:, : op.n_grid]
             init_eff = aug_eff[:, op.n_grid :]
-            omegas_q, dw_q = _spectral_quad_grid(0.5, n_quad=128)
+            omega_bounds_grid = _field_omega_bounds(op.n_grid, op.dt)
+            omegas_q, dw_q = _spectral_quad_grid(
+                0.5, n_quad=128, omega_hi=omega_bounds_grid[1]
+            )
             u_res, v_res = _solve_complex_resolvents(
                 cbm.matrix_A(),
                 ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
@@ -3966,7 +4089,9 @@ def evidence_grid(
                 def _one(s_val: jax.Array, l_val: jax.Array) -> jax.Array:
                     spec = field_spectrum(op.n_grid, op.dt, s_val, l_val, order, zero_mode=zm)
                     kern_ij = MaternSpectrum(sigma=s_val, length_yr=l_val, order=order, zero_mode=zm)
-                    qw = _spectral_kernel_quad_weights(kern_ij, omegas_q, dw_q)
+                    qw = _spectral_kernel_quad_weights(
+                        kern_ij, omegas_q, dw_q, omega_bounds=omega_bounds_grid
+                    )
                     sig_y0 = (u_res * qw[None, :]) @ u_res.T + (v_res * qw[None, :]) @ v_res.T
                     r_y0 = _safe_psd_root(0.5 * (sig_y0 + sig_y0.T), jitter=1e-13)
                     j_eff = jnp.concatenate(
@@ -4563,7 +4688,9 @@ def _get_cached_gram_grad_fn(
             phi_like = u_like[:n_k]
             kern_u = build_kernel_fn(phi_like)
             amp = _safe_sqrt(kern_u.spectrum(n_g, dt))
-            qw = _spectral_kernel_quad_weights(kern_u, omegas_q, dw_q)
+            qw = _spectral_kernel_quad_weights(
+                kern_u, omegas_q, dw_q, omega_bounds=_field_omega_bounds(n_g, dt)
+            )
             sig_y0 = (u_res * qw[None, :]) @ u_res.T + (v_res * qw[None, :]) @ v_res.T
             root_y0 = _safe_psd_root(0.5 * (sig_y0 + sig_y0.T), jitter=1e-13)
             if has_spike_amp:
@@ -4883,7 +5010,11 @@ def _optimize_single_kernel_precomputed(
                 om_q, dw_q_arr, u_r, v_r = pre_resolvents
                 v_scale = _log_gaussian_variance_scale(kern_u, q_std)
                 qw = _spectral_kernel_quad_weights(
-                    kern_u, om_q, dw_q_arr, variance_scale=v_scale
+                    kern_u,
+                    om_q,
+                    dw_q_arr,
+                    variance_scale=v_scale,
+                    omega_bounds=_field_omega_bounds(n_g, op.dt),
                 )
                 sig_y0 = (u_r * qw[None, :]) @ u_r.T + (v_r * qw[None, :]) @ v_r.T
                 r_y0 = _safe_psd_root(0.5 * (sig_y0 + sig_y0.T), jitter=1e-13)
@@ -5198,7 +5329,9 @@ def optimize_gp_kernel(
     if dynamic_prehistory:
         init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
         cursor_eff += n_b
-        om_q, dw_q = _spectral_quad_grid(0.5, n_quad=128)
+        om_q, dw_q = _spectral_quad_grid(
+            0.5, n_quad=128, omega_hi=_field_omega_bounds(n_g, op.dt)[1]
+        )
         u_r, v_r = _solve_complex_resolvents(
             cbm.matrix_A(),
             ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
@@ -5421,7 +5554,9 @@ def select_gp_kernel(
     if dynamic_prehistory:
         init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
         cursor_eff += n_b
-        om_q, dw_q = _spectral_quad_grid(0.5, n_quad=128)
+        om_q, dw_q = _spectral_quad_grid(
+            0.5, n_quad=128, omega_hi=_field_omega_bounds(n_g, op.dt)[1]
+        )
         u_r, v_r = _solve_complex_resolvents(
             cbm.matrix_A(),
             ALPHA_ATOMS_CM2_S_TO_KG_YR * cbm.production_vector(),
