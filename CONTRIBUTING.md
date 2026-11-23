@@ -4,7 +4,7 @@ Contributions to `ticktack` — bug fixes, new carbon-cycle presets, audited rad
 
 ## Scope
 
-`ticktack` provides fast, exact, differentiable linear and non-autonomous carbon box modelling and Bayesian inference for tree-ring and atmospheric $\Delta^{14}\text{C}$ time series in JAX. Contributions within this scope (published carbon-box topologies, cosmogenic production parameterizations, Gaussian-process / Information Field Theory spectral priors, calibrated radiocarbon datasets, and numerical tests) fit naturally; coupled general circulation or nonlinear biogeochemical Earth-system models lie outside the scope of the package.
+`ticktack` provides fast, differentiable linear and non-autonomous carbon box modelling and Bayesian inference for tree-ring and atmospheric $\Delta^{14}\text{C}$ time series in JAX. Contributions within this scope (published carbon-box topologies, cosmogenic production parametrizations, Gaussian-process / Information Field Theory spectral priors, calibrated radiocarbon datasets, and numerical tests) fit naturally; coupled general circulation or nonlinear biogeochemical Earth-system models lie outside the scope of the package.
 
 ## Development Setup
 
@@ -57,12 +57,39 @@ To preview the documentation locally with live reload:
 mkdocs serve
 ```
 
-## Pull Request Workflow
+## Pull Request Workflow & Review Gates
 
-1. Fork the repository and create a feature branch from `main`.
-2. Add unit tests under `tests/` covering any new functionality, analytical limiting cases, and `jax.grad` / finite-difference agreement where applicable.
-3. Ensure `pytest`, `ruff check src tests`, and `mkdocs build --strict` pass cleanly.
-4. Open a pull request against [`SharmaLlama/ticktack`](https://github.com/SharmaLlama/ticktack/pulls) describing the physical motivation, mathematical formulation, and verification checks.
+Every pull request passes through six ordered gates so that an error must get past deterministic checks, a same-family independent reviewer, and (for core science or large changes) a cross-family reviewer before merge.
+
+1. **Scope.** One purpose per PR, at most ~400 changed `src/ticktack/` code lines (tests, notebooks, and docs excluded), linked to a written task or issue. Split larger changes into independent PRs. Bug fixes start with a test that fails before the fix and passes after it.
+2. **Continuous integration.** All CI checks must pass:
+   - `ruff check src tests` plus the complexity ratchet (`C901`, `PLR0912`, `PLR0913`, `PLR0915` violations must not exceed `.github/ci_ratchets.json`).
+   - Source code line budget (`src/ticktack/**/*.py` non-docstring, non-comment code lines must not exceed `.github/ci_ratchets.json` unless the PR description includes a non-empty `Line-budget-reason:` justification).
+   - Function shape ratchet for new or edited functions in `src/ticktack/` ($\le 80$ AST code lines and $\le 8$ parameters excluding `self`/`cls`, with a monotonic ceiling on pre-existing oversized legacy functions so bugfixes and shrink refactors pass while any growth fails, unless carrying a Carbon-approved `# shape-exempt(carbon): <reason>` comment with a specific $\ge 15$-character technical reason).
+   - `pytest` with coverage reporting and the coverage floor in `.github/ci_ratchets.json`.
+   - Public-surface snapshot (`tests/test_public_surface.py` fails if `ticktack.__all__` changes without updating `tests/public_surface_snapshot.json`).
+   - Execution of a fast subset of `notebooks/v2/docs_examples/`.
+   - Trial merge against every other open PR targeting the same base branch that modifies any overlapping file, running `ruff` and `pytest` on clean merges to catch silent semantic clashes.
+3. **Evidence table.** The PR description includes an Evidence Table (`| Claim | Verification (test name or command + output) |`). Every factual, numerical, or behavioural claim maps to a test name or a command and its output; claims without a row are deleted.
+4. **Independent Carbon review.** An instance that did not write the code reviews the PR given only the diff and a five-line statement of intent (not the author's summary or conclusions). Its job is to write failing tests, not opinions. Reviewer output lists findings most severe first (`file:line`, what is wrong, and a concrete failing case or why it is only a suspicion), followed by an explicit list of what was not checked.
+5. **Claude review.** Required for any PR touching `cbm.py`, `fields.py`, `fisher.py`, `likelihood.py`, `linear.py`, or `solvers.py`, and for any PR changing more than 200 `src/ticktack/` code lines. Apply the `needs-claude-review` label and stop; Ben starts the Claude session (Sonnet by default). Mechanical PRs outside those modules and within 200 changed source lines need only Gates 1–4. Conversely, code written by Claude receives an independent Carbon review before Ben sees it.
+6. **Ben merges.** Agents never merge pull requests; Ben merges once all applicable gates are satisfied.
+
+## Code Shape Rules (New & Changed Code)
+
+1. **Reuse first.** Search for an existing helper before writing one, and list reused functions in the PR description.
+2. **Private helpers.** Keep a private helper only if it has at least two callers or is a numerical kernel with its own unit test; otherwise inline it.
+3. **No algorithm-selecting flags.** A boolean or string flag that selects between whole algorithms should become separate functions sharing setup.
+4. **Function size, arity, anti-contortion, and Carbon shape exemptions.** Keep new or edited functions to at most 80 AST code lines (excluding blanks, comments, and docstrings) and at most 8 parameters (excluding `self` and `cls`). Pre-existing legacy functions already above those limits on `main` carry a monotonic ceiling (`max(80, base_lines)` and `max(8, base_params)`): bugfixes and incremental shrink refactors pass, while growing a legacy oversized function by even one code line or parameter fails unless Carbon-exempted.
+   - **Anti-contortion rule:** Never invent awkward workarounds solely to duck under 80 lines or 8 parameters. Packing unrelated arguments into throwaway dicts or tuples, cramming multi-line numerical expressions onto unreadable 100-character one-liners, or splitting a single cohesive numerical loop into tightly coupled helper fragments passing 10 local arrays are all explicitly forbidden. Write code *the right way*, which normally minimizes total lines.
+   - **Carbon exemption mechanism:** When a genuinely cohesive function exceeds 80 AST code lines or 8 parameters and splitting it would make the code worse, the author may request a shape exemption from an independent high-effort Carbon reviewer (`@verifier-carbon`), who compares the cohesive function against the split version pragmatically (escalating to human review only in extreme cases). Once approved by Carbon, place `# shape-exempt(carbon): <specific >=15-char technical reason>` on the `def` line, immediately above `def` (or its decorators), or immediately inside `def`. CI (`check_ratchets.py`) enforces that every `# shape-exempt(carbon):` comment is attached to a `def` and states a specific technical reason of at least 15 characters, rejecting vacuous reasons such as `"readability"`, `"clarity"`, `"helper"`, or `"keep together"`.
+5. **Validate once.** Validate inputs at the public entry point; internal functions trust their callers. Use one conversion helper rather than repeating inline casts.
+6. **One accepted form.** Convert heterogeneous inputs at a single constructor instead of accepting wide union types throughout the package.
+7. **Tight typing, no aliases.** Avoid `Any` when the type is known. Use one spelling and one class name without aliases.
+8. **Replace, do not duplicate.** A PR that adds a second way of doing something removes or wraps the first.
+9. **Deliberate public surface.** Every new public name requires a docs example, a test, and an explicit update to `tests/public_surface_snapshot.json`. Keep internals out of `__all__`.
+10. **Honest docstrings.** State behaviour, units, and array shapes; omit performance claims and provenance notes. Use "exact" only when true in exact arithmetic; otherwise state the tolerance and name the test.
+11. **Independent verification.** Test every new mathematical formula against an independent reference (closed-form expression, dense matrix, finite differences, or external solver), never solely against another code path in `ticktack`.
 
 ## Questions, Issues, & Discussions
 
