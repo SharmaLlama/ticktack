@@ -1660,12 +1660,17 @@ def cbm_gp_fisher_spectrum(  # shape-exempt(carbon): public Fisher entry point p
         Linear marginalization configuration; defaults to ``LinearMarginalConfig()``
         (``offset_mode="hierarchical"`` with ``global_prior_sd=200.0`` and
         ``lab_prior_sd=1.5``). Supports ``"hierarchical"``, ``"per_series"``,
-        ``"shared"``, and ``"none"``.
+        ``"shared"``, and ``"none"``. Passing ``None`` or ``jnp.inf`` for
+        ``global_prior_sd`` or ``lab_prior_sd`` projects both mean and Slepian--Bangs
+        covariance rows onto the REML orthogonal complement of ``X_0`` (matching the
+        ``prior_sd -> inf`` generative limit when ``col(X_0)`` is CBM-independent, and
+        evaluating the fixed-subspace REML projection without unphysical
+        ``O(global_prior_sd^2)`` covariance blow-up on multi-troposphere CBMs).
     per_series_prior_sd : float, ``"from_config"``, or None, optional
         Prior SD on per-series offsets when ``marginal_config.offset_mode == "per_series"``.
         ``"from_config"`` (default) uses ``marginal_config.global_prior_sd``; passing
-        ``None`` or ``jnp.inf`` projects per-series indicator columns out via an
-        uninformative Schur complement.
+        ``None`` or ``jnp.inf`` projects both mean and covariance rows onto the REML
+        orthogonal complement of the per-series indicator matrix.
     prior_sd : float or ArrayLike, optional
         Gaussian prior standard deviation on CBM log-rate parameters (default ``0.35``).
     parameterisation : {"log_rates"}, optional

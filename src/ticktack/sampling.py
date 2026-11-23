@@ -1271,6 +1271,8 @@ def _thin_idata_for_is(
     is_max_draws: int | None,
 ) -> tuple[az.InferenceData, np.ndarray, int, int]:
     """Return ``(idata_sel, flat_eval_indices, n_chains_out, n_draws_out)`` with aligned draws."""
+    if is_max_draws is not None and int(is_max_draws) < 1:
+        raise ValueError(f"is_max_draws must be >= 1 or None; got {is_max_draws}.")
     s_total = n_chains * n_draws
     if is_max_draws is None or s_total <= int(is_max_draws):
         return idata, np.arange(s_total, dtype=np.int64), n_chains, n_draws
@@ -1301,12 +1303,15 @@ def _thin_idata_for_is(
     return idata_sel, flat_idx, int(chain_idx.shape[0]), int(draw_idx.shape[0])
 
 
-def _compute_psis_pareto_k(log_w_2d: np.ndarray) -> float:
+def _compute_psis_pareto_k(log_w_2d: np.ndarray, *, r_eff: float = 1.0) -> float:
     """Estimate PSIS Pareto-``k`` tail index of importance weights ``exp(log_w_2d)``.
 
     ``arviz_stats.psislw`` follows the LOO convention and negates its input
     internally (``-ary``), so passing ``-log_w_2d`` fits the generalized Pareto
-    tail to the right tail of ``exp(+log_w_2d)``.
+    tail to the right tail of ``exp(+log_w_2d)`` across ``("chain", "draw")``.
+    When the upper tail collapses onto a single repeated atom above the bulk
+    minimum (e.g. systematic resampling of one dominant particle), returns
+    ``inf`` rather than ``nan`` so heavy-tail warnings still fire.
     """
     arr = np.asarray(log_w_2d, dtype=np.float64)
     if arr.ndim == 1:
@@ -1316,20 +1321,48 @@ def _compute_psis_pareto_k(log_w_2d: np.ndarray) -> float:
     if np.any(np.isposinf(arr)):
         return float("inf")
     finite = arr[np.isfinite(arr)]
-    if float(np.ptp(finite)) <= np.finfo(np.float64).tiny:
+    tiny = np.finfo(np.float64).tiny
+    if finite.size == arr.size and float(np.ptp(finite)) <= tiny:
         return 0.0
     if arr.size < 25:
         return float("nan")
+    r_eff_pos = max(float(r_eff), 1e-12)
+    n_tail = min(arr.size // 5, int(3.0 * math.sqrt(arr.size / r_eff_pos)))
+    if n_tail < 5:
+        return float("nan")
+    s_vals = np.sort(arr.reshape(-1))
+    min_tail, max_tail = float(s_vals[-n_tail]), float(s_vals[-1])
+    if np.isfinite(min_tail) and abs(max_tail - min_tail) <= tiny and max_tail > float(s_vals[0]) + tiny:
+        return float("inf")
+    arr_shifted = arr - float(np.max(finite))
     try:
-        _, khat_da = xr.DataArray(-arr, dims=("chain", "draw")).azstats.psislw()
+        _, khat_da = xr.DataArray(-arr_shifted, dims=("chain", "draw")).azstats.psislw(
+            r_eff=r_eff_pos
+        )
         return float(np.max(np.asarray(khat_da, dtype=np.float64)))
     except ValueError:
         return float("nan")
 
 
-def _warn_if_high_pareto_k(pareto_k: float, caller: str) -> None:
-    """Emit ``UserWarning`` when PSIS ``pareto_k > 0.7`` indicates heavy-tailed IS weights."""
-    if pareto_k > 0.7:
+def _warn_if_high_pareto_k(
+    pareto_k: float,
+    caller: str,
+    *,
+    n_eval: int | None = None,
+) -> None:
+    """Emit ``UserWarning`` when PSIS ``pareto_k > 0.7`` or ``pareto_k`` is ``NaN``."""
+    if math.isnan(pareto_k):
+        if n_eval is not None and n_eval < 25:
+            reason = f"n_eval={n_eval} < 25 draws, too few draws for PSIS tail estimation"
+        else:
+            reason = "indeterminate or tied upper-tail order statistics"
+        warnings.warn(
+            f"{caller} importance-sampling Pareto-k diagnostic is NaN ({reason}); "
+            "importance-weight tail heaviness could not be verified.",
+            UserWarning,
+            stacklevel=3,
+        )
+    elif pareto_k > 0.7:
         warnings.warn(
             f"{caller} importance-sampling Pareto-k diagnostic is high "
             f"(pareto_k={pareto_k:.3f} > 0.7); the surrogate posterior may be narrower "
@@ -1398,14 +1431,14 @@ def reweight_exact_marginal(
     cap ``is_max_draws < S_total`` is requested, evenly thins ``idata`` along the
     draw/chain axes so ``idata_out.sample_stats["log_weight_is"]`` contains zero
     ``NaN``s and ``diagnostics["weights_is"]`` stays shape-aligned with ``idata_out``.
+    ``diagnostics["pareto_k"]`` reports the PSIS Pareto-``k`` tail index over
+    ``("chain", "draw")`` and emits a :class:`UserWarning` when ``pareto_k > 0.7`` or
+    ``pareto_k`` is ``NaN`` (e.g. ``n_eval < 25`` or tied upper-tail order statistics).
     """
     u_chains, n_chains, n_draws = _pack_unconstrained_from_idata(idata, parameter_space)
     s_total = n_chains * n_draws
     d = parameter_space.n_params
     u_flat = u_chains.reshape(s_total, d)
-
-    if is_max_draws is not None and int(is_max_draws) < 1:
-        raise ValueError(f"is_max_draws must be >= 1 or None; got {is_max_draws}.")
 
     idata_sel, eval_idx, n_c_out, n_d_out = _thin_idata_for_is(
         idata, n_chains, n_draws, is_max_draws
@@ -1441,7 +1474,7 @@ def reweight_exact_marginal(
     )
     log_w_2d = log_w_eval.reshape(n_c_out, n_d_out)
     pareto_k = _compute_psis_pareto_k(log_w_2d)
-    _warn_if_high_pareto_k(pareto_k, "reweight_exact_marginal")
+    _warn_if_high_pareto_k(pareto_k, "reweight_exact_marginal", n_eval=int(eval_idx.shape[0]))
     idata_out = _attach_log_weight_is(idata_sel, log_w_2d)
 
     diagnostics: dict[str, Any] = {
@@ -1558,8 +1591,8 @@ def _reweight_laplace_draws(
         _summarize_is_weights(log_w_eval, center_for_spread=True)
     )
     log_w_2d = log_w_eval.reshape(n_c_out, n_d_out)
-    pareto_k = _compute_psis_pareto_k(log_w_2d)
-    _warn_if_high_pareto_k(pareto_k, "fit_subspace_cbm_gp")
+    pareto_k = _compute_psis_pareto_k(log_w_2d, r_eff=1.0)
+    _warn_if_high_pareto_k(pareto_k, "fit_subspace_cbm_gp", n_eval=int(eval_idx.shape[0]))
     idata_out = _attach_log_weight_is(idata_sel, log_w_2d)
     return idata_out, {
         "log_weight_is": log_w_eval,
@@ -1573,6 +1606,70 @@ def _reweight_laplace_draws(
         "median_abs_dlnL": med_abs,
         "max_abs_dlnL": max_abs,
         "log_evidence_exact": log_z_exact,
+    }
+
+
+def _reweight_smc_particles(
+    smc_res: SMCResult,
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    parameter_space: ParameterSpace,
+    cfg_exact: LinearMarginalConfig,
+    cfg_tan: LinearMarginalConfig,
+    *,
+    is_max_draws: int | None = None,
+    sigma_jitter: ArrayLike | None = None,
+) -> tuple[az.InferenceData, dict[str, Any]]:
+    """Reweight unresampled SMC particles ``(particles, weights)`` to the exact marginal target."""
+    parts = jnp.asarray(smc_res.particles, dtype=jnp.float64)
+    w_smc = np.asarray(smc_res.weights, dtype=np.float64).reshape(-1)
+    n_part, d_part = int(parts.shape[0]), int(parts.shape[1])
+    idata_raw = az.from_dict(
+        {"posterior": _unpack_constrained_samples(parameter_space, parts[None, :, :])}
+    )
+    idata_sel, eval_idx, n_c_out, n_d_out = _thin_idata_for_is(
+        idata_raw, 1, n_part, is_max_draws
+    )
+    u_eval = parts.reshape(-1, d_part)[eval_idx]
+    w_sel = np.maximum(w_smc[eval_idx], 0.0)
+    w_sel_sum = float(np.sum(w_sel))
+    w_norm = (
+        w_sel / w_sel_sum
+        if w_sel_sum > 0.0
+        else np.full_like(w_sel, 1.0 / max(len(w_sel), 1))
+    )
+    jit_arr = None if sigma_jitter is None else jnp.asarray(sigma_jitter, dtype=jnp.float64)
+    ll_ex = _eval_marginal_ll_batch_jit(u_eval, model, dataset, parameter_space, cfg_exact, jit_arr)
+    ll_tn = _eval_marginal_ll_batch_jit(u_eval, model, dataset, parameter_space, cfg_tan, jit_arr)
+    dlnl_eval = np.asarray(ll_ex - ll_tn, dtype=np.float64)
+    n_ev = max(len(eval_idx), 1)
+    log_w_smc = np.log(np.maximum(n_ev * w_norm, 1e-300))
+    log_w_eval = log_w_smc + dlnl_eval
+    w_is, kish_ess, kish_ess_ratio, log_z_corr, _, _ = _summarize_is_weights(
+        log_w_eval, center_for_spread=False
+    )
+    ess_smc = float(1.0 / max(float(np.sum(w_norm**2)), 1e-300))
+    fin_d = np.isfinite(dlnl_eval)
+    abs_d = np.abs(dlnl_eval[fin_d]) if np.any(fin_d) else np.array([np.nan])
+    log_w_2d = log_w_eval.reshape(n_c_out, n_d_out)
+    pareto_k = _compute_psis_pareto_k(log_w_2d, r_eff=1.0)
+    _warn_if_high_pareto_k(pareto_k, "fit_subspace_cbm_gp", n_eval=int(eval_idx.shape[0]))
+    idata_out = _attach_log_weight_is(idata_sel, log_w_2d)
+    return idata_out, {
+        "log_weight_is": log_w_eval,
+        "log_likelihood_diff": dlnl_eval,
+        "weights_is": w_is,
+        "eval_indices": eval_idx,
+        "n_eval": int(eval_idx.shape[0]),
+        "n_total": n_part,
+        "kish_ess": kish_ess,
+        "kish_ess_ratio": kish_ess_ratio,
+        "is_ess_ratio": float(kish_ess / ess_smc),
+        "pareto_k": pareto_k,
+        "median_abs_dlnL": float(np.median(abs_d)),
+        "max_abs_dlnL": float(np.max(abs_d)),
+        "log_z_correction": log_z_corr,
+        "log_evidence_exact": float(smc_res.log_evidence) + log_z_corr,
     }
 
 
@@ -1702,6 +1799,18 @@ def fit_subspace_cbm_gp(  # shape-exempt(carbon): public two-stage sampler accep
                 is_max_draws=is_max_draws,
                 sigma_jitter=sigma_jitter,
             )
+        elif sampler == "smc":
+            smc_obj = diagnostics["smc_result"]
+            idata, is_diag = _reweight_smc_particles(
+                smc_obj,
+                model,
+                dataset,
+                parameter_space,
+                cfg_exact,
+                cfg_tan,
+                is_max_draws=is_max_draws,
+                sigma_jitter=sigma_jitter,
+            )
         else:
             idata, is_diag = reweight_exact_marginal(
                 idata,
@@ -1713,15 +1822,12 @@ def fit_subspace_cbm_gp(  # shape-exempt(carbon): public two-stage sampler accep
                 is_max_draws=is_max_draws,
                 sigma_jitter=sigma_jitter,
             )
-            if sampler == "smc" and "log_evidence_tan" in diagnostics:
-                diagnostics["log_evidence_exact"] = (
-                    float(diagnostics["log_evidence_tan"]) + float(is_diag["log_z_correction"])
-                )
         diagnostics.update(is_diag)
-        if math.isfinite(is_diag["kish_ess_ratio"]) and is_diag["kish_ess_ratio"] < 0.85:
+        eff_ratio = float(is_diag.get("is_ess_ratio", is_diag["kish_ess_ratio"]))
+        if math.isfinite(eff_ratio) and eff_ratio < 0.85:
             warnings.warn(
                 f"fit_subspace_cbm_gp exact IS efficiency is low "
-                f"(kish_ess_ratio={is_diag['kish_ess_ratio']:.3f} < 0.85, "
+                f"(is_ess_ratio={eff_ratio:.3f} < 0.85, "
                 f"max|ΔlnL|={is_diag['max_abs_dlnL']:.3f} nats); consider checking "
                 "posterior multimodality or sampling with exact marginal_log_likelihood.",
                 RuntimeWarning,

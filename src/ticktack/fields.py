@@ -5874,6 +5874,19 @@ class _CBMKernelOptSpec(NamedTuple):
     rng_key: jax.Array
     prehistory_kernel: Any | None
     include_field_initial_cov: bool
+    global_offset_prior_sd: float = 200.0
+    lab_offset_prior_sd: float = 1.5
+
+
+class _CBMSpikeOptMeta(NamedTuple):
+    """Spike parameterization and prior vectors for joint CBM+kernel optimization."""
+
+    spike_ref: MiyakeSpike | None
+    spike_name: str | None
+    has_spike: bool
+    opt_full_spike: bool
+    sp_mu_vec: jax.Array
+    sp_sd_vec: jax.Array
 
 
 def _init_cbm_kernel_starts(
@@ -5881,16 +5894,8 @@ def _init_cbm_kernel_starts(
     lin_op: LinearizedDCTOperator,
     alpha_init: jax.Array | None,
     spike_init_term: MiyakeSpike | None,
-) -> tuple[
-    jax.Array,
-    MiyakeSpike | None,
-    str | None,
-    bool,
-    bool,
-    jax.Array,
-    jax.Array,
-]:
-    """Build multi-start array and spike prior vectors for CBM+kernel optimization."""
+) -> tuple[jax.Array, _CBMSpikeOptMeta]:
+    """Build multi-start array and spike metadata for CBM+kernel optimization."""
     n_k = int(spec.phi0.shape[0])
     m_modes = int(spec.cbm.n_modes)
     t0, t1 = lin_op.t_start, lin_op.t_end
@@ -5955,7 +5960,14 @@ def _init_cbm_kernel_starts(
             [u0[None, :], u0[None, :] + pert * jnp.asarray(scale_vec)[None, :]],
             axis=0,
         )
-    return starts, spike_ref, spike_name, has_spike, opt_full_spike, sp_mu_vec, sp_sd_vec
+    return starts, _CBMSpikeOptMeta(
+        spike_ref=spike_ref,
+        spike_name=spike_name,
+        has_spike=has_spike,
+        opt_full_spike=opt_full_spike,
+        sp_mu_vec=sp_mu_vec,
+        sp_sd_vec=sp_sd_vec,
+    )
 
 
 class _CBMNLLContext(NamedTuple):
@@ -6053,10 +6065,7 @@ def _cbm_kern_nll_vg(
 def _make_cbm_nll_context(
     spec: _CBMKernelOptSpec,
     lin_op0: LinearizedDCTOperator,
-    spike_ref: MiyakeSpike | None,
-    spike_name: str | None,
-    has_spike: bool,
-    opt_full_spike: bool,
+    spike_meta: _CBMSpikeOptMeta,
 ) -> _CBMNLLContext:
     """Assemble static/array ``_CBMNLLContext`` for ``_cbm_kern_nll_vg``."""
     box_indices_flat = jnp.array(
@@ -6073,8 +6082,8 @@ def _make_cbm_nll_context(
             spec.ds.series_indices,
             spec.ds.n_series,
             global_prior_mean=0.0,
-            global_prior_sd=200.0,
-            lab_prior_sd=1.5,
+            global_prior_sd=float(spec.global_offset_prior_sd),
+            lab_prior_sd=float(spec.lab_offset_prior_sd),
         )
     elif spec.offset_mode == "none":
         x_off_base = jnp.zeros((spec.ds.n_obs, 0), dtype=jnp.float64)
@@ -6088,17 +6097,17 @@ def _make_cbm_nll_context(
         cbm_template=spec.cbm,
         ds=spec.ds,
         extra_production=spec.extra_production,
-        spike_ref=spike_ref,
+        spike_ref=spike_meta.spike_ref,
         x_off_base=x_off_base,
         pm_off=pm_off,
         ps_off=ps_off,
         box_indices_flat=box_indices_flat,
         trop_idx=trop_idx,
         prehistory_kernel=spec.prehistory_kernel,
-        spike_name=spike_name,
+        spike_name=spike_meta.spike_name,
         offset_mode=spec.offset_mode,
-        has_spike=has_spike,
-        opt_full_spike=opt_full_spike,
+        has_spike=spike_meta.has_spike,
+        opt_full_spike=spike_meta.opt_full_spike,
         include_field_initial_cov=spec.include_field_initial_cov,
         q_std=float(spec.q_std),
         n_g=lin_op0.n_grid,
@@ -6110,21 +6119,14 @@ def _make_cbm_nll_context(
 def _build_cbm_kernel_eval_vg(
     spec: _CBMKernelOptSpec,
     lin_op0: LinearizedDCTOperator,
-    spike_ref: MiyakeSpike | None,
-    spike_name: str | None,
-    has_spike: bool,
-    opt_full_spike: bool,
-    sp_prior_mu_vec: jax.Array,
-    sp_prior_sd_vec: jax.Array,
+    spike_meta: _CBMSpikeOptMeta,
 ) -> Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]]:
     """Build module-JIT-cached joint negative log-hyper-posterior + gradient evaluator."""
     n_k = int(spec.phi0.shape[0])
     m_modes = int(spec.cbm.n_modes)
     cbm_sd_f = float(spec.cbm_prior_sd)
     _, static_k = eqx.partition(spec.build_kernel_fn(spec.phi0), eqx.is_inexact_array)
-    ctx = _make_cbm_nll_context(
-        spec, lin_op0, spike_ref, spike_name, has_spike, opt_full_spike
-    )
+    ctx = _make_cbm_nll_context(spec, lin_op0, spike_meta)
     prior_vg_fn = jax.jit(jax.value_and_grad(spec.prior_fn))
 
     def _phi_to_dyn_k(p_vec: jax.Array) -> Any:
@@ -6146,9 +6148,11 @@ def _build_cbm_kernel_eval_vg(
         lp_phi, g_phi_lp = prior_vg_fn(phi_j)
         lp_alpha = jnp.sum(_normal_logpdf(alpha_j, 0.0, cbm_sd_f))
         g_alpha_lp = -alpha_j / (cbm_sd_f * cbm_sd_f)
-        if has_spike:
-            lp_sp = jnp.sum(_normal_logpdf(sp_j, sp_prior_mu_vec, sp_prior_sd_vec))
-            g_sp_lp = -(sp_j - sp_prior_mu_vec) / jnp.square(sp_prior_sd_vec)
+        if spike_meta.has_spike:
+            lp_sp = jnp.sum(
+                _normal_logpdf(sp_j, spike_meta.sp_mu_vec, spike_meta.sp_sd_vec)
+            )
+            g_sp_lp = -(sp_j - spike_meta.sp_mu_vec) / jnp.square(spike_meta.sp_sd_vec)
         else:
             lp_sp = jnp.asarray(0.0, dtype=jnp.float64)
             g_sp_lp = jnp.zeros((0,), dtype=jnp.float64)
@@ -6209,10 +6213,7 @@ def _fit_exact_wiener_at_cbm_opt(
     spec: _CBMKernelOptSpec,
     active_lin_op: LinearizedDCTOperator,
     u_opt: jax.Array,
-    spike_ref: MiyakeSpike | None,
-    spike_name: str | None,
-    has_spike: bool,
-    opt_full_spike: bool,
+    spike_meta: _CBMSpikeOptMeta,
 ) -> tuple[SpectralKernel, SubspaceCBM, IFTFieldFitResult, jax.Array, jax.Array]:
     """Build exact ``DCTResponseOperator`` and Wiener ``fit_ift_field`` at ``u_opt``."""
     n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
@@ -6223,9 +6224,9 @@ def _fit_exact_wiener_at_cbm_opt(
     cbm_opt = eqx.tree_at(lambda c: c.alpha, spec.cbm, alpha_opt)
     sp_opt = _unpack_spike_from_vec(
         u_opt[n_k + m_modes :],
-        spike_ref,
-        has_spike=has_spike,
-        opt_full_spike=opt_full_spike,
+        spike_meta.spike_ref,
+        has_spike=spike_meta.has_spike,
+        opt_full_spike=spike_meta.opt_full_spike,
         t0=t0,
         t1=t1,
         clip_like=False,
@@ -6234,7 +6235,7 @@ def _fit_exact_wiener_at_cbm_opt(
         None
         if spec.extra_production is None
         else _replace_spike_in_extra(
-            spec.extra_production, spike_name, sp_opt, float(spec.q_std)
+            spec.extra_production, spike_meta.spike_name, sp_opt, float(spec.q_std)
         )
     )
     op_opt = build_dct_response_operator(
@@ -6252,6 +6253,8 @@ def _fit_exact_wiener_at_cbm_opt(
         RadiocarbonModel(cbm_opt, prod_opt, ExactLinearSolver(), q_std=spec.q_std),
         spec.ds,
         offset_mode=spec.offset_mode,
+        global_offset_prior_sd=float(spec.global_offset_prior_sd),
+        lab_offset_prior_sd=float(spec.lab_offset_prior_sd),
         operator=op_opt,
         prehistory_kernel=spec.prehistory_kernel,
         include_field_initial_cov=spec.include_field_initial_cov,
@@ -6265,14 +6268,16 @@ def _finalize_cbm_kernel_laplace(
     active_lin_op: LinearizedDCTOperator,
     eval_vg: Callable[[np.ndarray, LinearizedDCTOperator], tuple[float, np.ndarray]],
     converged: bool,
-    spike_meta: tuple[MiyakeSpike | None, str | None, bool, bool, jax.Array, jax.Array],
+    spike_meta: _CBMSpikeOptMeta,
 ) -> OptimizedKernelResult:
     """Evaluate exact Wiener fit and Laplace hyper-evidence at the CBM+kernel MAP."""
-    spike_ref, spike_name, has_spike, opt_full_spike, sp_mu_vec, sp_sd_vec = spike_meta
+    has_spike = spike_meta.has_spike
+    opt_full_spike = spike_meta.opt_full_spike
+    sp_mu_vec, sp_sd_vec = spike_meta.sp_mu_vec, spike_meta.sp_sd_vec
     n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
     u_opt = jnp.asarray(best_u_np, dtype=jnp.float64)
     kern_opt, cbm_opt, fit_res, phi_opt, alpha_opt = _fit_exact_wiener_at_cbm_opt(
-        spec, active_lin_op, u_opt, spike_ref, spike_name, has_spike, opt_full_spike
+        spec, active_lin_op, u_opt, spike_meta
     )
     ln_z_val, gamma_val = fit_res.log_evidence, fit_res.gamma
 
@@ -6356,19 +6361,10 @@ def _optimize_single_kernel_with_cbm(
     """Jointly optimize ``(phi, cbm.alpha[, spike])`` with tangent-linear ``W_DCT(alpha)``."""
     n_k, m_modes = int(spec.phi0.shape[0]), int(spec.cbm.n_modes)
     n_g, t0, t1 = lin_op.n_grid, lin_op.t_start, lin_op.t_end
-    starts, spike_ref, spike_name, has_spike, opt_full_spike, sp_mu_vec, sp_sd_vec = (
-        _init_cbm_kernel_starts(spec, lin_op, alpha_init, spike_init_term)
+    starts, spike_meta = _init_cbm_kernel_starts(
+        spec, lin_op, alpha_init, spike_init_term
     )
-    eval_vg = _build_cbm_kernel_eval_vg(
-        spec,
-        lin_op,
-        spike_ref,
-        spike_name,
-        has_spike,
-        opt_full_spike,
-        sp_mu_vec,
-        sp_sd_vec,
-    )
+    eval_vg = _build_cbm_kernel_eval_vg(spec, lin_op, spike_meta)
     active_lin_op = lin_op
     best_u_np, converged = _run_cbm_kernel_bfgs(eval_vg, active_lin_op, starts)
 
@@ -6403,12 +6399,7 @@ def _optimize_single_kernel_with_cbm(
         )
 
     return _finalize_cbm_kernel_laplace(
-        spec,
-        best_u_np,
-        active_lin_op,
-        eval_vg,
-        converged,
-        (spike_ref, spike_name, has_spike, opt_full_spike, sp_mu_vec, sp_sd_vec),
+        spec, best_u_np, active_lin_op, eval_vg, converged, spike_meta
     )
 
 
@@ -6675,6 +6666,62 @@ class KernelSelectionResult(zdx.Base):
         return self.format_table()
 
 
+def _select_gp_kernels_with_cbm(
+    cand_items: list[tuple[str, str | SpectralKernel]],
+    base_spec: _CBMKernelOptSpec,
+    lin_op0: LinearizedDCTOperator,
+    hyperprior: Callable[[jax.Array], jax.Array] | None,
+    hyperpriors: Mapping[str, Callable[[jax.Array], jax.Array]] | None,
+) -> tuple[list[OptimizedKernelResult], jax.Array, jax.Array]:
+    """Optimize and rank candidate GP kernels jointly with ``SubspaceCBM.alpha``."""
+    subkeys = jax.random.split(base_spec.rng_key, len(cand_items) + 2)
+    ref_spec = base_spec._replace(multi_start=1, rng_key=subkeys[-2])
+    ref_res = _optimize_single_kernel_with_cbm(ref_spec, lin_op0, recenter_threshold=1e9)
+    alpha_ref_shared = ref_res.alpha_opt
+    assert alpha_ref_shared is not None
+    cbm_ref_shared = eqx.tree_at(lambda c: c.alpha, base_spec.cbm, alpha_ref_shared)
+    lin_op_shared = build_linearized_dct_operator(
+        cbm_ref_shared,
+        base_spec.ds,
+        t_start=lin_op0.t_start,
+        t_end=lin_op0.t_end,
+        n_grid=lin_op0.n_grid,
+        q_std=base_spec.q_std,
+    )
+    spike_ref_shared, _ = _extract_spike_from_extra(ref_res.fit.model.production)
+    results: list[OptimizedKernelResult] = []
+    for idx, (label, spec_item) in enumerate(cand_items):
+        hp_override = (
+            hyperpriors[label]
+            if hyperpriors is not None and label in hyperpriors
+            else hyperprior
+        )
+        try:
+            build_fn, prior_fn, _, phi0, _ = _kernel_builders_from_spec(
+                spec_item, zero_mode=False, hyperprior_override=hp_override
+            )
+        except TypeError as exc:
+            raise TypeError(
+                f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
+            ) from exc
+        cand_spec = base_spec._replace(
+            label=label,
+            build_kernel_fn=build_fn,
+            prior_fn=prior_fn,
+            phi0=phi0,
+            rng_key=subkeys[idx],
+        )
+        results.append(
+            _optimize_single_kernel_with_cbm(
+                cand_spec,
+                lin_op_shared,
+                alpha_init=alpha_ref_shared,
+                spike_init_term=spike_ref_shared,
+            )
+        )
+    return results, lin_op_shared.t_grid, subkeys[-1]
+
+
 def select_gp_kernel(  # shape-exempt(carbon): public kernel selector adding optimize_cbm and cbm_prior_sd keyword options
     cbm: CarbonBoxModel,
     dataset: Dataset | TreeRingSeries,
@@ -6749,18 +6796,14 @@ def select_gp_kernel(  # shape-exempt(carbon): public kernel selector adding opt
     results: list[OptimizedKernelResult] = []
 
     if use_cbm_opt:
-        subkeys = jax.random.split(key, len(cand_items) + 2)
-        ref_key = subkeys[-2]
-        sample_key = subkeys[-1]
         assert isinstance(cbm, SubspaceCBM)
         lin_op0 = build_linearized_dct_operator(
             cbm, ds, pad_years=pad_years, n_grid=n_grid, q_std=q_std
         )
-        # Warm-start alpha_ref and spike_ref once using a smooth Matern-3/2 reference
         ref_build, ref_prior, _, ref_phi0, _ = _kernel_builders_from_spec(
             "matern32", zero_mode=False
         )
-        ref_spec = _CBMKernelOptSpec(
+        base_spec = _CBMKernelOptSpec(
             label="_ref_matern32",
             build_kernel_fn=ref_build,
             prior_fn=ref_prior,
@@ -6773,59 +6816,15 @@ def select_gp_kernel(  # shape-exempt(carbon): public kernel selector adding opt
             spike_log_fluence_prior=spike_log_fluence_prior,
             cbm_prior_sd=float(cbm_prior_sd),
             offset_mode=offset_mode,
-            multi_start=1,
+            multi_start=multi_start,
             q_std=q_std,
-            rng_key=ref_key,
+            rng_key=key,
             prehistory_kernel=prehistory_kernel,
             include_field_initial_cov=bool(include_field_initial_cov),
         )
-        ref_res = _optimize_single_kernel_with_cbm(
-            ref_spec, lin_op0, recenter_threshold=1e9
+        results, t_grid_out, sample_key = _select_gp_kernels_with_cbm(
+            cand_items, base_spec, lin_op0, hyperprior, hyperpriors
         )
-        alpha_ref_shared = ref_res.alpha_opt
-        assert alpha_ref_shared is not None
-        cbm_ref_shared = eqx.tree_at(lambda c: c.alpha, cbm, alpha_ref_shared)
-        lin_op_shared = build_linearized_dct_operator(
-            cbm_ref_shared,
-            ds,
-            t_start=lin_op0.t_start,
-            t_end=lin_op0.t_end,
-            n_grid=lin_op0.n_grid,
-            q_std=q_std,
-        )
-        spike_ref_shared, _ = _extract_spike_from_extra(ref_res.fit.model.production)
-        t_grid_out = lin_op_shared.t_grid
-
-        for idx, (label, spec_item) in enumerate(cand_items):
-            hp_override = (
-                hyperpriors[label]
-                if hyperpriors is not None and label in hyperpriors
-                else hyperprior
-            )
-            try:
-                build_fn, prior_fn, _, phi0, _ = _kernel_builders_from_spec(
-                    spec_item, zero_mode=False, hyperprior_override=hp_override
-                )
-            except TypeError as exc:
-                raise TypeError(
-                    f"Candidate {label!r} must be a str or SpectralKernel, got {type(spec_item)!r}."
-                ) from exc
-
-            cand_spec = ref_spec._replace(
-                label=label,
-                build_kernel_fn=build_fn,
-                prior_fn=prior_fn,
-                phi0=phi0,
-                multi_start=multi_start,
-                rng_key=subkeys[idx],
-            )
-            res_k = _optimize_single_kernel_with_cbm(
-                cand_spec,
-                lin_op_shared,
-                alpha_init=alpha_ref_shared,
-                spike_init_term=spike_ref_shared,
-            )
-            results.append(res_k)
     else:
         subkeys = jax.random.split(key, len(cand_items) + 1)
         sample_key = subkeys[-1]

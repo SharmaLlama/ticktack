@@ -1439,6 +1439,37 @@ def test_item3_uninformative_offset_reml_projected_precision() -> None:
     h_1e4 = tt.cbm_gp_fisher_spectrum(cbm_bal, ds_nh, gf, marginal_config=cfg_h_1e4, prior_sd=0.35)
     np.testing.assert_allclose(float(h_none.d_eff), float(h_1e4.d_eff), rtol=1e-6, atol=1e-6)
 
+    # 3. Two-hemisphere Brehm21 NH+SH: CBM-independent X_0 (per_series=None & lab_prior_sd=None)
+    cbm_b21 = tt.load_preset("Brehm21", kind="balanced")
+    cfg_b_ps = tt.LinearMarginalConfig(offset_mode="per_series")
+    b_ps_none = tt.cbm_gp_fisher_spectrum(
+        cbm_b21, ds, gf, marginal_config=cfg_b_ps, per_series_prior_sd=None, prior_sd=0.35
+    )
+    b_ps_1e4 = tt.cbm_gp_fisher_spectrum(
+        cbm_b21, ds, gf, marginal_config=cfg_b_ps, per_series_prior_sd=1e4, prior_sd=0.35
+    )
+    b_ps_1e6 = tt.cbm_gp_fisher_spectrum(
+        cbm_b21, ds, gf, marginal_config=cfg_b_ps, per_series_prior_sd=1e6, prior_sd=0.35
+    )
+    np.testing.assert_allclose(float(b_ps_none.d_eff), float(b_ps_1e4.d_eff), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(float(b_ps_none.d_eff), float(b_ps_1e6.d_eff), rtol=1e-9, atol=1e-9)
+
+    b_hl_none = tt.cbm_gp_fisher_spectrum(
+        cbm_b21,
+        ds,
+        gf,
+        marginal_config=tt.LinearMarginalConfig(offset_mode="hierarchical", lab_prior_sd=None),
+        prior_sd=0.35,
+    )
+    b_hl_1e6 = tt.cbm_gp_fisher_spectrum(
+        cbm_b21,
+        ds,
+        gf,
+        marginal_config=tt.LinearMarginalConfig(offset_mode="hierarchical", lab_prior_sd=1e6),
+        prior_sd=0.35,
+    )
+    np.testing.assert_allclose(float(b_hl_none.d_eff), float(b_hl_1e6.d_eff), rtol=1e-9, atol=1e-9)
+
 
 def test_item4_psis_pareto_k_diagnostic_and_warning() -> None:
     """Narrow Gaussian surrogate -> wider target triggers PSIS pareto_k > 0.7 UserWarning."""
@@ -1482,6 +1513,65 @@ def test_item4_psis_pareto_k_diagnostic_and_warning() -> None:
         idata_wide, mod, ds, ps, cfg_narrow, cfg_wide
     )
     assert float(diag_light["pareto_k"]) < 0.5
+
+
+def test_item4_psis_edge_cases_and_smc_particles() -> None:
+    """Duplicated-tail collapse -> inf warning, <25 draws -> NaN warning, and SMC particle IS."""
+    import arviz as az
+    from ticktack.sampling import _compute_psis_pareto_k, _warn_if_high_pareto_k
+
+    rng = np.random.default_rng(77)
+    # 1. Single-particle duplicated upper-tail collapse (50/200 tied at +25.0 > n_tail=40)
+    lw_collapse = np.concatenate([rng.normal(0.0, 0.2, 150), np.full(50, 25.0)])[None, :]
+    k_collapse = _compute_psis_pareto_k(lw_collapse)
+    assert math.isinf(k_collapse) and k_collapse > 0.0
+    with pytest.warns(UserWarning, match="pareto_k=inf > 0.7"):
+        _warn_if_high_pareto_k(k_collapse, "fit_subspace_cbm_gp", n_eval=200)
+
+    # 2. Fewer than 25 draws -> pareto_k is NaN and UserWarning fires explicitly
+    _, cbm_sub, ds, _, gf, spike = _make_compact_subspace_fixture()
+    mod = tt.RadiocarbonModel(cbm_sub, tt.SteadyProduction() + gf + spike)
+    ps = tt.ParameterSpace(
+        mod,
+        [
+            tt.ParamSpec("cbm.alpha", bijector="identity", prior_mean=0.0, prior_sd=0.8),
+            tt.ParamSpec("production.spike.fluence", bijector="exp", prior_mean=math.log(5.5), prior_sd=0.8),
+        ],
+    )
+    idata_tiny = az.from_dict(
+        {
+            "posterior": {
+                "cbm__alpha": rng.normal(0.0, 0.1, (1, 12, 2)),
+                "production__spike__fluence": np.exp(math.log(5.5) + rng.normal(0.0, 0.05, (1, 12))),
+            }
+        }
+    )
+    lin_op = tt.build_linearized_dct_operator(
+        cbm_sub, ds, t_start=gf.t_start, t_end=gf.t_end, n_grid=gf.n_grid
+    )
+    cfg_ex = tt.LinearMarginalConfig()
+    cfg_tn = eqx.tree_at(lambda c: c.dct_operator, cfg_ex, lin_op, is_leaf=lambda x: x is None)
+    with pytest.warns(UserWarning, match="too few draws for PSIS"):
+        _, diag_tiny = tt.reweight_exact_marginal(idata_tiny, mod, ds, ps, cfg_ex, cfg_tn)
+    assert math.isnan(float(diag_tiny["pareto_k"]))
+
+    # 3. Routine SMC (N=32 >= 25) reweights unresampled particles without spurious NaN
+    res_smc = tt.fit_subspace_cbm_gp(
+        mod,
+        ds,
+        ps,
+        sampler="smc",
+        reweight_exact=True,
+        num_particles=32,
+        num_mcmc_steps=2,
+        rng_key=jax.random.PRNGKey(2),
+    )
+    assert res_smc.pareto_k is not None
+    assert math.isfinite(float(res_smc.pareto_k)) and float(res_smc.pareto_k) < 0.7
+    assert float(res_smc.diagnostics["kish_ess_ratio"]) > 0.75
+    assert float(res_smc.diagnostics["is_ess_ratio"]) > 0.95
+    assert math.isfinite(float(res_smc.diagnostics["log_evidence_exact"]))
+
 
 
 

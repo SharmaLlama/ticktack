@@ -6,8 +6,8 @@
     "PLR0913",
     "PLR0915"
   ],
-  "max_complexity_violations": 281,
-  "max_src_code_lines": 22168,
+  "max_complexity_violations": 279,
+  "max_src_code_lines": 22261,
   "max_pr_changed_src_lines": 400,
   "max_function_code_lines": 80,
   "max_function_params": 8,
