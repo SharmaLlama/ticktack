@@ -1633,8 +1633,16 @@ def _filter_event_timestamps(
     ts_list: list[jax.Array],
     t_start_int: jax.Array,
     t_end_int: jax.Array,
+    *,
+    stop_grad: bool = False,
 ) -> jax.Array | None:
-    """Filter or mask solver step/jump timestamps strictly to ``(t_start_int, t_end_int)``."""
+    """Filter or mask solver step/jump timestamps strictly to ``(t_start_int, t_end_int)``.
+
+    When ``stop_grad=True`` (used for continuous ``step_ts`` knots), gradients
+    are stopped *after* the traced/concrete branch decision so eager and JIT
+    reverse-mode runs follow the identical masking path while preventing
+    ``PIDController`` from differentiating through internal mesh-clipping times.
+    """
     if not ts_list:
         return None
     flat = jnp.concatenate([jnp.atleast_1d(s).reshape(-1) for s in ts_list])
@@ -1661,7 +1669,8 @@ def _filter_event_timestamps(
         -jnp.inf,
         jnp.where(flat >= t_end_int, jnp.inf, flat),
     )
-    return jnp.sort(masked)
+    out = jnp.sort(masked)
+    return jax.lax.stop_gradient(out) if stop_grad else out
 
 
 def _collect_initial_time_and_events(
@@ -1707,13 +1716,21 @@ def _collect_initial_time_and_events(
 
     if t0_override is not None:
         t_start_int = jnp.asarray(t0_override, dtype=jnp.float64)
+        t_start_out = t_start_int
     else:
         t_start_int = jnp.min(jnp.stack([jnp.reshape(c, ()) for c in t0_candidates]))
+        # Automatic integration start is an auxiliary pre-onset epoch; stop its
+        # gradient so PIDController does not amplify d(t0)/dtheta across steps.
+        t_start_out = jax.lax.stop_gradient(t_start_int)
 
     t_end_int = jnp.maximum(jnp.reshape(latest_obs, ()), t_start_int + 1e-9)
-    step_ts = _filter_event_timestamps(step_list, t_start_int, t_end_int)
+    # Stop gradients on continuous step_ts (zero Leibniz boundary term), while
+    # keeping discontinuous jump_ts differentiable for boxcar/step-jump edges.
+    step_ts = _filter_event_timestamps(
+        step_list, t_start_int, t_end_int, stop_grad=True
+    )
     jump_ts = _filter_event_timestamps(jump_list, t_start_int, t_end_int)
-    return t_start_int, step_ts, jump_ts
+    return t_start_out, step_ts, jump_ts
 
 
 def _equilibrium_dy0_and_drift_anchor(
