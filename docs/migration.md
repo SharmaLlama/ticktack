@@ -13,7 +13,7 @@ Beyond dramatic speedups – eliminating the 2000-year numerical burn-in on ever
 | Load a published CBM | `cbm = ticktack.load_presaved_model("Brehm21"); cbm.compile()` | `cbm = tt.load_preset("Brehm21")` (immutable PyTree, no `.compile()`) |
 | Build a custom CBM | Imperative `Box(...)` + `Flow(...)` + `CarbonBoxModel(...)` | `Topology(...)` + `FixedCBM` / `BalancedCBM` / `ReversibleCBM` / `OpenCBM` or `EffectiveCBM(K=3)` |
 | Parametric Miyake + solar forcing | Ad hoc Python function `production(t, *args)` passed to `SingleFitter` | `tt.SteadyProduction() + tt.MiyakeSpike(...) + tt.HarmonicSolar.from_polar(...)` |
-| Non-parametric $Q(t)$ inversion | `sf.dc14_fine` control-point splines / `emcee` over annual knots | `tt.GPProduction` + `tt.linear_posterior` (closed-form Wiener filter) or `tt.GaussianField` / `tt.LogGaussianField(..., ito_corrected=True)` (`ticktack.fields`) |
+| Non-parametric $Q(t)$ inversion | `sf.dc14_fine` control-point splines / `emcee` over annual knots | `tt.GPProduction` + `tt.linear_posterior` (closed-form Wiener filter) or `tt.GaussianField` / `tt.LogGaussianField` (`ticktack.fields`, `ito_corrected=True` by default) |
 | Load a single CSV series | `SingleFitter(cbm, cbm_model="Brehm21"); sf.load_data("file.csv")` | `tt.TreeRingSeries.from_csv("file.csv", hemisphere="north", calendar="astronomical_ce", growth_season="april-september")` or `tt.load_bundled_series(key)` |
 | Load a multi-series event | `MultiFitter` list of `SingleFitter` objects | `tt.Dataset.from_csvs(...)` or `tt.load_bundled_event("775CE")` |
 | Forward $\Delta^{14}\text{C}$ simulation | `cbm.run_burn_in(...)` + `cbm.run_production(...)` | `model = tt.RadiocarbonModel(cbm, production); model.predict_d14c(dataset)` or `model.predict_fine(t_grid)` |

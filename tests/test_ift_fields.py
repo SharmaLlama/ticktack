@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jax
 import jax.numpy as jnp
+import jax.scipy.linalg as jsl
 from jax.test_util import check_grads
 import matplotlib
 import matplotlib.pyplot as plt
@@ -15,6 +16,7 @@ import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
+import optimistix as optx
 import pytest
 from tinygp import kernels as tk
 
@@ -33,6 +35,7 @@ from ticktack.fields import (
     apply_error_scale,
     build_dct_response_matrix,
     dct2,
+    dct_knot_variance,
     dct_laplacian_eigenvalues,
     error_scale,
     evidence_grid,
@@ -46,18 +49,21 @@ from ticktack.fields import (
     plot_field_draws,
     predict_field_d14c,
     select_gp_kernel,
+    stationary_cbm_spectral_cov,
 )
 from ticktack.fitting import fit_map
 from ticktack.likelihood import (
     LinearMarginalConfig,
     ParamSpec,
     ParameterSpace,
+    _reconstruct_initial_state_posterior,
     linear_posterior,
     marginal_log_likelihood,
 )
 from ticktack.linear import (
     LinearMarginal,
     hierarchical_offset_design,
+    project_causal_gp,
     stationary_cbm_gp_cov,
 )
 from ticktack.model import RadiocarbonModel
@@ -314,8 +320,8 @@ def test_gaussian_field_log_evidence_matches_dense_marginal_and_check_grads() ->
     )
     model = RadiocarbonModel(cbm, gf)
 
-    # 1. offset_mode="none": compare against dense N(d; ss_d14c, W_grid Sigma_eta W_grid^T + D)
-    lnz_none = log_evidence(model, ds, offset_mode="none")
+    # 1. offset_mode="none", zero initial state: compare against dense N(d; ss_d14c, W_grid Sigma_eta W_grid^T + D)
+    lnz_none = log_evidence(model, ds, offset_mode="none", include_field_initial_cov=False)
     cov_eta = gf.prior_covariance()
     cov_d_none = op.w_grid @ cov_eta @ op.w_grid.T + jnp.diag(ds.sigma_flat**2)
     r_none = ds.d14c_flat - op.ss_d14c
@@ -328,14 +334,26 @@ def test_gaussian_field_log_evidence_matches_dense_marginal_and_check_grads() ->
     )
     np.testing.assert_allclose(lnz_none, dense_lnz_none, rtol=1e-11, atol=1e-10)
 
-    # 2. offset_mode="hierarchical": compare against dense N(d; ss + X_off mu_off, ...)
+    # 2. offset_mode="hierarchical", zero initial state: compare against dense N(d; ss + X_off mu_off, ...)
     lnz_hier = log_evidence(
-        model, ds, offset_mode="hierarchical", global_offset_prior_sd=200.0, lab_offset_prior_sd=1.5
+        model,
+        ds,
+        offset_mode="hierarchical",
+        global_offset_prior_sd=200.0,
+        lab_offset_prior_sd=1.5,
+        include_field_initial_cov=False,
     )
     fit_res = fit_ift_field(
-        model, ds, offset_mode="hierarchical", global_offset_prior_sd=200.0, lab_offset_prior_sd=1.5
+        model,
+        ds,
+        offset_mode="hierarchical",
+        global_offset_prior_sd=200.0,
+        lab_offset_prior_sd=1.5,
+        include_field_initial_cov=False,
     )
     np.testing.assert_allclose(fit_res.log_evidence, lnz_hier, rtol=1e-12, atol=1e-11)
+    assert fit_res.initial_state_mean is None
+    assert fit_res.initial_state_sd is None
 
     x_off, mu_off, sd_off = hierarchical_offset_design(
         ds.series_indices,
@@ -383,7 +401,7 @@ def test_log_gaussian_field_positivity_ito_mean_and_nuts_agreement() -> None:
     cbm = load_preset("Guttler15")
     t_start, t_end, n_grid = 760.0, 790.0, 24
 
-    # Strict positivity even under extreme negative excitations
+    # Strict positivity even under extreme negative excitations (ito_corrected=True by default)
     extreme = LogGaussianField(
         jnp.full((n_grid,), -12.0, dtype=jnp.float64),
         t_start,
@@ -391,11 +409,12 @@ def test_log_gaussian_field_positivity_ito_mean_and_nuts_agreement() -> None:
         sigma=0.8,
         length_yr=4.0,
     )
+    assert extreme.ito_corrected is True
     q_ext = extreme.evaluate_q_grid()
     assert jnp.all(q_ext > 0.0)
     assert jnp.all(jnp.isfinite(q_ext))
 
-    # Itô variance correction preserves E[Q(t)] == q_mean
+    # Default Itô variance correction preserves E[Q(t)] == q_mean across interior & boundary knots
     lgf_ito = LogGaussianField(
         jnp.zeros((n_grid,), dtype=jnp.float64),
         t_start,
@@ -403,12 +422,44 @@ def test_log_gaussian_field_positivity_ito_mean_and_nuts_agreement() -> None:
         sigma=0.45,
         length_yr=4.0,
         q_mean=DEFAULT_Q_STD,
-        ito_corrected=True,
     )
+    assert lgf_ito.ito_corrected is True
     draws_prior = lgf_ito.sample_prior(jax.random.PRNGKey(42), n_samples=6000)
     np.testing.assert_allclose(
         jnp.mean(draws_prior, axis=0),
         jnp.full((n_grid,), DEFAULT_Q_STD),
+        rtol=0.03,
+        atol=0.03,
+    )
+
+    # Explicit ito_corrected=False is median-anchored at z=0 with E[Q] = q_mean * exp(0.5 * var)
+    lgf_uncorr = LogGaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        t_start,
+        t_end,
+        sigma=0.45,
+        length_yr=4.0,
+        q_mean=DEFAULT_Q_STD,
+        ito_corrected=False,
+    )
+    assert lgf_uncorr.ito_corrected is False
+    np.testing.assert_allclose(
+        lgf_uncorr.evaluate_q_grid(),
+        jnp.full((n_grid,), DEFAULT_Q_STD),
+        rtol=1e-14,
+        atol=1e-14,
+    )
+    knot_var = dct_knot_variance(lgf_uncorr.power_spectrum())
+    np.testing.assert_allclose(
+        lgf_ito.evaluate_q_grid(),
+        DEFAULT_Q_STD * jnp.exp(-0.5 * knot_var),
+        rtol=1e-14,
+        atol=1e-14,
+    )
+    draws_uncorr = lgf_uncorr.sample_prior(jax.random.PRNGKey(42), n_samples=6000)
+    np.testing.assert_allclose(
+        jnp.mean(draws_uncorr, axis=0),
+        DEFAULT_Q_STD * jnp.exp(0.5 * knot_var),
         rtol=0.03,
         atol=0.03,
     )
@@ -440,7 +491,9 @@ def test_log_gaussian_field_positivity_ito_mean_and_nuts_agreement() -> None:
 
     lgf_init = lgf_true.with_latent(jnp.zeros((n_grid,), dtype=jnp.float64))
     mdl = RadiocarbonModel(cbm, lgf_init)
-    fit_res = fit_ift_field(mdl, series, offset_mode="none", operator=op)
+    fit_res = fit_ift_field(
+        mdl, series, offset_mode="none", operator=op, include_field_initial_cov=False
+    )
 
     assert fit_res.converged
     assert fit_res.n_steps < 40
@@ -935,9 +988,14 @@ def test_log_evidence_extra_priors_invariant_to_linear_latent() -> None:
         ds_tas.series_indices, ds_tas.n_series, box_activity_ratios=op.box_activity_ratios, global_prior_sd=200.0, lab_prior_sd=1.5
     )
     x_dct = op.w_dct * jnp.sqrt(gf_0.power_spectrum())[None, :]
-    design_full = jnp.concatenate([w_spike, x_dct, x_off], axis=1)
-    mean_full = jnp.concatenate([jnp.array([6.4]), jnp.zeros((48,)), mu_off])
-    sd_full = jnp.concatenate([jnp.array([2.0]), jnp.ones((48,)), sd_off])
+    _, root_y0_0 = stationary_cbm_spectral_cov(
+        cbm.matrix_A(), cbm.production_vector(), gf_0.effective_kernel, alpha_unit=m_off.alpha_unit
+    )
+    x_init = op.init_state_basis @ root_y0_0
+    m_init = x_init.shape[1]
+    design_full = jnp.concatenate([w_spike, x_dct, x_off, x_init], axis=1)
+    mean_full = jnp.concatenate([jnp.array([6.4]), jnp.zeros((48,)), mu_off, jnp.zeros((m_init,))])
+    sd_full = jnp.concatenate([jnp.array([2.0]), jnp.ones((48,)), sd_off, jnp.ones((m_init,))])
     lm_exact = LinearMarginal(design_full, prior_mean=mean_full, prior_sd=sd_full, method="qr")
     lnz_closed = lm_exact.loglike(ds_tas.d14c_flat - op.ss_d14c, ds_tas.sigma_flat)
     np.testing.assert_allclose(lnz_off, lnz_closed, rtol=1e-10, atol=1e-9)
@@ -1131,7 +1189,7 @@ def test_spike_profiling_schur_evidence_and_log_gaussian_hessian() -> None:
         f_u = fit_ift_field(RadiocarbonModel(cbm, lgf_u), s_tas)
         return float(-(f_u.log_evidence + k_u.hyperprior_log_prob(u_vec)))
 
-    eps = 2e-4
+    eps = 1e-3
     h_fd = np.zeros((2, 2), dtype=np.float64)
     f0 = _lg_neg_post(u_opt)
     for i in range(2):
@@ -1192,9 +1250,23 @@ def test_optimize_spike_both_fields_and_dataset_digest_non_aliasing() -> None:
     )
     assert s_shifted.n_obs == s_tas.n_obs
     fit_tas = fit_ift_field(RadiocarbonModel(cbm, GaussianField(z0, 755.0, 805.0, sigma=0.3, length_yr=5.0)), s_tas)
+    assert fit_tas.initial_state_mean is not None
+    op_shifted = build_dct_response_matrix(cbm, s_shifted, 755.0, 805.0, 40, return_operator=True)
     np.testing.assert_allclose(
         predict_field_d14c(fit_tas, s_shifted, include_offsets=False),
-        predict_field_d14c(fit_tas.model, s_shifted, include_offsets=False),
+        predict_field_d14c(fit_tas.model, s_shifted, include_offsets=False)
+        + op_shifted.init_state_basis @ fit_tas.initial_state_mean,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+    fit_tas_noinit = fit_ift_field(
+        RadiocarbonModel(cbm, GaussianField(z0, 755.0, 805.0, sigma=0.3, length_yr=5.0)),
+        s_tas,
+        include_field_initial_cov=False,
+    )
+    np.testing.assert_allclose(
+        predict_field_d14c(fit_tas_noinit, s_shifted, include_offsets=False),
+        predict_field_d14c(fit_tas_noinit.model, s_shifted, include_offsets=False),
         rtol=1e-12,
         atol=1e-12,
     )
@@ -1441,6 +1513,935 @@ def test_spike_on_marginalized_gp_fit_nuts_and_select_kernel() -> None:
     assert lp_gp.q_fine_mean is not None and lp_gp.q_fine_std is not None
     assert jnp.all(jnp.isfinite(lp_gp.q_fine_mean)) and jnp.all(lp_gp.q_fine_std > 0.0)
     assert float(jnp.max(lp_gp.q_fine_mean)) > DEFAULT_Q_STD + 2.5
+    jax.clear_caches()
+
+
+def test_fit_ift_field_optimize_spike_woodbury_matches_dense_mvn() -> None:
+    """O(N_obs K) QR square-root Woodbury varpro matches dense N_obs x N_obs MVN when N_obs > K."""
+    cbm = load_preset("Guttler15")
+    t_start_g, t_end_g, n_grid = 755.0, 795.0, 20
+    years = np.arange(762.0, 787.0, 1.0)
+    rng = np.random.default_rng(7751)
+
+    true_spike = MiyakeSpike(t_start=774.45, duration=0.45, fluence=5.8, profile="boxcar")
+    true_field = GaussianField(
+        jax.random.normal(jax.random.PRNGKey(7752), (n_grid,), dtype=jnp.float64),
+        t_start_g,
+        t_end_g,
+        sigma=0.28,
+        length_yr=5.5,
+    )
+    true_model = RadiocarbonModel(cbm, true_spike + true_field, ExactLinearSolver())
+
+    series_list = []
+    for idx, (hemi, off, sig) in enumerate(
+        (("north", 2.4, 1.1), ("north", 1.1, 1.3), ("south", 1.9, 1.2))
+    ):
+        proto = TreeRingSeries(
+            years, np.zeros_like(years), np.full_like(years, sig), hemisphere=hemi, name=f"S{idx}"
+        )
+        d_clean = np.asarray(true_model.predict_d14c(proto))
+        series_list.append(
+            TreeRingSeries(
+                years,
+                d_clean + off + rng.normal(0.0, sig, size=years.size),
+                np.full_like(years, sig),
+                hemisphere=hemi,
+                name=f"S{idx}",
+            )
+        )
+    ds = Dataset(tuple(series_list), name="tall_spike_varpro")
+    # 3 series x 25 rings = 75 observations > n_grid (20) + k_off (4) + n_boxes (11) = 35
+    k_nuis = 1 + ds.n_series + cbm.n_boxes
+    assert ds.n_obs == 75
+    assert ds.n_obs > n_grid + k_nuis
+
+    op = build_dct_response_matrix(cbm, ds, t_start_g, t_end_g, n_grid, return_operator=True)
+    sp_init = MiyakeSpike(t_start=774.2, duration=0.35, fluence=4.8, profile="boxcar")
+    gf_init = GaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        t_start_g,
+        t_end_g,
+        sigma=0.28,
+        length_yr=5.5,
+    )
+    model_init = RadiocarbonModel(cbm, sp_init + gf_init, ExactLinearSolver())
+    sp_priors = {
+        "t_start": dist.Normal(774.5, 1.5),
+        "duration": dist.LogNormal(math.log(0.45), 0.7),
+        "fluence": dist.LogNormal(math.log(5.5), 0.7),
+    }
+
+    fit_res = fit_ift_field(
+        model_init,
+        ds,
+        offset_mode="hierarchical",
+        global_offset_prior_sd=5.0,
+        lab_offset_prior_sd=1.5,
+        operator=op,
+        optimize_spike=True,
+        spike_priors=sp_priors,
+        max_steps=100,
+        tol=1e-14,
+    )
+    assert fit_res.converged
+
+    # Build independent dense N_obs x N_obs MVN marginal covariance reference
+    inv_sig = 1.0 / ds.sigma_flat
+    x_off, mu_off, sd_off = hierarchical_offset_design(
+        ds.series_indices,
+        ds.n_series,
+        box_activity_ratios=op.box_activity_ratios,
+        global_prior_sd=5.0,
+        lab_prior_sd=1.5,
+    )
+    _, root_y0 = stationary_cbm_spectral_cov(
+        cbm.matrix_A(),
+        cbm.production_vector(),
+        gf_init.effective_kernel,
+        alpha_unit=model_init.alpha_unit,
+    )
+    u_off = (inv_sig[:, None] * x_off) * sd_off[None, :]
+    u_init = (inv_sig[:, None] * op.init_state_basis) @ root_y0
+    u_nuis = jnp.concatenate([u_off, u_init], axis=1)
+    j_raw = inv_sig[:, None] * (op.w_dct * jnp.sqrt(jnp.maximum(gf_init.power_spectrum(), 0.0))[None, :])
+    u_all = jnp.concatenate([u_nuis, j_raw], axis=1)
+    assert u_all.shape == (ds.n_obs, n_grid + k_nuis)
+
+    cov_dense = jnp.eye(ds.n_obs, dtype=jnp.float64) + u_all @ u_all.T
+    chol_dense = jnp.linalg.cholesky(cov_dense)
+    sign_c, logdet_c = jnp.linalg.slogdet(cov_dense)
+    assert float(sign_c) > 0.0
+    log_norm_d = 0.5 * ds.n_obs * math.log(2.0 * math.pi) + jnp.sum(jnp.log(ds.sigma_flat))
+    nuis_shift = x_off @ mu_off
+
+    sp_prior_means = jnp.array([774.5, math.log(0.45), math.log(5.5)], dtype=jnp.float64)
+    sp_prior_sds = jnp.array([1.5, 0.7, 0.7], dtype=jnp.float64)
+
+    def _raw_resid(u_sp: jax.Array) -> jax.Array:
+        sp_cur = MiyakeSpike(
+            t_start=u_sp[0],
+            duration=jnp.exp(u_sp[1]),
+            fluence=jnp.exp(u_sp[2]),
+            profile="boxcar",
+        )
+        m_sp = RadiocarbonModel(cbm, sp_cur, ExactLinearSolver())
+        d_sp = m_sp.predict_d14c(ds)
+        return inv_sig * (d_sp + nuis_shift - ds.d14c_flat)
+
+    def _dense_varpro_res(u_sp: jax.Array, _args: object) -> jax.Array:
+        r_raw = _raw_resid(u_sp)
+        r_marg = jsl.solve_triangular(chol_dense, r_raw, lower=True)
+        sp_pen = (u_sp - sp_prior_means) / sp_prior_sds
+        return jnp.concatenate([r_marg, sp_pen], axis=0)
+
+    u_sp0 = jnp.array([774.2, math.log(0.35), math.log(4.8)], dtype=jnp.float64)
+    sol_dense = optx.least_squares(
+        _dense_varpro_res,
+        optx.LevenbergMarquardt(rtol=1e-12, atol=1e-12),
+        u_sp0,
+        max_steps=80,
+        throw=False,
+    )
+    assert sol_dense.result == optx.RESULTS.successful
+    u_sp_dense = sol_dense.value
+
+    grad_dense = jax.jit(
+        jax.grad(lambda u_in: 0.5 * jnp.sum(jnp.square(_dense_varpro_res(u_in, None))))
+    )
+
+    def _dense_hess_at(u_pt: jax.Array) -> jax.Array:
+        eps_h = 1e-6
+        cols = []
+        for j_idx in range(3):
+            ej = jnp.zeros((3,), dtype=jnp.float64).at[j_idx].set(eps_h)
+            cols.append((grad_dense(u_pt + ej) - grad_dense(u_pt - ej)) / (2.0 * eps_h))
+        h_m = jnp.stack(cols, axis=1)
+        return 0.5 * (h_m + h_m.T)
+
+    # Polish dense MAP to machine precision (matching fit_ift_field's 2-step Newton polish)
+    for _ in range(2):
+        u_sp_dense = u_sp_dense - jnp.linalg.solve(_dense_hess_at(u_sp_dense), grad_dense(u_sp_dense))
+
+    # Verify QR square-root Woodbury quadratic form matches dense MVN quadratic form
+    k_all = u_all.shape[1]
+    eye_k = jnp.eye(k_all, dtype=jnp.float64)
+    _, r_upper = jnp.linalg.qr(jnp.concatenate([u_all, eye_k], axis=0), mode="reduced")
+    signs = jnp.where(jnp.diag(r_upper) >= 0.0, 1.0, -1.0)
+    chol_k = (signs[:, None] * r_upper).T
+    l_inv_t = jsl.solve_triangular(chol_k, eye_k, lower=True).T
+    w_mat = u_all @ l_inv_t
+    p_right = jsl.solve_triangular(eye_k + l_inv_t, w_mat.T, lower=False)
+
+    for u_eval in (u_sp0, u_sp_dense):
+        r_raw = _raw_resid(u_eval)
+        r_qr = r_raw - w_mat @ (p_right @ r_raw)
+        q_qr = r_qr @ r_qr
+        q_dense = r_raw @ jsl.cho_solve((chol_dense, True), r_raw)
+        np.testing.assert_allclose(q_qr, q_dense, rtol=1e-10, atol=1e-10)
+
+    # Compare MAP spike parameters
+    sp_opt_fit = jnp.array(
+        [
+            fit_res.model.get("production.spike.t_start"),
+            fit_res.model.get("production.spike.duration"),
+            fit_res.model.get("production.spike.fluence"),
+        ],
+        dtype=jnp.float64,
+    )
+    sp_opt_dense = jnp.array(
+        [u_sp_dense[0], jnp.exp(u_sp_dense[1]), jnp.exp(u_sp_dense[2])], dtype=jnp.float64
+    )
+    np.testing.assert_allclose(sp_opt_fit, sp_opt_dense, rtol=1e-10, atol=1e-10)
+
+    # Compare exact dense marginal log-evidence including Laplace spike_occam_term
+    r_opt = _raw_resid(u_sp_dense)
+    q_opt_dense = r_opt @ jsl.cho_solve((chol_dense, True), r_opt)
+    ln_z_cond_dense = -0.5 * q_opt_dense - 0.5 * logdet_c - log_norm_d
+    h_sp_dense = _dense_hess_at(u_sp_dense)
+    _, logdet_h_dense = jnp.linalg.slogdet(h_sp_dense)
+    lp_sp_dense = jnp.sum(
+        -0.5 * jnp.square((u_sp_dense - sp_prior_means) / sp_prior_sds)
+        - jnp.log(sp_prior_sds)
+        - 0.5 * math.log(2.0 * math.pi)
+    )
+    spike_occam_dense = lp_sp_dense + 1.5 * math.log(2.0 * math.pi) - 0.5 * logdet_h_dense
+    ln_z_total_dense = ln_z_cond_dense + spike_occam_dense
+    np.testing.assert_allclose(fit_res.log_evidence, ln_z_total_dense, rtol=1e-10, atol=1e-10)
+    jax.clear_caches()
+
+
+def test_stationary_cbm_spectral_cov_and_initial_state_posteriors() -> None:
+    """stationary_cbm_spectral_cov, default include_field_initial_cov=True, and initial-state posteriors."""
+    cbm = load_preset("Brehm21")
+    ds = _make_two_hemisphere_dataset(cbm, seed=19)
+    a_mat = cbm.matrix_A()
+    b_vec = cbm.production_vector()
+
+    # 1. MaternSpectrum(order=2) matches stationary_cbm_gp_cov(Matern32) to < 1e-10
+    sig, scale = 0.42, 12.0
+    m32_spec = MaternSpectrum(sigma=sig, length_yr=scale / math.sqrt(3.0), order=2.0)
+    m32_tinygp = tk.quasisep.Matern32(scale=scale, sigma=sig)
+    alpha = float(RadiocarbonModel(cbm, SteadyProduction()).alpha_unit)
+    sig_y0_spec, root_y0_spec = stationary_cbm_spectral_cov(
+        a_mat, b_vec, m32_spec, alpha_unit=alpha
+    )
+    sig_y0_gp, _ = stationary_cbm_gp_cov(a_mat, b_vec, m32_tinygp, alpha_unit=alpha)
+    np.testing.assert_allclose(sig_y0_spec, sig_y0_gp, rtol=1e-10, atol=1e-12)
+    np.testing.assert_allclose(root_y0_spec @ root_y0_spec.T, sig_y0_spec, rtol=1e-9, atol=1e-9)
+
+    # All elementary SpectralKernel classes + SumSpectrum produce finite PSD covariances
+    for kern in (
+        SquaredExpSpectrum(sigma=0.35, length_yr=8.0),
+        QuasiPeriodicSpectrum(sigma=0.25, period_yr=11.0, quality=4.0),
+        CorrelatedFieldSpectrum(sigma=0.30, slope=-2.2),
+        m32_spec + QuasiPeriodicSpectrum(sigma=0.20, period_yr=11.0, quality=5.0),
+    ):
+        s_k, r_k = stationary_cbm_spectral_cov(a_mat, b_vec, kern, alpha_unit=alpha)
+        assert s_k.shape == (cbm.n_boxes, cbm.n_boxes)
+        assert jnp.all(jnp.isfinite(s_k)) and jnp.all(jnp.isfinite(r_k))
+        evals_k = jnp.linalg.eigvalsh(s_k)
+        assert float(jnp.min(evals_k)) >= -1e-12 * max(float(jnp.max(evals_k)), 1.0)
+        np.testing.assert_allclose(r_k @ r_k.T, s_k, rtol=1e-9, atol=1e-9)
+
+    # 2. Default include_field_initial_cov=True matches dense MVN & marginal_log_likelihood
+    t_start, t_end, n_grid = 755.0, 792.0, 44
+    op = build_dct_response_matrix(cbm, ds, t_start, t_end, n_grid, return_operator=True)
+    gf = GaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        t_start,
+        t_end,
+        kernel=m32_spec,
+        zero_mode=False,
+    )
+    model = RadiocarbonModel(cbm, gf, ExactLinearSolver())
+    cfg = LinearMarginalConfig(
+        offset_mode="hierarchical",
+        global_prior_sd=200.0,
+        lab_prior_sd=1.5,
+        marginalize_field=True,
+        include_field_initial_cov=True,
+    )
+
+    lnz_ift = log_evidence(model, ds, operator=op)
+    lnz_lik = marginal_log_likelihood(model, ds, cfg)
+    fit_res = fit_ift_field(model, ds, operator=op)
+    assert fit_res.include_field_initial_cov is True
+    assert fit_res.prehistory_root_y0 is not None
+    # Passing a SpectralKernel directly to prehistory_kernel also works identically
+    lnz_direct = log_evidence(model, ds, operator=op, prehistory_kernel=m32_spec)
+
+    x_off, mu_off, sd_off = hierarchical_offset_design(
+        ds.series_indices,
+        ds.n_series,
+        box_activity_ratios=op.box_activity_ratios,
+        global_prior_sd=200.0,
+        lab_prior_sd=1.5,
+    )
+    cov_d = (
+        op.w_grid @ gf.prior_covariance() @ op.w_grid.T
+        + op.init_state_basis @ sig_y0_spec @ op.init_state_basis.T
+        + (x_off * (sd_off**2)[None, :]) @ x_off.T
+        + jnp.diag(ds.sigma_flat**2)
+    )
+    r_d = ds.d14c_flat - op.ss_d14c - x_off @ mu_off
+    sign_c, logdet_c = jnp.linalg.slogdet(cov_d)
+    assert float(sign_c) > 0.0
+    dense_lnz = -0.5 * (
+        r_d @ jnp.linalg.solve(cov_d, r_d) + logdet_c + ds.n_obs * math.log(2.0 * math.pi)
+    )
+    np.testing.assert_allclose(lnz_ift, dense_lnz, rtol=1e-11, atol=1e-10)
+    np.testing.assert_allclose(fit_res.log_evidence, dense_lnz, rtol=1e-11, atol=1e-10)
+    np.testing.assert_allclose(lnz_lik, dense_lnz, rtol=1e-11, atol=1e-10)
+    np.testing.assert_allclose(lnz_direct, dense_lnz, rtol=1e-11, atol=1e-10)
+
+    # 3. Initial-state posterior mean & SD match linear_posterior AND dense Schur complement
+    t_fine = jnp.linspace(760.0, 790.0, 40, dtype=jnp.float64)
+    lp_res = linear_posterior(
+        model, ds, cfg, rng_key=jax.random.PRNGKey(71), n_draws=12, t_fine=t_fine
+    )
+    lp_nofine = linear_posterior(model, ds, cfg)
+    assert fit_res.initial_state_mean is not None
+    assert fit_res.initial_state_sd is not None
+    assert fit_res.initial_state_d14c_mean is not None
+    assert fit_res.initial_state_d14c_sd is not None
+    assert lp_res.initial_state_mean is not None
+    assert lp_res.initial_state_sd is not None
+    assert lp_res.initial_state_d14c_mean is not None
+    assert lp_res.initial_state_d14c_sd is not None
+    assert lp_nofine.initial_state_mean is not None
+
+    # Dense Schur complement for posterior of delta_y0 | d using effective root prior cov:
+    # mean = Sigma_{y0} H_y0^T cov_d^{-1} r_d
+    # cov  = Sigma_{y0} - Sigma_{y0} H_y0^T cov_d^{-1} H_y0 Sigma_{y0}
+    sig_y0_eff = root_y0_spec @ root_y0_spec.T
+    cov_d_eff = (
+        op.w_grid @ gf.prior_covariance() @ op.w_grid.T
+        + op.init_state_basis @ sig_y0_eff @ op.init_state_basis.T
+        + (x_off * (sd_off**2)[None, :]) @ x_off.T
+        + jnp.diag(ds.sigma_flat**2)
+    )
+    h_y0 = op.init_state_basis
+    cross_cov = sig_y0_eff @ h_y0.T
+    dense_dy0_mean = cross_cov @ jnp.linalg.solve(cov_d_eff, r_d)
+    dense_dy0_cov = sig_y0_eff - cross_cov @ jnp.linalg.solve(cov_d_eff, cross_cov.T)
+    dense_dy0_sd = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_dy0_cov + dense_dy0_cov.T)), 0.0))
+
+    y_ss = cbm.steady_state_c14(q_std=model.q_std, alpha_unit=model.alpha_unit)
+    y_trop = jnp.sum(y_ss[jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)])
+    scale_boxes = 1000.0 / (y_trop * cbm.relative_reservoir_masses())
+    dense_d14c_mean = scale_boxes * dense_dy0_mean
+    dense_d14c_sd = scale_boxes * dense_dy0_sd
+
+    np.testing.assert_allclose(fit_res.initial_state_mean, dense_dy0_mean, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(fit_res.initial_state_sd, dense_dy0_sd, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(fit_res.initial_state_d14c_mean, dense_d14c_mean, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(fit_res.initial_state_d14c_sd, dense_d14c_sd, rtol=1e-10, atol=1e-10)
+
+    np.testing.assert_allclose(fit_res.initial_state_mean, lp_res.initial_state_mean, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(fit_res.initial_state_sd, lp_res.initial_state_sd, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(fit_res.initial_state_d14c_mean, lp_res.initial_state_d14c_mean, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(fit_res.initial_state_d14c_sd, lp_res.initial_state_d14c_sd, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(lp_nofine.initial_state_mean, lp_res.initial_state_mean, rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(fit_res.d14c_pred, lp_res.ring_pred_mean, rtol=1e-10, atol=1e-10)
+
+    # Disabling include_field_initial_cov sets all initial_state_* fields to None
+    cfg_noinit = LinearMarginalConfig(
+        offset_mode="hierarchical", marginalize_field=True, include_field_initial_cov=False
+    )
+    lp_noinit = linear_posterior(model, ds, cfg_noinit)
+    assert lp_noinit.initial_state_mean is None
+    assert lp_noinit.initial_state_sd is None
+    assert lp_noinit.initial_state_d14c_mean is None
+    assert lp_noinit.initial_state_d14c_sd is None
+
+    # GPProduction also populates LinearPosteriorResult initial_state_*
+    m_gp = RadiocarbonModel(
+        cbm, SteadyProduction() + GPProduction(m32_tinygp, n_modes=32, pad_years=10.0), ExactLinearSolver()
+    )
+    lp_gp = linear_posterior(m_gp, ds, LinearMarginalConfig(include_gp_initial_cov=True))
+    assert lp_gp.initial_state_mean is not None and lp_gp.initial_state_mean.shape == (cbm.n_boxes,)
+    assert lp_gp.initial_state_sd is not None and jnp.all(lp_gp.initial_state_sd >= 0.0)
+    assert lp_gp.initial_state_d14c_mean is not None and lp_gp.initial_state_d14c_sd is not None
+    lp_gp_noinit = linear_posterior(m_gp, ds, LinearMarginalConfig(include_gp_initial_cov=False))
+    assert lp_gp_noinit.initial_state_mean is None
+
+    # laplace_samples propagates initial-state draws matching fit_res moments
+    draws = laplace_samples(fit_res, ds, n_samples=1500, rng_key=jax.random.PRNGKey(72))
+    assert "initial_state" in draws and "initial_state_d14c" in draws and "d14c_pred" in draws
+    assert draws["initial_state"].shape == (1500, cbm.n_boxes)
+    np.testing.assert_allclose(
+        jnp.mean(draws["d14c_pred"], axis=0), fit_res.d14c_pred, rtol=0.05, atol=0.15
+    )
+    np.testing.assert_allclose(
+        jnp.std(draws["initial_state_d14c"], axis=0),
+        fit_res.initial_state_d14c_sd,
+        rtol=0.10,
+        atol=0.15,
+    )
+
+
+def test_linear_posterior_multi_term_initial_state_anchors() -> None:
+    """Multi-term initial-state posteriors return None when anchors differ and match dense Schur when anchors coincide."""
+    cbm = load_preset("Brehm21")
+    ds = _make_two_hemisphere_dataset(cbm, seed=23)
+    a_mat = cbm.matrix_A()
+    b_vec = cbm.production_vector()
+    alpha = float(RadiocarbonModel(cbm, SteadyProduction()).alpha_unit)
+
+    y_ss = cbm.steady_state_c14(q_std=DEFAULT_Q_STD, alpha_unit=alpha)
+    y_trop = jnp.sum(y_ss[jnp.asarray(cbm.topology.trop_box_indices, dtype=jnp.int32)])
+    m_rel = cbm.relative_reservoir_masses()
+    scale_boxes = 1000.0 / (y_trop * m_rel)
+
+    t0_obs = float(min(jnp.min(s.sub_t_starts) for s in ds.series))
+    m32_spec = MaternSpectrum(sigma=0.35, length_yr=10.0 / math.sqrt(3.0), order=2.0)
+    se_spec = SquaredExpSpectrum(sigma=0.25, length_yr=6.0)
+    m32_tinygp = tk.quasisep.Matern32(scale=10.0, sigma=0.35)
+
+    _, root_m32 = stationary_cbm_spectral_cov(a_mat, b_vec, m32_spec, alpha_unit=alpha)
+    _, root_se = stationary_cbm_spectral_cov(a_mat, b_vec, se_spec, alpha_unit=alpha)
+    sig_m32 = root_m32 @ root_m32.T
+    sig_se = root_se @ root_se.T
+
+    n_grid = 36
+    t_end = 792.0
+    gf_early = GaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        755.0,
+        t_end,
+        kernel=m32_spec,
+        zero_mode=False,
+    )
+    gf_earlier = GaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        750.0,
+        t_end,
+        kernel=se_spec,
+        zero_mode=False,
+    )
+    gf_same = GaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        755.0,
+        t_end,
+        kernel=se_spec,
+        zero_mode=False,
+    )
+    gf_at_t0 = GaussianField(
+        jnp.zeros((n_grid,), dtype=jnp.float64),
+        t0_obs,
+        t_end,
+        kernel=se_spec,
+        zero_mode=False,
+    )
+    gp_term = GPProduction(m32_tinygp, n_modes=28, pad_years=10.0)
+
+    cfg = LinearMarginalConfig(
+        offset_mode="hierarchical",
+        global_prior_sd=200.0,
+        lab_prior_sd=1.5,
+        marginalize_gp=True,
+        marginalize_field=True,
+        include_gp_initial_cov=True,
+        include_field_initial_cov=True,
+    )
+
+    op_755 = build_dct_response_matrix(cbm, ds, 755.0, t_end, n_grid, return_operator=True)
+    op_750 = build_dct_response_matrix(cbm, ds, 750.0, t_end, n_grid, return_operator=True)
+    op_t0 = build_dct_response_matrix(cbm, ds, t0_obs, t_end, n_grid, return_operator=True)
+
+    # Independent offset and GP projection pieces for dense MVN / Schur checks
+    x_off, mu_off, sd_off = hierarchical_offset_design(
+        ds.series_indices,
+        ds.n_series,
+        box_activity_ratios=op_755.box_activity_ratios,
+        global_prior_sd=200.0,
+        lab_prior_sd=1.5,
+    )
+    cov_off = (x_off * (sd_off**2)[None, :]) @ x_off.T
+    cov_noise = jnp.diag(ds.sigma_flat**2)
+    r_d = ds.d14c_flat - op_755.ss_d14c - x_off @ mu_off
+
+    # Build padded observation windows for independent project_causal_gp reference
+    m_max = max(s.sub_t_starts.shape[1] for s in ds.series)
+    ts_parts, te_parts, w_parts, box_parts = [], [], [], []
+    for s in ds.series:
+        n_s, m_s = s.sub_t_starts.shape
+        w_s = jnp.broadcast_to(jnp.asarray(s.seasonal_weights.weights, dtype=jnp.float64), (n_s, m_s))
+        if m_s < m_max:
+            pad_k = m_max - m_s
+            ts_parts.append(jnp.concatenate([s.sub_t_starts, jnp.repeat(s.sub_t_starts[:, -1:], pad_k, axis=1)], axis=1))
+            te_parts.append(jnp.concatenate([s.sub_t_ends, jnp.repeat(s.sub_t_ends[:, -1:], pad_k, axis=1)], axis=1))
+            w_parts.append(jnp.concatenate([w_s, jnp.zeros((n_s, pad_k), dtype=jnp.float64)], axis=1))
+        else:
+            ts_parts.append(s.sub_t_starts)
+            te_parts.append(s.sub_t_ends)
+            w_parts.append(w_s)
+        box_idx = cbm.box_index("Troposphere", hemisphere=s.hemisphere)
+        box_parts.extend([box_idx] * n_s)
+    box_arr = jnp.asarray(box_parts, dtype=jnp.int32)
+    obs_scale_flat = 1000.0 / (y_trop * m_rel[box_arr])
+    proj_gp = project_causal_gp(
+        A=a_mat,
+        b=b_vec,
+        t_starts=jnp.concatenate(ts_parts, axis=0),
+        t_ends=jnp.concatenate(te_parts, axis=0),
+        sub_weights=jnp.concatenate(w_parts, axis=0),
+        pad=gp_term.pad_years,
+        n_modes=gp_term.n_modes,
+        kernel=gp_term.kernel,
+        alpha_unit=alpha,
+        box_indices=box_arr,
+        obs_scale=obs_scale_flat,
+        include_initial_cov=True,
+        cbm=cbm,
+    )
+    assert proj_gp.spectral_weights is not None and proj_gp.anchor_cov_root is not None
+    cov_gp_modes = (
+        proj_gp.causal_basis_design * proj_gp.spectral_weights[None, :]
+    ) @ proj_gp.causal_basis_design.T
+    sig_gp_anc = proj_gp.anchor_cov_root @ proj_gp.anchor_cov_root.T
+    cov_gp_init = proj_gp.hom_design_anchor @ sig_gp_anc @ proj_gp.hom_design_anchor.T
+
+    # 1. Differing anchors: GPProduction (t_anchor = t0_obs) + GaussianField (t_start = 755.0)
+    m_gp_gf_diff = RadiocarbonModel(cbm, SteadyProduction() + gp_term + gf_early, ExactLinearSolver())
+    lp_gp_gf_diff = linear_posterior(m_gp_gf_diff, ds, cfg)
+    assert lp_gp_gf_diff.initial_state_mean is None
+    assert lp_gp_gf_diff.initial_state_sd is None
+    assert lp_gp_gf_diff.initial_state_d14c_mean is None
+    assert lp_gp_gf_diff.initial_state_d14c_sd is None
+    cov_sig_diff = (
+        cov_gp_modes
+        + cov_gp_init
+        + op_755.w_grid @ gf_early.prior_covariance() @ op_755.w_grid.T
+        + op_755.init_state_basis @ sig_m32 @ op_755.init_state_basis.T
+        + cov_off
+    )
+    dense_pred_diff = op_755.ss_d14c + x_off @ mu_off + cov_sig_diff @ jnp.linalg.solve(cov_sig_diff + cov_noise, r_d)
+    np.testing.assert_allclose(lp_gp_gf_diff.ring_pred_mean, dense_pred_diff, rtol=1e-10, atol=1e-10)
+
+    # 2. Differing anchors: two GaussianFields (t_start = 750.0 vs 755.0)
+    m_two_gf_diff = RadiocarbonModel(cbm, gf_earlier + gf_early, ExactLinearSolver())
+    lp_two_gf_diff = linear_posterior(m_two_gf_diff, ds, cfg)
+    assert lp_two_gf_diff.initial_state_mean is None
+    assert lp_two_gf_diff.initial_state_sd is None
+    assert lp_two_gf_diff.initial_state_d14c_mean is None
+    assert lp_two_gf_diff.initial_state_d14c_sd is None
+    cov_sig_two_diff = (
+        op_750.w_grid @ gf_earlier.prior_covariance() @ op_750.w_grid.T
+        + op_750.init_state_basis @ sig_se @ op_750.init_state_basis.T
+        + op_755.w_grid @ gf_early.prior_covariance() @ op_755.w_grid.T
+        + op_755.init_state_basis @ sig_m32 @ op_755.init_state_basis.T
+        + cov_off
+    )
+    dense_pred_two_diff = op_755.ss_d14c + x_off @ mu_off + cov_sig_two_diff @ jnp.linalg.solve(cov_sig_two_diff + cov_noise, r_d)
+    np.testing.assert_allclose(lp_two_gf_diff.ring_pred_mean, dense_pred_two_diff, rtol=1e-10, atol=1e-10)
+
+    # 3. Matching anchors: two GaussianFields sharing t_start = 755.0 -> matches dense Schur sum
+    m_two_gf_same = RadiocarbonModel(cbm, gf_early + gf_same, ExactLinearSolver())
+    lp_two_gf_same = linear_posterior(m_two_gf_same, ds, cfg)
+    assert lp_two_gf_same.initial_state_mean is not None
+    assert lp_two_gf_same.initial_state_sd is not None
+    assert lp_two_gf_same.initial_state_d14c_mean is not None
+    assert lp_two_gf_same.initial_state_d14c_sd is not None
+    sig_tot_gf = sig_m32 + sig_se
+    cov_d_same = (
+        op_755.w_grid @ (gf_early.prior_covariance() + gf_same.prior_covariance()) @ op_755.w_grid.T
+        + op_755.init_state_basis @ sig_tot_gf @ op_755.init_state_basis.T
+        + cov_off
+        + cov_noise
+    )
+    cross_gf = sig_tot_gf @ op_755.init_state_basis.T
+    dense_mean_gf = cross_gf @ jnp.linalg.solve(cov_d_same, r_d)
+    dense_cov_gf = sig_tot_gf - cross_gf @ jnp.linalg.solve(cov_d_same, cross_gf.T)
+    dense_sd_gf = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_gf + dense_cov_gf.T)), 0.0))
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_mean, dense_mean_gf, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_sd, dense_sd_gf, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_d14c_mean, scale_boxes * dense_mean_gf, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_two_gf_same.initial_state_d14c_sd, scale_boxes * dense_sd_gf, rtol=1e-8, atol=1e-9)
+
+    # Independent full GP initial-state map R_gp(t0) = [Y_SS(t0) sqrt(S_k), anchor_cov_root]
+    dt_gp_anc = float(proj_gp.t_anchor - proj_gp.a)
+    a_np = np.asarray(a_mat, dtype=np.float64)
+    b_eff_np = alpha * np.asarray(b_vec, dtype=np.float64)
+    eye_np = np.eye(cbm.n_boxes, dtype=np.complex128)
+    om_gp_np = np.asarray(proj_gp.omegas, dtype=np.float64)
+    u_cols, v_cols = [], []
+    for w_j in om_gp_np:
+        r_j = np.linalg.solve(1j * w_j * eye_np - a_np, b_eff_np)
+        u_cols.append(np.real(r_j))
+        v_cols.append(np.imag(r_j))
+    u_gp_np = np.column_stack(u_cols)
+    v_gp_np = np.column_stack(v_cols)
+    expm_dt_np = np.asarray(jsl.expm(a_mat * dt_gp_anc), dtype=np.float64)
+    y_ss_gp_t0 = (
+        v_gp_np * np.cos(om_gp_np * dt_gp_anc)[None, :]
+        + u_gp_np * np.sin(om_gp_np * dt_gp_anc)[None, :]
+        - expm_dt_np @ v_gp_np
+    ) / math.sqrt(float(proj_gp.half_length))
+    r_gp_full = jnp.concatenate(
+        [
+            jnp.asarray(y_ss_gp_t0, dtype=jnp.float64)
+            * jnp.sqrt(jnp.maximum(proj_gp.spectral_weights, 0.0))[None, :],
+            proj_gp.anchor_cov_root,
+        ],
+        axis=1,
+    )
+    sig_gp_full = r_gp_full @ r_gp_full.T
+    assert proj_gp.whitened_design is not None
+
+    # 4. Matching anchors: GPProduction + GaussianField with gf.t_start == t0_obs -> matches dense Schur sum
+    m_gp_gf_same = RadiocarbonModel(cbm, SteadyProduction() + gp_term + gf_at_t0, ExactLinearSolver())
+    lp_gp_gf_same = linear_posterior(m_gp_gf_same, ds, cfg)
+    assert lp_gp_gf_same.initial_state_mean is not None
+    assert lp_gp_gf_same.initial_state_sd is not None
+    sig_tot_mix = sig_gp_full + sig_se
+    cov_d_mix = (
+        cov_gp_modes
+        + cov_gp_init
+        + op_t0.w_grid @ gf_at_t0.prior_covariance() @ op_t0.w_grid.T
+        + op_t0.init_state_basis @ sig_se @ op_t0.init_state_basis.T
+        + cov_off
+        + cov_noise
+    )
+    cross_mix = r_gp_full @ proj_gp.whitened_design.T + sig_se @ op_t0.init_state_basis.T
+    dense_mean_mix = cross_mix @ jnp.linalg.solve(cov_d_mix, r_d)
+    dense_cov_mix = sig_tot_mix - cross_mix @ jnp.linalg.solve(cov_d_mix, cross_mix.T)
+    dense_sd_mix = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_mix + dense_cov_mix.T)), 0.0))
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_mean, dense_mean_mix, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_sd, dense_sd_mix, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_d14c_mean, scale_boxes * dense_mean_mix, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_gf_same.initial_state_d14c_sd, scale_boxes * dense_sd_mix, rtol=1e-8, atol=1e-9)
+
+    # 5. Single-term GPProduction initial-state recovery against dense Schur complement
+    m_gp_only = RadiocarbonModel(cbm, SteadyProduction() + gp_term, ExactLinearSolver())
+    lp_gp_only = linear_posterior(m_gp_only, ds, cfg)
+    assert lp_gp_only.initial_state_mean is not None
+    assert lp_gp_only.initial_state_sd is not None
+    cov_d_gp = cov_gp_modes + cov_gp_init + cov_off + cov_noise
+    cross_gp = r_gp_full @ proj_gp.whitened_design.T
+    dense_mean_gp = cross_gp @ jnp.linalg.solve(cov_d_gp, r_d)
+    dense_cov_gp = sig_gp_full - cross_gp @ jnp.linalg.solve(cov_d_gp, cross_gp.T)
+    dense_sd_gp = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_gp + dense_cov_gp.T)), 0.0))
+    np.testing.assert_allclose(lp_gp_only.initial_state_mean, dense_mean_gp, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_gp_only.initial_state_sd, dense_sd_gp, rtol=1e-8, atol=1e-9)
+
+    # 6. Mixed model with only one initial-state block enabled -> single anchor, returns exact field initial state
+    cfg_gp_noinit = LinearMarginalConfig(
+        offset_mode="hierarchical",
+        global_prior_sd=200.0,
+        lab_prior_sd=1.5,
+        marginalize_gp=True,
+        marginalize_field=True,
+        include_gp_initial_cov=False,
+        include_field_initial_cov=True,
+    )
+    lp_one_active = linear_posterior(m_gp_gf_diff, ds, cfg_gp_noinit)
+    assert lp_one_active.initial_state_mean is not None
+    assert lp_one_active.initial_state_sd is not None
+    cov_d_one = (
+        cov_gp_modes
+        + op_755.w_grid @ gf_early.prior_covariance() @ op_755.w_grid.T
+        + op_755.init_state_basis @ sig_m32 @ op_755.init_state_basis.T
+        + cov_off
+        + cov_noise
+    )
+    cross_one = sig_m32 @ op_755.init_state_basis.T
+    dense_mean_one = cross_one @ jnp.linalg.solve(cov_d_one, r_d)
+    dense_cov_one = sig_m32 - cross_one @ jnp.linalg.solve(cov_d_one, cross_one.T)
+    dense_sd_one = jnp.sqrt(jnp.maximum(jnp.diag(0.5 * (dense_cov_one + dense_cov_one.T)), 0.0))
+    np.testing.assert_allclose(lp_one_active.initial_state_mean, dense_mean_one, rtol=1e-8, atol=1e-9)
+    np.testing.assert_allclose(lp_one_active.initial_state_sd, dense_sd_one, rtol=1e-8, atol=1e-9)
+
+    # 7. Direct kernel test of _reconstruct_initial_state_posterior (empty, matching, differing anchors)
+    n_b = cbm.n_boxes
+    dummy_m = RadiocarbonModel(cbm, SteadyProduction(), ExactLinearSolver())
+    c_mean = jnp.arange(1, 2 * n_b + 1, dtype=jnp.float64) * 0.01
+    c_cov = jnp.eye(2 * n_b, dtype=jnp.float64) * 0.04
+    assert _reconstruct_initial_state_posterior(dummy_m, [], c_mean, c_cov) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    blk_a = (slice(0, n_b), root_m32, jnp.asarray(755.0, dtype=jnp.float64))
+    blk_b_same = (slice(n_b, 2 * n_b), root_se, jnp.asarray(755.0, dtype=jnp.float64))
+    blk_b_diff = (slice(n_b, 2 * n_b), root_se, jnp.asarray(760.0, dtype=jnp.float64))
+    assert _reconstruct_initial_state_posterior(
+        dummy_m, [blk_a, blk_b_diff], c_mean, c_cov
+    ) == (None, None, None, None)
+    m_same, sd_same, dm_same, dsd_same = _reconstruct_initial_state_posterior(
+        dummy_m, [blk_a, blk_b_same], c_mean, c_cov
+    )
+    assert m_same is not None and sd_same is not None and dm_same is not None and dsd_same is not None
+    expected_m = root_m32 @ c_mean[:n_b] + root_se @ c_mean[n_b:]
+    expected_cov = 0.04 * (sig_m32 + sig_se)
+    expected_sd = jnp.sqrt(jnp.maximum(jnp.diag(expected_cov), 0.0))
+    np.testing.assert_allclose(m_same, expected_m, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(sd_same, expected_sd, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(dm_same, scale_boxes * expected_m, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(dsd_same, scale_boxes * expected_sd, rtol=1e-12, atol=1e-12)
+
+
+def test_stationary_cbm_spectral_cov_high_q_ou_correlated_field_and_t_fine_prestart() -> None:
+    """Verify high-Q SHO, short-ell OU, CorrelatedFieldSpectrum band alignment, and t_fine < t_start masking."""
+    import scipy.linalg as sla
+
+    from ticktack.fields import _spectral_part_log_raw
+
+    cbm = load_preset("Guttler15")
+    a_mat = np.asarray(cbm.matrix_A(), dtype=np.float64)
+    b_vec = np.asarray(cbm.production_vector(), dtype=np.float64)
+    alpha = float(RadiocarbonModel(cbm, SteadyProduction()).alpha_unit)
+    b_eff = alpha * b_vec
+    n_b = cbm.n_boxes
+
+    # 1. QuasiPeriodicSpectrum vs independent scipy solve_continuous_lyapunov (SHO state-space) at Q=3.5..40
+    period = 11.0
+    w0 = 2.0 * math.pi / period
+    sig = 0.2
+    for q_val in (3.5, 10.0, 20.0, 40.0):
+        f_aug = np.zeros((n_b + 2, n_b + 2), dtype=np.float64)
+        f_aug[:n_b, :n_b] = a_mat
+        f_aug[:n_b, n_b] = b_eff
+        f_aug[n_b, n_b + 1] = 1.0
+        f_aug[n_b + 1, n_b] = -(w0**2)
+        f_aug[n_b + 1, n_b + 1] = -w0 / q_val
+        q_diff = np.zeros((n_b + 2, n_b + 2), dtype=np.float64)
+        q_diff[-1, -1] = 2.0 * (sig**2) * (w0**3) / q_val
+        p_lyap = sla.solve_continuous_lyapunov(f_aug, -q_diff)[:n_b, :n_b]
+
+        kern_qp = QuasiPeriodicSpectrum(sigma=sig, period_yr=period, quality=q_val)
+        sig_spec, _ = stationary_cbm_spectral_cov(a_mat, b_vec, kern_qp, alpha_unit=alpha)
+        rel_fro = np.linalg.norm(np.asarray(sig_spec) - p_lyap) / np.linalg.norm(p_lyap)
+        assert rel_fro < 1e-8, f"QuasiPeriodic Q={q_val} relFro error {rel_fro:.3e} >= 1e-8"
+
+    # 2. Short-ell OU (Matern order=1) vs independent scipy solve_continuous_lyapunov
+    for ell in (0.3, 5.0):
+        f_ou = np.zeros((n_b + 1, n_b + 1), dtype=np.float64)
+        f_ou[:n_b, :n_b] = a_mat
+        f_ou[:n_b, n_b] = b_eff
+        f_ou[n_b, n_b] = -1.0 / ell
+        q_ou = np.zeros((n_b + 1, n_b + 1), dtype=np.float64)
+        q_ou[-1, -1] = 2.0 * (sig**2) / ell
+        p_ou = sla.solve_continuous_lyapunov(f_ou, -q_ou)[:n_b, :n_b]
+
+        kern_ou = MaternSpectrum(sigma=sig, length_yr=ell, order=1.0)
+        sig_ou, _ = stationary_cbm_spectral_cov(a_mat, b_vec, kern_ou, alpha_unit=alpha)
+        rel_fro = np.linalg.norm(np.asarray(sig_ou) - p_ou) / np.linalg.norm(p_ou)
+        assert rel_fro < 1e-4, f"OU ell={ell} relFro error {rel_fro:.3e} >= 1e-4"
+
+    # 3. CorrelatedFieldSpectrum prehistory matches in-window DCT shape and is band-limited for slope > -1
+    n_grid, dt = 64, 1.0
+    lam_dct = dct_laplacian_eigenvalues(n_grid, dt)
+    om_dct = jnp.sqrt(lam_dct[1:])
+    bounds = (float(om_dct[0]), float(om_dct[-1]))
+    devs = jnp.array([0.6, -0.4, 0.3, -0.2], dtype=jnp.float64)
+    cf_kern = CorrelatedFieldSpectrum(sigma=0.3, slope=-0.5, log_deviations=devs, flexibility=0.5)
+    in_win_spec = cf_kern.spectrum(n_grid, dt)[1:]
+    cont_log = _spectral_part_log_raw(cf_kern, om_dct, omega_bounds=bounds)
+    ratio = jnp.exp(cont_log - jnp.max(cont_log)) / (in_win_spec / jnp.max(in_win_spec))
+    np.testing.assert_allclose(ratio / jnp.mean(ratio), jnp.ones_like(ratio), rtol=1e-12, atol=1e-12)
+
+    # Independent high-order Gauss-Legendre reference strictly on [w_lo, w_hi] (zero_mode=False)
+    gl_x, gl_w = np.polynomial.legendre.leggauss(256)
+    xi = 0.5 * (gl_x + 1.0)
+    w_xi = 0.5 * gl_w
+    w_lo, w_hi = bounds
+    ln_span = math.log(w_hi / w_lo)
+    om_ref = w_lo * np.exp(ln_span * xi)
+    dw_ref = w_xi * om_ref * ln_span
+    log_raw_ref = np.asarray(_spectral_part_log_raw(cf_kern, jnp.asarray(om_ref), omega_bounds=bounds))
+    raw_ref = np.exp(log_raw_ref - np.max(log_raw_ref))
+    qw_ref = (0.3**2) * (dw_ref * raw_ref) / np.sum(dw_ref * raw_ref)
+    sig_ref = np.zeros((n_b, n_b), dtype=np.float64)
+    eye_n = np.eye(n_b, dtype=np.complex128)
+    for w_k, q_k in zip(om_ref, qw_ref):
+        r_vec = np.linalg.solve(1j * w_k * eye_n - a_mat, b_eff)
+        sig_ref += q_k * np.real(np.outer(r_vec, np.conj(r_vec)))
+
+    sig_cf_128, _ = stationary_cbm_spectral_cov(
+        a_mat, b_vec, cf_kern, alpha_unit=alpha, omega_bounds=bounds, n_quad=128
+    )
+    rel_fro_cf = np.linalg.norm(np.asarray(sig_cf_128) - sig_ref) / np.linalg.norm(sig_ref)
+    assert rel_fro_cf < 1e-9, f"CorrelatedField slope=-0.5 relFro error {rel_fro_cf:.3e} >= 1e-9"
+
+    # 4. linear_posterior t_fine < gf.t_start has zero pre-history response (matching op.init_state_basis)
+    cbm_b = load_preset("Brehm21")
+    ds = _make_two_hemisphere_dataset(cbm_b, seed=29)
+    gf = GaussianField(
+        jnp.zeros((32,), dtype=jnp.float64),
+        760.0,
+        792.0,
+        kernel=MaternSpectrum(sigma=0.35, length_yr=8.0, order=2.0),
+        zero_mode=False,
+    )
+    m_gf = RadiocarbonModel(cbm_b, gf, ExactLinearSolver())
+    cfg_no_off = LinearMarginalConfig(
+        offset_mode="none",
+        marginalize_field=True,
+        include_field_initial_cov=True,
+    )
+    t_fine_pre = jnp.array([750.0, 759.5, 760.0, 765.0], dtype=jnp.float64)
+    lp_pre = linear_posterior(m_gf, ds, cfg_no_off, t_fine=t_fine_pre)
+    assert lp_pre.d14c_fine_mean is not None and lp_pre.d14c_fine_std is not None
+    ss_nh = float(cbm_b.steady_state_d14c(q_std=DEFAULT_Q_STD)[cbm_b.box_index("Troposphere", hemisphere="north")])
+    np.testing.assert_allclose(lp_pre.d14c_fine_mean[:2], ss_nh, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(lp_pre.d14c_fine_std[:2], 0.0, atol=1e-12)
+    assert float(lp_pre.d14c_fine_std[2]) > 0.0
+
+
+def test_audit_gp_init_state_predict_field_fractional_matern_and_cf_band() -> None:
+    """Verify GP full initial state at t0, predict_field_d14c initial state, fractional Matern, and CF [w_1, w_{N-1}] band."""
+    import scipy.integrate as spi
+    import scipy.special as sps
+
+    from ticktack.fields import (
+        _field_omega_bounds,
+        _spectral_kernel_quad_weights,
+        _spectral_part_log_raw,
+        _spectral_quad_grid,
+    )
+    from ticktack.linear import _solve_complex_resolvents
+
+    cbm = load_preset("Guttler15")
+    a_mat = np.asarray(cbm.matrix_A(), dtype=np.float64)
+    b_vec = np.asarray(cbm.production_vector(), dtype=np.float64)
+    alpha = float(RadiocarbonModel(cbm, SteadyProduction()).alpha_unit)
+    b_eff = alpha * b_vec
+    n_b = cbm.n_boxes
+    trop_idx = cbm.box_index("Troposphere")
+    ss_trop = float(cbm.steady_state_d14c(q_std=DEFAULT_Q_STD)[trop_idx])
+
+    years = np.arange(770.0, 785.0, 1.0)
+    d14c_obs = ss_trop + 8.0 * np.exp(-(years - 770.0) / 6.0)
+    s_decay = TreeRingSeries(years, d14c_obs, np.ones_like(years), hemisphere="north", name="Decay")
+    ds_decay = Dataset([s_decay])
+    t0_obs = float(jnp.min(s_decay.sub_t_starts))
+
+    # 1. Single GPProduction(pad_years=15): initial_state_d14c[trop] matches d14c_fine at t_fine=[t0_obs]
+    gp = GPProduction(0.25 * tk.quasisep.Matern32(scale=5.0), n_modes=32, pad_years=15.0)
+    m_gp = RadiocarbonModel(cbm, SteadyProduction() + gp, ExactLinearSolver())
+    cfg_gp = LinearMarginalConfig(
+        offset_mode="none",
+        marginalize_gp=True,
+        include_gp_initial_cov=True,
+    )
+    lp_gp = linear_posterior(m_gp, ds_decay, cfg_gp, t_fine=jnp.array([t0_obs], dtype=jnp.float64))
+    assert lp_gp.initial_state_d14c_mean is not None and lp_gp.initial_state_d14c_sd is not None
+    assert lp_gp.d14c_fine_mean is not None and lp_gp.d14c_fine_std is not None
+    np.testing.assert_allclose(
+        lp_gp.initial_state_d14c_mean[trop_idx],
+        lp_gp.d14c_fine_mean[0] - ss_trop,
+        rtol=1e-11,
+        atol=1e-11,
+    )
+    np.testing.assert_allclose(
+        lp_gp.initial_state_d14c_sd[trop_idx],
+        lp_gp.d14c_fine_std[0],
+        rtol=1e-11,
+        atol=1e-11,
+    )
+
+    # 2. predict_field_d14c includes fit_res.initial_state_mean on operator=, validation ds, and t_fine=
+    gf = GaussianField(
+        jnp.zeros((24,), dtype=jnp.float64),
+        770.0,
+        786.0,
+        kernel=MaternSpectrum(sigma=0.4, length_yr=6.0, order=2.0),
+        zero_mode=False,
+    )
+    m_gf = RadiocarbonModel(cbm, gf, ExactLinearSolver())
+    fit_res = fit_ift_field(m_gf, ds_decay, offset_mode="none", include_field_initial_cov=True)
+    assert fit_res.initial_state_mean is not None
+    pred_with_op = predict_field_d14c(fit_res, ds_decay, operator=fit_res.operator)
+    np.testing.assert_allclose(pred_with_op, fit_res.d14c_pred, rtol=1e-12, atol=1e-12)
+
+    s_val = TreeRingSeries(years[:5], d14c_obs[:5], np.ones(5), hemisphere="north", name="Val")
+    pred_val = predict_field_d14c(fit_res, Dataset([s_val]))
+    np.testing.assert_allclose(pred_val, fit_res.d14c_pred[:5], rtol=1e-11, atol=1e-11)
+
+    t_fine_chk = jnp.array([765.0, 770.0, 772.5, 778.0], dtype=jnp.float64)
+    pred_fine = predict_field_d14c(fit_res, t_fine=t_fine_chk)
+    cfg_gf = LinearMarginalConfig(
+        offset_mode="none",
+        marginalize_field=True,
+        include_field_initial_cov=True,
+    )
+    lp_gf = linear_posterior(m_gf, ds_decay, cfg_gf, t_fine=t_fine_chk)
+    assert lp_gf.d14c_fine_mean is not None
+    np.testing.assert_allclose(pred_fine, lp_gf.d14c_fine_mean, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(pred_fine[0], ss_trop, rtol=1e-12, atol=1e-12)
+
+    # 3. Rough fractional MaternSpectrum(order=0.55) matches scipy.integrate.quad_vec over [0, inf)
+    ell_f, p_f, sig_f = 5.0, 0.55, 0.3
+    exact_norm = (math.sqrt(math.pi) / (2.0 * ell_f)) * math.exp(
+        sps.gammaln(p_f - 0.5) - sps.gammaln(p_f)
+    )
+    eye_n = np.eye(n_b, dtype=np.complex128)
+
+    def _integrand(om: float) -> np.ndarray:
+        r_vec = np.linalg.solve(1j * om * eye_n - a_mat, b_eff)
+        w_spec = (sig_f**2) * ((1.0 + (ell_f * om) ** 2) ** (-p_f)) / exact_norm
+        return w_spec * np.real(np.outer(r_vec, np.conj(r_vec)))
+
+    sig_quad, _ = spi.quad_vec(_integrand, 0.0, np.inf, epsrel=1e-9, epsabs=1e-12, limit=200)
+    kern_frac = MaternSpectrum(sigma=sig_f, length_yr=ell_f, order=p_f)
+    sig_frac, _ = stationary_cbm_spectral_cov(a_mat, b_vec, kern_frac, alpha_unit=alpha)
+    rel_fro_frac = np.linalg.norm(np.asarray(sig_frac) - sig_quad) / np.linalg.norm(sig_quad)
+    assert rel_fro_frac < 1e-6, f"Fractional Matern order=0.55 relFro {rel_fro_frac:.3e} >= 1e-6"
+
+    # 4. CorrelatedFieldSpectrum(zero_mode=False) strictly band-limited to [w_1, w_{N-1}]
+    n_g, dt_g = 64, 1.0
+    bounds = _field_omega_bounds(n_g, dt_g)
+    w_lo, w_hi = bounds
+    devs = jnp.array([1.0, -1.0, 1.0, -1.0], dtype=jnp.float64)
+    for slope_val in (-2.0, 0.5):
+        cf_k = CorrelatedFieldSpectrum(
+            sigma=0.3, slope=slope_val, log_deviations=devs, flexibility=0.5, zero_mode=False
+        )
+        gl_x, gl_w = np.polynomial.legendre.leggauss(256)
+        xi = 0.5 * (gl_x + 1.0)
+        w_xi = 0.5 * gl_w
+        ln_span = math.log(w_hi / w_lo)
+        om_band = w_lo * np.exp(ln_span * xi)
+        dw_band = w_xi * om_band * ln_span
+        log_r = np.asarray(_spectral_part_log_raw(cf_k, jnp.asarray(om_band), omega_bounds=bounds))
+        raw_r = np.exp(log_r - np.max(log_r))
+        qw_r = (0.3**2) * (dw_band * raw_r) / np.sum(dw_band * raw_r)
+        sig_band_ref = np.zeros((n_b, n_b), dtype=np.float64)
+        for w_k, q_k in zip(om_band, qw_r):
+            r_vec = np.linalg.solve(1j * w_k * eye_n - a_mat, b_eff)
+            sig_band_ref += q_k * np.real(np.outer(r_vec, np.conj(r_vec)))
+
+        sig_cf, _ = stationary_cbm_spectral_cov(
+            a_mat, b_vec, cf_k, alpha_unit=alpha, omega_bounds=bounds
+        )
+        rel_cf = np.linalg.norm(np.asarray(sig_cf) - sig_band_ref) / np.linalg.norm(sig_band_ref)
+        assert rel_cf < 1e-10, f"CF slope={slope_val} relFro {rel_cf:.3e} >= 1e-10"
+
+        # Shared pre_resolvents grid also agrees to < 1e-10
+        om_q, dw_q = _spectral_quad_grid(0.5, n_quad=128, omega_bounds=bounds)
+        u_r, v_r = _solve_complex_resolvents(jnp.asarray(a_mat), jnp.asarray(b_eff), om_q)
+        qw_q = _spectral_kernel_quad_weights(cf_k, om_q, dw_q, omega_bounds=bounds)
+        sig_pre = (u_r * qw_q[None, :]) @ u_r.T + (v_r * qw_q[None, :]) @ v_r.T
+        rel_pre = np.linalg.norm(np.asarray(sig_pre) - sig_band_ref) / np.linalg.norm(sig_band_ref)
+        assert rel_pre < 1e-10, f"CF pre_resolvents slope={slope_val} relFro {rel_pre:.3e} >= 1e-10"
+
+    # Explicit prehistory_kernel=CorrelatedFieldSpectrum matches field's effective_kernel
+    cf_k0 = CorrelatedFieldSpectrum(sigma=0.3, slope=-2.0, log_deviations=devs, flexibility=0.5)
+    gf_cf = GaussianField(jnp.zeros((24,), dtype=jnp.float64), 770.0, 786.0, kernel=cf_k0, zero_mode=False)
+    m_cf = RadiocarbonModel(cbm, gf_cf, ExactLinearSolver())
+    op_cf = build_dct_response_matrix(cbm, ds_decay, 770.0, 786.0, 24, return_operator=True)
+    lnz_default = log_evidence(m_cf, ds_decay, operator=op_cf, offset_mode="none")
+    lnz_explicit = log_evidence(
+        m_cf, ds_decay, operator=op_cf, offset_mode="none", prehistory_kernel=cf_k0
+    )
+    np.testing.assert_allclose(lnz_explicit, lnz_default, rtol=1e-12, atol=1e-12)
+
+
+
+
 
 
 
