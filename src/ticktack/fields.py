@@ -38,6 +38,7 @@ import jax.numpy as jnp
 from jax.scipy.fft import dct as _jax_dct
 from jax.scipy.fft import idct as _jax_idct
 import jax.scipy.linalg as jsl
+from jax.scipy.special import gammaln as _gammaln
 from jax.typing import ArrayLike
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
@@ -884,7 +885,9 @@ class GaussianField(ProductionTerm):
     ) -> jax.Array:
         del q_std
         t_arr = jnp.asarray(t, dtype=jnp.float64)
-        return jnp.interp(t_arr, self.t_grid, self.evaluate_grid())
+        return jnp.interp(
+            t_arr, self.t_grid, self.evaluate_grid(), left=0.0, right=0.0
+        )
 
 
 class LogGaussianField(ProductionTerm):
@@ -1055,8 +1058,11 @@ class LogGaussianField(ProductionTerm):
         q_std: ArrayLike = DEFAULT_Q_STD,
     ) -> jax.Array:
         t_arr = jnp.asarray(t, dtype=jnp.float64)
-        q_interp = jnp.interp(t_arr, self.t_grid, self.evaluate_q_grid())
-        return q_interp - jnp.asarray(q_std, dtype=jnp.float64)
+        q_std_arr = jnp.asarray(q_std, dtype=jnp.float64)
+        q_interp = jnp.interp(
+            t_arr, self.t_grid, self.evaluate_q_grid(), left=q_std_arr, right=q_std_arr
+        )
+        return q_interp - q_std_arr
 
 
 # =============================================================================
@@ -1777,17 +1783,52 @@ def predict_field_d14c(
         r_ratio = (y_ss[box_idx] / y_trop) / m_rel[box_idx]
         ss_val = 1000.0 * (r_ratio - 1.0)
 
-        grid_term: ProductionTerm = field
-        for _, ext_t in extras:
-            grid_term = grid_term + ext_t
-        dy_traj = solver.solve_delta_trajectory(
+        t_field = jnp.maximum(t_arr, field.t_start)
+        dy_field = solver.solve_delta_trajectory(
             model.cbm,
-            grid_term,
-            t_arr,
+            field,
+            t_field,
             q_std=model.q_std,
             alpha_unit=model.alpha_unit,
         )
-        d14c_curve = ss_val + 1000.0 * ((dy_traj[:, box_idx] / y_trop) / m_rel[box_idx])
+        dy_box = jnp.where(t_arr >= field.t_start, dy_field[:, box_idx], 0.0)
+        if extras:
+            ext_prod: ProductionTerm = extras[0][1]
+            for _, ext_t in extras[1:]:
+                ext_prod = ext_prod + ext_t
+            dy_ext = solver.solve_delta_trajectory(
+                model.cbm,
+                ext_prod,
+                t_arr,
+                q_std=model.q_std,
+                alpha_unit=model.alpha_unit,
+            )
+            dy_box = dy_box + dy_ext[:, box_idx]
+        d14c_curve = ss_val + 1000.0 * ((dy_box / y_trop) / m_rel[box_idx])
+        if fit_res is not None and fit_res.initial_state_mean is not None:
+            a_mat = model.cbm.matrix_A()
+            dt_arr = jnp.maximum(t_arr - field.t_start, 0.0)
+            modal = _modal_decomposition(a_mat, cbm=model.cbm)
+            if modal is not None:
+                lam_m, v_eig_m, v_inv_m = modal
+                y0_modes = v_inv_m @ fit_res.initial_state_mean.astype(v_inv_m.dtype)
+                dy_init_box = jnp.real(
+                    (
+                        v_eig_m[box_idx, :][None, :]
+                        * jnp.exp(dt_arr[:, None] * lam_m[None, :])
+                    )
+                    @ y0_modes
+                )
+            else:
+                dy_init_box = jax.vmap(
+                    lambda dt_s: (jsl.expm(a_mat * dt_s) @ fit_res.initial_state_mean)[
+                        box_idx
+                    ]
+                )(dt_arr)
+            dy_init_box = jnp.where(t_arr >= field.t_start, dy_init_box, 0.0)
+            d14c_curve = d14c_curve + 1000.0 * (
+                (dy_init_box / y_trop) / m_rel[box_idx]
+            )
         if baseline_d14c is not None:
             d14c_curve = d14c_curve + jnp.asarray(baseline_d14c, dtype=jnp.float64)
         elif include_offsets and fit_res is not None:
@@ -1841,6 +1882,8 @@ def predict_field_d14c(
         field_exc = op.w_grid @ field.evaluate_grid(q_std=model.q_std)
 
     pred = op.ss_d14c + extra_exc + field_exc
+    if fit_res is not None and fit_res.initial_state_mean is not None:
+        pred = pred + op.init_state_basis @ fit_res.initial_state_mean
     if baseline_d14c is not None:
         pred = pred + jnp.asarray(baseline_d14c, dtype=jnp.float64)
     elif include_offsets and fit_res is not None:
@@ -1879,7 +1922,7 @@ def _spectral_quad_grid(
     ell_char: ArrayLike,
     *,
     n_quad: int = 128,
-    omega_hi: float | None = None,
+    omega_bounds: tuple[float, float] | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Composite Gauss–Legendre frequency grid resolving decay, solar-cycle, and tail regimes."""
     if n_quad == 128:
@@ -1892,30 +1935,50 @@ def _spectral_quad_grid(
     ell = jnp.asarray(ell_char, dtype=jnp.float64).reshape(())
     w_max = jnp.hypot(1e5, 2e5 / jnp.hypot(ell, 1e-3))
 
-    # Zone 1: [0, 0.05] via sinh map resolving slow radiocarbon decay λ_14 ≈ 1.21e-4 yr⁻¹
+    cuts = [float(v) for v in omega_bounds] if omega_bounds is not None else []
     c0_lo = 1e-6
     w_z1_hi = 0.05
-    alpha_lo = math.asinh(w_z1_hi / c0_lo)
+    w_z2_hi = 4.0
+
+    # Zone 1: [0, 0.05] sinh near 0 (radiocarbon decay λ_14), split at any bound < 0.05
+    z1_cuts = sorted(c for c in cuts if 1e-12 < c < w_z1_hi - 1e-12)
+    z1_first = z1_cuts[0] if z1_cuts else w_z1_hi
+    alpha_lo = math.asinh(z1_first / c0_lo)
     om_parts: list[jax.Array] = [c0_lo * jnp.sinh(alpha_lo * xi)]
     dw_parts: list[jax.Array] = [w_xi * (c0_lo * alpha_lo * jnp.cosh(alpha_lo * xi))]
+    z1_rest = [*z1_cuts, w_z1_hi]
+    for e_lo, e_hi in zip(z1_rest[:-1], z1_rest[1:]):
+        if e_hi > e_lo * (1.0 + 1e-12):
+            ln_span = math.log(e_hi / e_lo)
+            om_seg = e_lo * jnp.exp(ln_span * xi)
+            om_parts.append(om_seg)
+            dw_parts.append(w_xi * om_seg * ln_span)
 
-    # Zone 2: [0.05, 4.0] log-spaced GL panels (constant Δln ω for narrow solar-cycle peaks)
-    w_z2_hi = 4.0
+    # Zone 2: [0.05, 4.0] log-spaced GL panels, split at any bound in (0.05, 4.0)
     z2_edges = [w_z1_hi, 0.5, w_z2_hi]
-    if omega_hi is not None and w_z1_hi < float(omega_hi) < w_z2_hi:
-        w_cut = float(omega_hi)
-        if all(abs(w_cut - e) > 1e-9 for e in z2_edges):
-            z2_edges = sorted([*z2_edges, w_cut])
+    for c in cuts:
+        if w_z1_hi < c < w_z2_hi and all(abs(c - e) > 1e-9 for e in z2_edges):
+            z2_edges.append(c)
+    z2_edges.sort()
     for e_lo, e_hi in zip(z2_edges[:-1], z2_edges[1:]):
         ln_span = math.log(e_hi / e_lo)
         om_seg = e_lo * jnp.exp(ln_span * xi)
         om_parts.append(om_seg)
         dw_parts.append(w_xi * om_seg * ln_span)
 
-    # Zone 3: [4.0, w_max] via shifted sinh map resolving high-frequency tails ω >> 1/ℓ
+    # Zone 3: [4.0, w_max], inserting log panels for any bound > 4.0 before shifted sinh tail
+    z3_cuts = sorted(c for c in cuts if c > w_z2_hi + 1e-9)
+    z3_start = w_z2_hi
+    for c in z3_cuts:
+        ln_span = math.log(c / z3_start)
+        om_seg = z3_start * jnp.exp(ln_span * xi)
+        om_parts.append(om_seg)
+        dw_parts.append(w_xi * om_seg * ln_span)
+        z3_start = c
     c0_hi = 0.2
-    alpha_hi = jnp.arcsinh((w_max - w_z2_hi) / c0_hi)
-    om_parts.append(w_z2_hi + c0_hi * jnp.sinh(alpha_hi * xi))
+    w_tail_hi = jnp.maximum(w_max, z3_start * 10.0)
+    alpha_hi = jnp.arcsinh((w_tail_hi - z3_start) / c0_hi)
+    om_parts.append(z3_start + c0_hi * jnp.sinh(alpha_hi * xi))
     dw_parts.append(w_xi * (c0_hi * alpha_hi * jnp.cosh(alpha_hi * xi)))
 
     return jnp.concatenate(om_parts), jnp.concatenate(dw_parts)
@@ -1959,10 +2022,16 @@ def _part_quad_grid(
         dw_hi = w_xi * (gamma * alpha_hi * jnp.cosh(alpha_hi * xi))
         return jnp.concatenate([om_0, om_lo, om_hi]), jnp.concatenate([dw_0, dw_lo, dw_hi])
 
-    # CorrelatedFieldSpectrum: integrate strictly over [0, w_hi] with no step discontinuity
+    # CorrelatedFieldSpectrum: strictly [w_lo, w_hi] when zero_mode=False; [0, w_hi] when zero_mode=True
     w_lo, w_hi = (0.02, 4.0) if omega_bounds is None else omega_bounds
     w_lo_f = max(float(w_lo), 1e-12)
     w_hi_f = max(float(w_hi), w_lo_f * (1.0 + 1e-9))
+    ln_span = math.log(w_hi_f / w_lo_f)
+    om_band = w_lo_f * jnp.exp(ln_span * xi)
+    dw_band = w_xi * om_band * ln_span
+    if not part.zero_mode:
+        return om_band, dw_band
+
     w_split_f = min(0.05, w_lo_f)
     alpha_0 = math.asinh(w_split_f / c0_lo)
     om_parts_cf: list[jax.Array] = [c0_lo * jnp.sinh(alpha_0 * xi)]
@@ -1970,10 +2039,8 @@ def _part_quad_grid(
     if w_lo_f > w_split_f * (1.0 + 1e-9):
         om_parts_cf.append(w_split_f + (w_lo_f - w_split_f) * xi)
         dw_parts_cf.append(w_xi * (w_lo_f - w_split_f))
-    ln_span = math.log(w_hi_f / w_lo_f)
-    om_band = w_lo_f * jnp.exp(ln_span * xi)
     om_parts_cf.append(om_band)
-    dw_parts_cf.append(w_xi * om_band * ln_span)
+    dw_parts_cf.append(dw_band)
     return jnp.concatenate(om_parts_cf), jnp.concatenate(dw_parts_cf)
 
 
@@ -2023,29 +2090,76 @@ def _spectral_kernel_quad_weights(
     variance_scale: ArrayLike = 1.0,
     omega_bounds: tuple[float, float] | None = None,
 ) -> jax.Array:
-    """Normalized quadrature weights ``w_q`` summing to ``variance_scale * sum_p sigma_p^2``."""
+    """Normalized quadrature weights ``w_q`` for stationary pre-history covariance."""
     parts = spectral_kernel.parts if isinstance(spectral_kernel, SumSpectrum) else (spectral_kernel,)
     v_scale = jnp.asarray(variance_scale, dtype=jnp.float64).reshape(())
     total_weights = jnp.zeros_like(omegas, dtype=jnp.float64)
-    w_hi_cf = 4.0 if omega_bounds is None else float(omega_bounds[1])
+    w_lo_cf, w_hi_cf = (0.02, 4.0) if omega_bounds is None else (
+        float(omega_bounds[0]),
+        float(omega_bounds[1]),
+    )
     for part in parts:
         log_raw = _spectral_part_log_raw(part, omegas, omega_bounds=omega_bounds)
-        if isinstance(part, CorrelatedFieldSpectrum):
-            in_band = omegas <= w_hi_cf * (1.0 + 1e-12)
-            masked_log = jnp.where(in_band, log_raw, -jnp.inf)
-            shift = jnp.max(masked_log)
-            raw = jnp.where(in_band, jnp.exp(log_raw - jnp.where(jnp.isfinite(shift), shift, 0.0)), 0.0)
-        else:
-            shift = jnp.max(log_raw)
-            raw = jnp.exp(log_raw - shift)
-        dw_raw = dw_total * raw
-        denom = jnp.sum(dw_raw)
         sig = jnp.asarray(part.sigma, dtype=jnp.float64).reshape(())
-        part_w = jnp.where(
-            (denom > 0.0) & (sig > 0.0),
-            v_scale * jnp.square(sig) * dw_raw / jnp.where(denom > 0.0, denom, 1.0),
-            0.0,
-        )
+        if isinstance(part, SquaredExpSpectrum):
+            log_norm = 0.5 * math.log(0.5 * math.pi) - jnp.log(part.length_yr)
+            part_w = jnp.where(
+                sig > 0.0,
+                v_scale * jnp.square(sig) * dw_total * jnp.exp(log_raw - log_norm),
+                0.0,
+            )
+        elif isinstance(part, MaternSpectrum):
+            ord_np = _concrete_np(part.order)
+            if ord_np is not None and bool(np.isposinf(ord_np)):
+                log_norm = 0.5 * math.log(0.5 * math.pi) - jnp.log(part.length_yr)
+                part_w = jnp.where(
+                    sig > 0.0,
+                    v_scale * jnp.square(sig) * dw_total * jnp.exp(log_raw - log_norm),
+                    0.0,
+                )
+            else:
+                # Exact [0, inf) Beta integral avoids finite-cutoff inflation as order -> 0.5+
+                p_val = jnp.asarray(part.order, dtype=jnp.float64).reshape(())
+                p_valid = p_val > 0.5
+                p_safe = jnp.where(p_valid, p_val, 1.0)
+                log_norm = (
+                    0.5 * math.log(math.pi)
+                    - math.log(2.0)
+                    - jnp.log(part.length_yr)
+                    + _gammaln(p_safe - 0.5)
+                    - _gammaln(p_safe)
+                )
+                w_analytic = v_scale * jnp.square(sig) * dw_total * jnp.exp(log_raw - log_norm)
+                shift = jnp.max(log_raw)
+                dw_raw = dw_total * jnp.exp(log_raw - shift)
+                denom = jnp.sum(dw_raw)
+                w_grid = v_scale * jnp.square(sig) * dw_raw / jnp.where(denom > 0.0, denom, 1.0)
+                part_w = jnp.where(sig > 0.0, jnp.where(p_valid, w_analytic, w_grid), 0.0)
+        else:
+            if isinstance(part, CorrelatedFieldSpectrum):
+                if part.zero_mode:
+                    in_band = omegas <= w_hi_cf * (1.0 + 1e-12)
+                else:
+                    in_band = (omegas >= w_lo_cf * (1.0 - 1e-12)) & (
+                        omegas <= w_hi_cf * (1.0 + 1e-12)
+                    )
+                masked_log = jnp.where(in_band, log_raw, -jnp.inf)
+                shift = jnp.max(masked_log)
+                raw = jnp.where(
+                    in_band,
+                    jnp.exp(log_raw - jnp.where(jnp.isfinite(shift), shift, 0.0)),
+                    0.0,
+                )
+            else:
+                shift = jnp.max(log_raw)
+                raw = jnp.exp(log_raw - shift)
+            dw_raw = dw_total * raw
+            denom = jnp.sum(dw_raw)
+            part_w = jnp.where(
+                (denom > 0.0) & (sig > 0.0),
+                v_scale * jnp.square(sig) * dw_raw / jnp.where(denom > 0.0, denom, 1.0),
+                0.0,
+            )
         total_weights = total_weights + part_w
     return total_weights
 
@@ -2079,10 +2193,15 @@ def stationary_cbm_spectral_cov(
 
     Notes
     -----
+    - For :class:`MaternSpectrum` (``order > 0.5``) and :class:`SquaredExpSpectrum`,
+      normalization uses the exact ``[0, inf)`` analytical integral so rough fractional
+      Matérn tails (``order -> 0.5+``) are not inflated by finite quadrature cutoffs.
     - For :class:`CorrelatedFieldSpectrum`, ``omega_bounds`` (default ``(0.02, 4.0)`` rad/yr,
       or the field's DCT wavenumber band ``(omega_1, omega_{N-1})`` when derived from a field)
-      sets both the cosine-deviation coordinate ``u in [0, 1]`` and the upper band cutoff so
-      that ``sigma`` retains the same meaning as in-window for all power-law slopes including
+      sets the cosine-deviation coordinate ``u in [0, 1]`` and band support: strictly
+      ``[omega_lo, omega_hi]`` with zero power outside when ``zero_mode=False`` (default),
+      or ``[0, omega_hi]`` with a flat extension below ``omega_lo`` when ``zero_mode=True``.
+      This keeps ``sigma`` consistent with the in-window spectrum for all slopes including
       ``slope > -1``.
     - In field fits, the resulting pre-history state ``delta_y(t_start)`` is modelled as a
       zero-mean Gaussian independent of the in-window DCT modes (a modelling choice that
@@ -2186,6 +2305,8 @@ def _resolve_prehistory_root_y0(
     cbm: CarbonBoxModel,
     alpha_unit: ArrayLike,
     prehistory_kernel: Any | None,
+    *,
+    omega_bounds: tuple[float, float] | None = None,
 ) -> jax.Array | None:
     """Return ``root_y0`` such that ``root_y0 @ root_y0.T == Sigma_{y,0}``."""
     if prehistory_kernel is None:
@@ -2196,6 +2317,7 @@ def _resolve_prehistory_root_y0(
             cbm.production_vector(),
             prehistory_kernel,
             alpha_unit=alpha_unit,
+            omega_bounds=omega_bounds,
         )
         return root_y0
     _, root_y0 = stationary_cbm_gp_cov(
@@ -2219,7 +2341,12 @@ def _resolve_effective_prehistory_root_y0(
     if prehistory_root_y0 is not None:
         return prehistory_root_y0
     if prehistory_kernel is not None:
-        return _resolve_prehistory_root_y0(cbm, alpha_unit, prehistory_kernel)
+        return _resolve_prehistory_root_y0(
+            cbm,
+            alpha_unit,
+            prehistory_kernel,
+            omega_bounds=_field_omega_bounds(field.n_grid, field.dt),
+        )
     if include_field_initial_cov:
         return _field_prehistory_root_y0(cbm, alpha_unit, field)
     return None
@@ -3209,7 +3336,10 @@ def log_evidence(
     )
     if prehistory_kernel is not None:
         eff_root_y0 = _resolve_prehistory_root_y0(
-            model.cbm, model.alpha_unit, prehistory_kernel
+            model.cbm,
+            model.alpha_unit,
+            prehistory_kernel,
+            omega_bounds=_field_omega_bounds(field.n_grid, field.dt),
         )
     elif inherited_root_y0 is not None:
         eff_root_y0 = inherited_root_y0
@@ -3502,7 +3632,10 @@ def laplace_samples(
         )
         if prehistory_kernel is not None:
             eff_root_y0 = _resolve_prehistory_root_y0(
-                model.cbm, model.alpha_unit, prehistory_kernel
+                model.cbm,
+                model.alpha_unit,
+                prehistory_kernel,
+                omega_bounds=_field_omega_bounds(field.n_grid, field.dt),
             )
         elif include_field_initial_cov is False:
             eff_root_y0 = None
@@ -3683,7 +3816,10 @@ def error_scale(
         )
         if prehistory_kernel is not None:
             eff_root_y0 = _resolve_prehistory_root_y0(
-                model.cbm, model.alpha_unit, prehistory_kernel
+                model.cbm,
+                model.alpha_unit,
+                prehistory_kernel,
+                omega_bounds=_field_omega_bounds(field.n_grid, field.dt),
             )
         elif include_field_initial_cov is False:
             eff_root_y0 = None
@@ -4035,7 +4171,10 @@ def evidence_grid(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
     )
     root_y0 = _resolve_prehistory_root_y0(
-        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
+        cbm,
+        ALPHA_ATOMS_CM2_S_TO_KG_YR,
+        prehistory_kernel,
+        omega_bounds=_field_omega_bounds(op.n_grid, op.dt),
     )
     dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
     solver = ExactLinearSolver()
@@ -4076,7 +4215,7 @@ def evidence_grid(
             init_eff = aug_eff[:, op.n_grid :]
             omega_bounds_grid = _field_omega_bounds(op.n_grid, op.dt)
             omegas_q, dw_q = _spectral_quad_grid(
-                0.5, n_quad=128, omega_hi=omega_bounds_grid[1]
+                0.5, n_quad=128, omega_bounds=omega_bounds_grid
             )
             u_res, v_res = _solve_complex_resolvents(
                 cbm.matrix_A(),
@@ -5263,7 +5402,10 @@ def optimize_gp_kernel(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
     )
     root_y0 = _resolve_prehistory_root_y0(
-        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
+        cbm,
+        ALPHA_ATOMS_CM2_S_TO_KG_YR,
+        prehistory_kernel,
+        omega_bounds=_field_omega_bounds(op.n_grid, op.dt),
     )
     dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
     eff_fluence_prior = spike_log_fluence_prior
@@ -5330,7 +5472,7 @@ def optimize_gp_kernel(
         init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
         cursor_eff += n_b
         om_q, dw_q = _spectral_quad_grid(
-            0.5, n_quad=128, omega_hi=_field_omega_bounds(n_g, op.dt)[1]
+            0.5, n_quad=128, omega_bounds=_field_omega_bounds(n_g, op.dt)
         )
         u_r, v_r = _solve_complex_resolvents(
             cbm.matrix_A(),
@@ -5488,7 +5630,10 @@ def select_gp_kernel(
         cbm, ds, n_grid=n_grid, pad_years=pad_years, q_std=q_std
     )
     root_y0 = _resolve_prehistory_root_y0(
-        cbm, ALPHA_ATOMS_CM2_S_TO_KG_YR, prehistory_kernel
+        cbm,
+        ALPHA_ATOMS_CM2_S_TO_KG_YR,
+        prehistory_kernel,
+        omega_bounds=_field_omega_bounds(op.n_grid, op.dt),
     )
     dynamic_prehistory = (prehistory_kernel is None) and bool(include_field_initial_cov)
     eff_fluence_prior = spike_log_fluence_prior
@@ -5555,7 +5700,7 @@ def select_gp_kernel(
         init_eff = aug_eff[:, cursor_eff : cursor_eff + n_b]
         cursor_eff += n_b
         om_q, dw_q = _spectral_quad_grid(
-            0.5, n_quad=128, omega_hi=_field_omega_bounds(n_g, op.dt)[1]
+            0.5, n_quad=128, omega_bounds=_field_omega_bounds(n_g, op.dt)
         )
         u_r, v_r = _solve_complex_resolvents(
             cbm.matrix_A(),

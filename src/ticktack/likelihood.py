@@ -40,6 +40,7 @@ import optimistix as optx
 import zodiax as zdx
 from jax.typing import ArrayLike
 
+from .cbm import CarbonBoxModel
 from .data import Dataset
 from .fields import (
     GaussianField,
@@ -610,6 +611,35 @@ def _concat_padded_windows(
     )
 
 
+def _gp_anchor_state_map(
+    A: jax.Array,
+    b_eff: jax.Array,
+    proj: CausalGPProjection,
+    cbm: CarbonBoxModel,
+) -> jax.Array:
+    """Return ``(n_boxes, r_modes + n_anc)`` map from whitened GP coords to ``delta_y(t_anchor)``."""
+    assert proj.spectral_weights is not None and proj.anchor_cov_root is not None
+    u_mat, v_mat = _solve_complex_resolvents(A, b_eff, proj.omegas)
+    dt_anc = proj.t_anchor - proj.a
+    modal = _modal_decomposition(A, cbm=cbm)
+    if modal is not None:
+        lam_m, v_eig_m, v_inv_m = modal
+        expm_dt_v = jnp.real(
+            v_eig_m
+            @ (
+                jnp.exp(lam_m * dt_anc)[:, None]
+                * (v_inv_m @ v_mat.astype(v_inv_m.dtype))
+            )
+        )
+    else:
+        expm_dt_v = jsl.expm(A * dt_anc) @ v_mat
+    c_t0 = jnp.cos(proj.omegas * dt_anc)[None, :]
+    s_t0 = jnp.sin(proj.omegas * dt_anc)[None, :]
+    y_ss_t0 = (v_mat * c_t0 + u_mat * s_t0 - expm_dt_v) / jnp.sqrt(proj.half_length)
+    mode_map = y_ss_t0 * jnp.sqrt(jnp.maximum(proj.spectral_weights, 0.0))[None, :]
+    return jnp.concatenate([mode_map, proj.anchor_cov_root], axis=1)
+
+
 def _project_single_gp_dataset(
     model: RadiocarbonModel,
     dataset: Dataset,
@@ -814,10 +844,12 @@ def _build_marginal_design_with_projections(
             pmean_parts.append(jnp.zeros((r_total,), dtype=jnp.float64))
             psd_parts.append(jnp.ones((r_total,), dtype=jnp.float64))
             if r_total > r_modes and proj.anchor_cov_root is not None:
+                b_eff_gp = model.alpha_unit * jnp.asarray(b, dtype=jnp.float64).reshape(-1)
+                gp_state_map = _gp_anchor_state_map(A, b_eff_gp, proj, cbm)
                 init_state_blocks.append(
                     (
-                        slice(col_start + r_modes, col_start + r_total),
-                        proj.anchor_cov_root,
+                        slice(col_start, col_start + r_total),
+                        gp_state_map,
                         proj.t_anchor,
                     )
                 )
@@ -2155,6 +2187,8 @@ def linear_posterior(
     ):
         anchors_match = False
     elif gp_terms and cfg_eff.include_gp_initial_cov and field_anchors:
+        # _project_single_gp_dataset uses project_causal_gp's default initial_anchor="t0",
+        # so every GP term's anchor epoch equals min(sub_t_starts) across the dataset.
         t0_c = _concrete(
             jnp.min(
                 jnp.stack(
@@ -2166,30 +2200,22 @@ def linear_posterior(
             t0_c is not None and abs(float(t0_c) - field_anchors[0]) <= 1e-9
         )
 
-    if isinstance(model.solver, ModaxSolver):
-        res = _linear_posterior_impl(
-            model,
-            dataset,
-            cfg_eff,
-            rng_key,
-            n_draws_int,
-            t_fine_arr,
-            hemisphere,
-            box_int,
-            jit_arr,
-        )
-    else:
-        res = _linear_posterior_jit(
-            model,
-            dataset,
-            cfg_eff,
-            rng_key,
-            n_draws_int,
-            t_fine_arr,
-            hemisphere,
-            box_int,
-            jit_arr,
-        )
+    impl = (
+        _linear_posterior_impl
+        if isinstance(model.solver, ModaxSolver)
+        else _linear_posterior_jit
+    )
+    res = impl(
+        model,
+        dataset,
+        cfg_eff,
+        rng_key,
+        n_draws_int,
+        t_fine_arr,
+        hemisphere,
+        box_int,
+        jit_arr,
+    )
     if not anchors_match:
         return res._replace(
             initial_state_mean=None,
