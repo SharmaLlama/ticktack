@@ -164,6 +164,11 @@ def _cached_eig_concrete(
 PropagationBackend = Literal["modal_symmetric", "modal_general", "van_loan"]
 
 
+def _is_detailed_balance(cbm: CarbonBoxModel) -> bool:
+    """True for detailed-balance CBMs (chart flag, else EffectiveCBM / ReversibleCBM)."""
+    return bool(getattr(cbm, "is_detailed_balance", isinstance(cbm, (EffectiveCBM, ReversibleCBM))))
+
+
 def _modal_decomposition(
     A: jax.Array,
     cbm: CarbonBoxModel | None = None,
@@ -175,7 +180,7 @@ def _modal_decomposition(
 
     # Case A: Detailed-balance CBMs (EffectiveCBM, ReversibleCBM, or chart-backed models) —
     # real symmetric eigh via flux balance M_i^{-1/2} A_{ij} M_j^{1/2}, valid under eager & JIT.
-    if bool(getattr(cbm, "is_detailed_balance", isinstance(cbm, (EffectiveCBM, ReversibleCBM)))):
+    if _is_detailed_balance(cbm):
         masses = cbm.reservoir_masses()
         m_sqrt = jnp.sqrt(masses)
         s_mat = (A / m_sqrt[:, None]) * m_sqrt[None, :]
@@ -1071,7 +1076,7 @@ class ExactLinearSolver(AbstractSolver):
         """
         if _modal_decomposition(cbm.matrix_A(), cbm=cbm) is None:
             return "van_loan"
-        if bool(getattr(cbm, "is_detailed_balance", isinstance(cbm, (EffectiveCBM, ReversibleCBM)))):
+        if _is_detailed_balance(cbm):
             return "modal_symmetric"
         return "modal_general"
 
@@ -1608,11 +1613,17 @@ def _equilibrium_dy0_and_drift_anchor(
     return dy0, secular_rhs_anchor
 
 
-_ODEIVPSetup = NamedTuple("_ODEIVPSetup", [
-    ("ts_sorted", jax.Array), ("inv_order", jax.Array), ("t_start", jax.Array),
-    ("t_end", jax.Array), ("step_ts", jax.Array | None), ("jump_ts", jax.Array | None),
-    ("dy_init", jax.Array), ("rhs_args", tuple[Any, ...]),
-])
+class _ODEIVPSetup(NamedTuple):
+    """Sorted save times, integration bracket, events, initial state, and RHS args."""
+
+    ts_sorted: jax.Array
+    inv_order: jax.Array
+    t_start: jax.Array
+    t_end: jax.Array
+    step_ts: jax.Array | None
+    jump_ts: jax.Array | None
+    dy_init: jax.Array
+    rhs_args: tuple[Any, ...]
 
 
 def _prepare_ode_ivp(
@@ -2048,7 +2059,7 @@ class ModaxSolver(AbstractSolver):
             )
 
         modax = _load_modax_module()
-        t_sorted, inv_idx, t_start_int, t_end_int, _, _, dy_init, rhs_args = _prepare_ode_ivp(
+        ivp = _prepare_ode_ivp(
             cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0, deduplicate=True
         )
         solver_cls = getattr(modax, self.method)
@@ -2059,17 +2070,17 @@ class ModaxSolver(AbstractSolver):
         sol = modax.diffeqsolve(
             _rhs,
             solver_cls(),
-            t0=t_start_int,
-            t1=t_end_int,
-            y0=dy_init,
-            ts=t_sorted,
-            args=rhs_args,
+            t0=ivp.t_start,
+            t1=ivp.t_end,
+            y0=ivp.dy_init,
+            ts=ivp.ts_sorted,
+            args=ivp.rhs_args,
             rtol=self.rtol,
             atol=self.atol,
             max_steps=self.max_steps,
         )
         ys_sorted = getattr(sol, "ys", sol)
-        return ys_sorted[inv_idx]
+        return ys_sorted[ivp.inv_order]
 
     def solve_delta_binned(
         self,
