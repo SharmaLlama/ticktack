@@ -931,35 +931,14 @@ def _nonlinear_residual(
     cfg_eff = LinearMarginalConfig() if cfg is None else cfg
     unmarginalized, _, _, _, _ = _partition_terms_for_cfg(model.production, cfg_eff)
     base_prod = _build_base_production(unmarginalized, model.q_std)
-
-    if not isinstance(model.solver, ModaxSolver):
-        base_model = RadiocarbonModel(
-            model.cbm,
-            base_prod,
-            solver=model.solver,
-            q_std=model.q_std,
-            alpha_unit=model.alpha_unit,
-        )
-        pred_flat = base_model.predict_d14c(dataset, concat=True)
-        return dataset.d14c_flat - pred_flat
-
-    per_series_preds: list[jax.Array] = []
-    for series in dataset.series:
-        box_idx = model._box_index_for_series(series)
-        pred_s = model.solver.predict_d14c(
-            model.cbm,
-            base_prod,
-            series.sub_t_starts,
-            series.sub_t_ends,
-            sub_weights=series.seasonal_weights.weights,
-            box_indices=box_idx,
-            q_std=model.q_std,
-            alpha_unit=model.alpha_unit,
-        )
-        per_series_preds.append(pred_s)
-
-    pred_flat = jnp.concatenate(per_series_preds, axis=0)
-    return dataset.d14c_flat - pred_flat
+    base_model = RadiocarbonModel(
+        model.cbm,
+        base_prod,
+        solver=model.solver,
+        q_std=model.q_std,
+        alpha_unit=model.alpha_unit,
+    )
+    return dataset.d14c_flat - base_model.predict_d14c(dataset, concat=True)
 
 
 def _uses_joint_mode(
@@ -991,7 +970,6 @@ def _marginal_design_is_static(
     """Return True if ``(X, prior_mean, prior_sd)`` is invariant across ``parameter_space``."""
     if isinstance(base_model.solver, ModaxSolver):
         return False
-
     joint_mode = _uses_joint_mode(base_model, parameter_space, cfg)
     for spec in parameter_space.specs:
         p = spec.path
@@ -1006,42 +984,53 @@ def _marginal_design_is_static(
         return False
 
     prod = base_model.production
-    if isinstance(prod, ProductionSum):
-        marg_names = {
-            name
-            for name, part in zip(prod.names, prod.parts)
-            if (isinstance(part, HarmonicSolar) and cfg.marginalise_solar)
-            or (isinstance(part, LinearTrend) and cfg.marginalise_trend)
-            or (isinstance(part, GPProduction) and cfg.marginalise_gp)
-            or (isinstance(part, GaussianField) and cfg.marginalise_field)
-        }
-        for spec in parameter_space.specs:
-            p = spec.path
-            if p == "production":
-                return False
-            for mn in marg_names:
-                if p == f"production.{mn}" or p.startswith(f"production.{mn}."):
-                    return False
+    _, s_t, tr_t, gp_t, f_t = _partition_terms_for_cfg(prod, cfg)
+    marg_ids = {id(t) for t in (*s_t, *tr_t, *gp_t, *f_t)}
+    if not marg_ids:
         return True
-
-    is_marg_single = (
-        (isinstance(prod, HarmonicSolar) and cfg.marginalise_solar)
-        or (isinstance(prod, LinearTrend) and cfg.marginalise_trend)
-        or (isinstance(prod, GPProduction) and cfg.marginalise_gp)
-        or (isinstance(prod, GaussianField) and cfg.marginalise_field)
+    if not isinstance(prod, ProductionSum):
+        return not any(
+            s.path == "production" or s.path.startswith("production.")
+            for s in parameter_space.specs
+        )
+    marg_prefixes = tuple(
+        f"production.{name}"
+        for name, part in zip(prod.names, prod.parts)
+        if id(part) in marg_ids
     )
-    if is_marg_single:
-        for spec in parameter_space.specs:
-            if spec.path == "production" or spec.path.startswith("production."):
-                return False
-    return True
+    return not any(
+        s.path == "production"
+        or any(s.path == pref or s.path.startswith(f"{pref}.") for pref in marg_prefixes)
+        for s in parameter_space.specs
+    )
 
 
+class _StaticWhitenFactors(NamedTuple):
+    """Pre-factored Woodbury/QR whitening arrays for a fixed ``LinearMarginal`` design."""
+
+    shift_const: jax.Array
+    inv_sigma: jax.Array
+    w_mat: jax.Array
+    p_right: jax.Array
+    const_norm: jax.Array
+
+    def whiten_scaled(self, x_scaled: jax.Array) -> jax.Array:
+        return x_scaled - self.w_mat @ (self.p_right @ x_scaled)
+
+    def whiten_residual(self, resid: jax.Array) -> jax.Array:
+        return self.whiten_scaled((resid - self.shift_const) * self.inv_sigma)
+
+    def loglike(self, resid: jax.Array) -> jax.Array:
+        u_out = self.whiten_residual(resid)
+        return -0.5 * jnp.dot(u_out, u_out) + self.const_norm
+
+
+@eqx.filter_jit
 def _prefactor_static_whiten(
     lm: LinearMarginal,
     sigma_1d: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Precompute ``(shift_const, inv_sigma, w_mat, p_right, const_norm)`` once."""
+) -> _StaticWhitenFactors:
+    """Pre-compute :class:`_StaticWhitenFactors` once for fixed ``(lm, sigma_1d)``."""
     n_obs = lm.design.shape[0]
     shift_const = lm.design @ lm.prior_mean
     inv_sigma = 1.0 / sigma_1d
@@ -1053,10 +1042,10 @@ def _prefactor_static_whiten(
         w_mat = jnp.zeros((n_obs, 0), dtype=jnp.float64)
         p_right = jnp.zeros((0, n_obs), dtype=jnp.float64)
         const_norm = -half_logdet_d - 0.5 * n_obs * math.log(2.0 * math.pi)
-        return shift_const, inv_sigma, w_mat, p_right, const_norm
+        return _StaticWhitenFactors(shift_const, inv_sigma, w_mat, p_right, const_norm)
 
     eye = jnp.eye(k, dtype=jnp.float64)
-    if lm.method == "qr":
+    if lm.method != "cholesky":
         aug = jnp.concatenate([u_mat, eye], axis=0)
         _, r_upper = jnp.linalg.qr(aug, mode="reduced")
         signs = jnp.where(jnp.diag(r_upper) >= 0.0, 1.0, -1.0)
@@ -1073,41 +1062,34 @@ def _prefactor_static_whiten(
     const_norm = (
         -half_logdet_d - half_logdet_u - 0.5 * n_obs * math.log(2.0 * math.pi)
     )
-    return shift_const, inv_sigma, w_mat, p_right, const_norm
+    return _StaticWhitenFactors(shift_const, inv_sigma, w_mat, p_right, const_norm)
 
 
-@eqx.filter_jit
-def _jit_prefactor_joint_off(
+def _prefactor_design(
     base_model: RadiocarbonModel,
     dataset: Dataset,
-    off_cfg: LinearMarginalConfig,
+    design_cfg: LinearMarginalConfig,
     sigma: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    X_off, pm_off, ps_off = _build_marginal_design(base_model, dataset, off_cfg)
-    lm_off = LinearMarginal(
-        X_off,
-        prior_mean=pm_off,
-        prior_sd=ps_off,
-        method=off_cfg.whiten_method,
-    )
-    return _prefactor_static_whiten(lm_off, sigma)
+) -> _StaticWhitenFactors:
+    X, pm, ps = _build_marginal_design(base_model, dataset, design_cfg)
+    lm = LinearMarginal(X, prior_mean=pm, prior_sd=ps, method=design_cfg.whiten_method)
+    return _prefactor_static_whiten(lm, sigma)
 
 
-@eqx.filter_jit
-def _jit_prefactor_marginal(
-    base_model: RadiocarbonModel,
-    dataset: Dataset,
-    cfg_eff: LinearMarginalConfig,
-    sigma: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-    X_m, pm_m, ps_m = _build_marginal_design(base_model, dataset, cfg_eff)
-    lm_m = LinearMarginal(
-        X_m,
-        prior_mean=pm_m,
-        prior_sd=ps_m,
-        method=cfg_eff.whiten_method,
-    )
-    return _prefactor_static_whiten(lm_m, sigma)
+class _StaticCBMObs(NamedTuple):
+    """Pre-computed modal eigendecomposition and steady-state observation scales."""
+
+    modal: tuple[jax.Array, jax.Array, jax.Array] | None
+    box_indices_flat: jax.Array
+    base_ss_flat: jax.Array
+    obs_scale_flat: jax.Array
+
+
+class _StaticLogLikeCache(NamedTuple):
+    """Unified static pre-computation bundle for :class:`FastLogLikeSpec`."""
+
+    whiten: _StaticWhitenFactors
+    cbm_obs: _StaticCBMObs | None
 
 
 class FastLogLikeSpec(eqx.Module):
@@ -1117,28 +1099,22 @@ class FastLogLikeSpec(eqx.Module):
     dataset: Dataset
     parameter_space: ParameterSpace
     cfg_eff: LinearMarginalConfig
-    mode: str = eqx.field(static=True)
     joint_mode: bool = eqx.field(static=True)
-    sigma_jitter_arr: jax.Array | None
-    shift_c: jax.Array | None
-    inv_sig: jax.Array | None
-    w_mat: jax.Array | None
-    p_right: jax.Array | None
-    const_n: jax.Array | None
-    modal_const: tuple[jax.Array, jax.Array, jax.Array] | None = None
-    box_indices_flat: jax.Array | None = None
-    base_ss_flat: jax.Array | None = None
-    obs_scale_flat: jax.Array | None = None
+    sigma_jitter_arr: jax.Array | None = None
+    static_cache: _StaticLogLikeCache | None = None
+
+    @property
+    def is_static(self) -> bool:
+        """Whether linear design whitening factors are pre-computed across ``parameter_space``."""
+        return self.static_cache is not None
 
     def _predict_exact_static(
-        self, m_eval: RadiocarbonModel, prod: ProductionTerm
+        self,
+        m_eval: RadiocarbonModel,
+        prod: ProductionTerm,
+        cbm_obs: _StaticCBMObs,
     ) -> jax.Array:
-        assert (
-            isinstance(m_eval.solver, ExactLinearSolver)
-            and self.box_indices_flat is not None
-            and self.base_ss_flat is not None
-            and self.obs_scale_flat is not None
-        )
+        assert isinstance(m_eval.solver, ExactLinearSolver)
         all_ts, all_te, all_w = _concat_padded_windows(self.dataset)
         dy = m_eval.solver.solve_delta_binned(
             m_eval.cbm,
@@ -1148,92 +1124,43 @@ class FastLogLikeSpec(eqx.Module):
             sub_weights=all_w,
             q_std=m_eval.q_std,
             alpha_unit=m_eval.alpha_unit,
-            modal=self.modal_const,
+            modal=cbm_obs.modal,
         )
-        n_tot = self.box_indices_flat.shape[0]
+        n_tot = cbm_obs.box_indices_flat.shape[0]
         return (
-            self.base_ss_flat
-            + dy[jnp.arange(n_tot), self.box_indices_flat] * self.obs_scale_flat
+            cbm_obs.base_ss_flat
+            + dy[jnp.arange(n_tot), cbm_obs.box_indices_flat] * cbm_obs.obs_scale_flat
         )
 
-    def nonlinear_residual_from_u(self, u_vec: jax.Array) -> jax.Array:
-        """Compute ``d - m_0(u_vec)`` using precomputed modal/observation factors when static."""
-        m_eval = self.parameter_space.constrain(u_vec, self.base_model)
-        can_fast_exact = (
-            isinstance(m_eval.solver, ExactLinearSolver)
-            and self.box_indices_flat is not None
-            and self.base_ss_flat is not None
-            and self.obs_scale_flat is not None
-        )
-        if self.joint_mode:
-            pred = (
-                self._predict_exact_static(m_eval, m_eval.production)
-                if can_fast_exact
-                else m_eval.predict_d14c(self.dataset, offsets=None, concat=True)
-            )
-            return self.dataset.d14c_flat - pred
-        if can_fast_exact:
-            unmarginalized, _, _, _, _ = _partition_terms_for_cfg(
-                m_eval.production, self.cfg_eff
-            )
-            base_prod = _build_base_production(unmarginalized, m_eval.q_std)
-            pred = self._predict_exact_static(m_eval, base_prod)
-            return self.dataset.d14c_flat - pred
-        return _nonlinear_residual(m_eval, self.dataset, self.cfg_eff)
-
-    def __call__(self, u_vec: jax.Array) -> jax.Array:
-        m_eval = self.parameter_space.constrain(u_vec, self.base_model)
-        can_fast_exact = (
-            isinstance(m_eval.solver, ExactLinearSolver)
-            and self.box_indices_flat is not None
-            and self.base_ss_flat is not None
-            and self.obs_scale_flat is not None
-        )
-        if self.mode == "joint_no_off":
-            assert self.inv_sig is not None and self.const_n is not None
-            pred = (
-                self._predict_exact_static(m_eval, m_eval.production)
-                if can_fast_exact
-                else m_eval.predict_d14c(self.dataset, offsets=None, concat=True)
-            )
-            x_arr = (self.dataset.d14c_flat - pred) * self.inv_sig
-            return -0.5 * jnp.dot(x_arr, x_arr) + self.const_n
-        if self.mode == "joint_off":
-            assert (
-                self.shift_c is not None
-                and self.inv_sig is not None
-                and self.w_mat is not None
-                and self.p_right is not None
-                and self.const_n is not None
-            )
-            pred = (
-                self._predict_exact_static(m_eval, m_eval.production)
-                if can_fast_exact
-                else m_eval.predict_d14c(self.dataset, offsets=None, concat=True)
-            )
-            x_arr = (self.dataset.d14c_flat - pred - self.shift_c) * self.inv_sig
-            u_out = x_arr - self.w_mat @ (self.p_right @ x_arr)
-            return -0.5 * jnp.dot(u_out, u_out) + self.const_n
-        if self.mode == "marginal":
-            assert (
-                self.shift_c is not None
-                and self.inv_sig is not None
-                and self.w_mat is not None
-                and self.p_right is not None
-                and self.const_n is not None
-            )
-            if can_fast_exact:
+    def _residual_for_model(self, m_eval: RadiocarbonModel) -> jax.Array:
+        cbm_obs = self.static_cache.cbm_obs if self.static_cache is not None else None
+        if cbm_obs is not None and isinstance(m_eval.solver, ExactLinearSolver):
+            if self.joint_mode:
+                prod = m_eval.production
+            else:
                 unmarginalized, _, _, _, _ = _partition_terms_for_cfg(
                     m_eval.production, self.cfg_eff
                 )
-                base_prod = _build_base_production(unmarginalized, m_eval.q_std)
-                pred = self._predict_exact_static(m_eval, base_prod)
-                resid = self.dataset.d14c_flat - pred
-            else:
-                resid = _nonlinear_residual(m_eval, self.dataset, self.cfg_eff)
-            x_arr = (resid - self.shift_c) * self.inv_sig
-            u_out = x_arr - self.w_mat @ (self.p_right @ x_arr)
-            return -0.5 * jnp.dot(u_out, u_out) + self.const_n
+                prod = _build_base_production(unmarginalized, m_eval.q_std)
+            return self.dataset.d14c_flat - self._predict_exact_static(
+                m_eval, prod, cbm_obs
+            )
+        if self.joint_mode:
+            return self.dataset.d14c_flat - m_eval.predict_d14c(
+                self.dataset, offsets=None, concat=True
+            )
+        return _nonlinear_residual(m_eval, self.dataset, self.cfg_eff)
+
+    def nonlinear_residual_from_u(self, u_vec: jax.Array) -> jax.Array:
+        """Compute ``d - m_0(u_vec)`` using pre-computed modal and observation factors when static."""
+        return self._residual_for_model(
+            self.parameter_space.constrain(u_vec, self.base_model)
+        )
+
+    def __call__(self, u_vec: jax.Array) -> jax.Array:
+        m_eval = self.parameter_space.constrain(u_vec, self.base_model)
+        if self.static_cache is not None:
+            return self.static_cache.whiten.loglike(self._residual_for_model(m_eval))
         if self.joint_mode:
             return joint_log_likelihood(
                 m_eval,
@@ -1270,14 +1197,9 @@ def _jit_static_cbm_arrays(
 
 def _precompute_static_cbm_obs(
     base_model: RadiocarbonModel, dataset: Dataset
-) -> tuple[
-    tuple[jax.Array, jax.Array, jax.Array] | None,
-    jax.Array | None,
-    jax.Array | None,
-    jax.Array | None,
-]:
+) -> _StaticCBMObs | None:
     if not isinstance(base_model.solver, ExactLinearSolver):
-        return None, None, None, None
+        return None
     box_idx_flat = jnp.array(
         [
             base_model._box_index_for_series(s)
@@ -1290,7 +1212,7 @@ def _precompute_static_cbm_obs(
         base_model, box_idx_flat
     )
     modal_c = _modal_decomposition(A_c, cbm=base_model.cbm)
-    return modal_c, box_idx_flat, base_ss_flat, obs_scale_flat
+    return _StaticCBMObs(modal_c, box_idx_flat, base_ss_flat, obs_scale_flat)
 
 
 def _make_fast_unconstrained_loglike(
@@ -1302,13 +1224,13 @@ def _make_fast_unconstrained_loglike(
 ) -> FastLogLikeSpec:
     """Build a PyTree-callable ``u_vec -> log_likelihood``, pre-factoring ``LinearMarginal`` when static."""
     cfg_eff = LinearMarginalConfig() if cfg is None else cfg
-    joint_mode = _uses_joint_mode(base_model, parameter_space, cfg_eff)
+    joint_mode = bool(_uses_joint_mode(base_model, parameter_space, cfg_eff))
     jit_arr = (
         jnp.asarray(sigma_jitter, dtype=jnp.float64)
         if sigma_jitter is not None
         else None
     )
-
+    static_cache: _StaticLogLikeCache | None = None
     if (
         dataset.n_obs > 0
         and not isinstance(sigma_jitter, jax.core.Tracer)
@@ -1318,93 +1240,19 @@ def _make_fast_unconstrained_loglike(
         sigma = jnp.asarray(dataset.sigma_flat, dtype=jnp.float64)
         if jit_arr is not None:
             sigma = jnp.sqrt(jnp.square(sigma) + jnp.square(jit_arr))
-        modal_c, box_idx_f, base_ss_f, obs_sc_f = _precompute_static_cbm_obs(
-            base_model, dataset
+        design_cfg = _offset_only_cfg(cfg_eff) if joint_mode else cfg_eff
+        static_cache = _StaticLogLikeCache(
+            whiten=_prefactor_design(base_model, dataset, design_cfg, sigma),
+            cbm_obs=_precompute_static_cbm_obs(base_model, dataset),
         )
-
-        if joint_mode:
-            if cfg_eff.offset_mode == "none":
-                inv_sig = 1.0 / sigma
-                const_n = -jnp.sum(jnp.log(sigma)) - 0.5 * dataset.n_obs * math.log(
-                    2.0 * math.pi
-                )
-                return FastLogLikeSpec(
-                    base_model=base_model,
-                    dataset=dataset,
-                    parameter_space=parameter_space,
-                    cfg_eff=cfg_eff,
-                    mode="joint_no_off",
-                    joint_mode=True,
-                    sigma_jitter_arr=jit_arr,
-                    shift_c=None,
-                    inv_sig=inv_sig,
-                    w_mat=None,
-                    p_right=None,
-                    const_n=const_n,
-                    modal_const=modal_c,
-                    box_indices_flat=box_idx_f,
-                    base_ss_flat=base_ss_f,
-                    obs_scale_flat=obs_sc_f,
-                )
-
-            off_cfg = _offset_only_cfg(cfg_eff)
-            shift_c, inv_sig, w_mat, p_right, const_n = _jit_prefactor_joint_off(
-                base_model, dataset, off_cfg, sigma
-            )
-            return FastLogLikeSpec(
-                base_model=base_model,
-                dataset=dataset,
-                parameter_space=parameter_space,
-                cfg_eff=cfg_eff,
-                mode="joint_off",
-                joint_mode=True,
-                sigma_jitter_arr=jit_arr,
-                shift_c=shift_c,
-                inv_sig=inv_sig,
-                w_mat=w_mat,
-                p_right=p_right,
-                const_n=const_n,
-                modal_const=modal_c,
-                box_indices_flat=box_idx_f,
-                base_ss_flat=base_ss_f,
-                obs_scale_flat=obs_sc_f,
-            )
-
-        shift_c, inv_sig, w_mat, p_right, const_n = _jit_prefactor_marginal(
-            base_model, dataset, cfg_eff, sigma
-        )
-        return FastLogLikeSpec(
-            base_model=base_model,
-            dataset=dataset,
-            parameter_space=parameter_space,
-            cfg_eff=cfg_eff,
-            mode="marginal",
-            joint_mode=False,
-            sigma_jitter_arr=jit_arr,
-            shift_c=shift_c,
-            inv_sig=inv_sig,
-            w_mat=w_mat,
-            p_right=p_right,
-            const_n=const_n,
-            modal_const=modal_c,
-            box_indices_flat=box_idx_f,
-            base_ss_flat=base_ss_f,
-            obs_scale_flat=obs_sc_f,
-        )
-
     return FastLogLikeSpec(
         base_model=base_model,
         dataset=dataset,
         parameter_space=parameter_space,
         cfg_eff=cfg_eff,
-        mode="dynamic",
-        joint_mode=bool(joint_mode),
+        joint_mode=joint_mode,
         sigma_jitter_arr=jit_arr,
-        shift_c=None,
-        inv_sig=None,
-        w_mat=None,
-        p_right=None,
-        const_n=None,
+        static_cache=static_cache,
     )
 
 
@@ -1481,12 +1329,9 @@ def _laplace_marginal_log_likelihood_lgf(
         pm_o = jnp.concatenate([pm_o, jnp.zeros((m_rank,), dtype=jnp.float64)], axis=0)
         ps_o = jnp.concatenate([ps_o, jnp.ones((m_rank,), dtype=jnp.float64)], axis=0)
     lm_o = LinearMarginal(X_o, prior_mean=pm_o, prior_sd=ps_o, method=cfg.whiten_method)
-    shift_c, inv_sig, w_mat, p_right, const_n = _prefactor_static_whiten(lm_o, sigma)
-
-    x_arr = (resid_base - shift_c) * inv_sig
-    x_target = x_arr - w_mat @ (p_right @ x_arr)
-    wg_scaled = inv_sig[:, None] * op_lgf.w_grid
-    w_grid_eff = wg_scaled - w_mat @ (p_right @ wg_scaled)
+    whiten = _prefactor_static_whiten(lm_o, sigma)
+    x_target = whiten.whiten_residual(resid_base)
+    w_grid_eff = whiten.whiten_scaled(whiten.inv_sigma[:, None] * op_lgf.w_grid)
 
     def _r_eff_of_z(z_in: jax.Array) -> jax.Array:
         dq = lgf.with_latent(z_in).evaluate_grid(q_std=model.q_std)
@@ -1515,7 +1360,7 @@ def _laplace_marginal_log_likelihood_lgf(
     j_map = jax.jacfwd(_r_eff_of_z)(z_c)
     chol = jnp.linalg.cholesky(jnp.eye(lgf.n_grid, dtype=jnp.float64) + j_map.T @ j_map)
     half_ld_field = jnp.sum(jnp.log(jnp.diag(chol)))
-    return const_n - 0.5 * (r_map @ r_map) - 0.5 * (z_c @ z_c) - half_ld_field
+    return whiten.const_norm - 0.5 * (r_map @ r_map) - 0.5 * (z_c @ z_c) - half_ld_field
 
 
 def marginal_log_likelihood(

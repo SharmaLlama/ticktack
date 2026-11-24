@@ -134,7 +134,7 @@ def _vmap_fast_lk_jit(
     fast_lk_spec: FastLogLikeSpec,
     u_batch: jax.Array,
 ) -> jax.Array:
-    if fast_lk_spec.mode == "dynamic":
+    if not fast_lk_spec.is_static:
         return jax.lax.map(fast_lk_spec, u_batch, batch_size=4)
     return jax.vmap(fast_lk_spec)(u_batch)
 
@@ -144,7 +144,7 @@ def _vmap_fast_resid_jit(
     fast_lk_spec: FastLogLikeSpec,
     u_batch: jax.Array,
 ) -> jax.Array:
-    if fast_lk_spec.mode == "dynamic":
+    if not fast_lk_spec.is_static:
         return jax.lax.map(fast_lk_spec.nonlinear_residual_from_u, u_batch, batch_size=4)
     return jax.vmap(fast_lk_spec.nonlinear_residual_from_u)(u_batch)
 
