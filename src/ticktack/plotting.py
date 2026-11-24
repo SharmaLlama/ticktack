@@ -2008,7 +2008,9 @@ def plot_cbm_mode_impulse_responses(
             )
             pos_list = list(range(len(res.mode_indices)))
         else:
-            res_all = cbm_mode_impulse_responses(cbm_or_result, lag_grid, None, prior_cbm_sd=prior_cbm_sd)
+            res_all = cbm_mode_impulse_responses(
+                cbm_or_result, lag_grid, None, prior_cbm_sd=prior_cbm_sd
+            )
             avail_idx = list(res_all.mode_indices)
             pos_list = [avail_idx.index(int(m)) for m in modes if int(m) in avail_idx]
             if not pos_list:

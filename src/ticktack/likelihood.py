@@ -1324,8 +1324,12 @@ def _laplace_marginal_log_likelihood_lgf(
 
 
 def _whiten_model_data(
-    model: RadiocarbonModel, dataset: Dataset, cfg: LinearMarginalConfig,
-    sigma: jax.Array, *, joint_mode: bool = False,
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    cfg: LinearMarginalConfig,
+    sigma: jax.Array,
+    *,
+    joint_mode: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Return ``(whitened_residual, half_logdet)`` for marginal or joint likelihood."""
     eff_cfg = _offset_only_cfg(cfg) if joint_mode else cfg
@@ -1334,7 +1338,9 @@ def _whiten_model_data(
         return (dataset.d14c_flat - pred) / sigma, jnp.sum(jnp.log(sigma))
     resid = _nonlinear_residual(model, dataset, eff_cfg)
     X, pm, ps = _build_marginal_design(model, dataset, eff_cfg)
-    return LinearMarginal(X, prior_mean=pm, prior_sd=ps, method=eff_cfg.whiten_method).whiten(resid, sigma)
+    return LinearMarginal(X, prior_mean=pm, prior_sd=ps, method=eff_cfg.whiten_method).whiten(
+        resid, sigma
+    )
 
 
 def marginal_log_likelihood(
@@ -1549,7 +1555,9 @@ def _unpack_offset_coeffs(
     if n_off <= 0 or coeffs.shape[-1] < n_off:
         return jnp.zeros(batch, dtype=jnp.float64), zeros_lab
     if cfg.offset_mode == "hierarchical":
-        return coeffs[..., 0], (coeffs[..., 1 : 1 + n_series] if n_off == 1 + n_series else zeros_lab)
+        return coeffs[..., 0], (
+            coeffs[..., 1 : 1 + n_series] if n_off == 1 + n_series else zeros_lab
+        )
     if cfg.offset_mode == "shared":
         return coeffs[..., 0], zeros_lab
     l_out = coeffs[..., :n_series]
