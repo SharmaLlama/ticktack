@@ -45,12 +45,11 @@ from ticktack.fields import (
     laplace_samples,
     log_evidence,
     optimize_gp_kernel,
-    plot_evidence_grid,
-    plot_field_draws,
     predict_field_d14c,
     select_gp_kernel,
     stationary_cbm_spectral_cov,
 )
+from ticktack.plotting import plot_evidence_grid, plot_field_draws
 from ticktack.fitting import fit_map
 from ticktack.likelihood import (
     LinearMarginalConfig,
