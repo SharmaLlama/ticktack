@@ -905,16 +905,15 @@ def _nonlinear_residual(
 
 def _uses_joint_mode(
     model: RadiocarbonModel,
-    parameter_space: ParameterSpace | None = None,
-    cfg: LinearMarginalConfig | None = None,
+    parameter_space: ParameterSpace | None,
+    cfg: LinearMarginalConfig,
 ) -> bool:
     """Return True when inference runs in joint mode rather than marginalizing ``production``."""
     if isinstance(model.solver, ModaxSolver):
         return True
-    cfg_eff = LinearMarginalConfig() if cfg is None else cfg
     lgf, _ = _extract_single_lgf(model.production)
     if lgf is not None:
-        if not cfg_eff.marginalize_field:
+        if not cfg.marginalize_field:
             return True
         if parameter_space is None:
             return False
@@ -1325,7 +1324,8 @@ def _laplace_marginal_log_likelihood_lgf(
 
 
 def _whiten_model_data(
-    model: RadiocarbonModel, dataset: Dataset, cfg: LinearMarginalConfig, sigma: jax.Array, *, joint_mode: bool = False
+    model: RadiocarbonModel, dataset: Dataset, cfg: LinearMarginalConfig,
+    sigma: jax.Array, *, joint_mode: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
     """Return ``(whitened_residual, half_logdet)`` for marginal or joint likelihood."""
     eff_cfg = _offset_only_cfg(cfg) if joint_mode else cfg
