@@ -18,25 +18,24 @@ import optax
 import optimistix as optx
 from jax.typing import ArrayLike
 
+from ._utils import _sigma_with_jitter
 from .data import Dataset
 from .likelihood import (
     FastLogLikeSpec,
     LinearMarginalConfig,
     LinearPosteriorResult,
     ParameterSpace,
-    _build_marginal_design,
     _extract_single_lgf,
     _make_fast_unconstrained_loglike,
-    _nonlinear_residual,
     _offset_only_cfg,
     _uses_joint_mode,
+    _whiten_model_data,
     joint_log_likelihood,
     joint_log_posterior,
     linear_posterior,
     marginal_log_likelihood,
     marginal_log_posterior,
 )
-from .linear import LinearMarginal
 from .model import RadiocarbonModel
 from .solvers import ModaxSolver
 
@@ -85,14 +84,6 @@ class MAPResult(NamedTuple):
         return self.model
 
 
-def _use_joint_mode(
-    model: RadiocarbonModel,
-    parameter_space: ParameterSpace | None,
-    cfg: LinearMarginalConfig,
-) -> bool:
-    return _uses_joint_mode(model, parameter_space, cfg)
-
-
 def _eval_log_posterior(
     u_vec: jax.Array,
     model: RadiocarbonModel,
@@ -102,7 +93,7 @@ def _eval_log_posterior(
     sigma_jitter: ArrayLike | None,
     map_space: Literal["unconstrained", "constrained"] = "unconstrained",
 ) -> jax.Array:
-    if _use_joint_mode(model, parameter_space, cfg):
+    if _uses_joint_mode(model, parameter_space, cfg):
         return joint_log_posterior(
             model,
             dataset,
@@ -130,7 +121,7 @@ def _eval_log_likelihood(
     sigma_jitter: ArrayLike | None,
     parameter_space: ParameterSpace | None = None,
 ) -> jax.Array:
-    if _use_joint_mode(model_eval, parameter_space, cfg):
+    if _uses_joint_mode(model_eval, parameter_space, cfg):
         return joint_log_likelihood(
             model_eval,
             dataset,
@@ -244,17 +235,9 @@ def _lm_whitened_pair_core(
     joint_mode: bool,
 ) -> tuple[jax.Array, jax.Array]:
     constrained = parameter_space.constrain(u, model)
-    if joint_mode and eff_cfg.offset_mode == "none":
-        pred = constrained.predict_d14c(dataset, offsets=None, concat=True)
-        u_data = (dataset.d14c_flat - pred) / sigma_arr
-        hld = jnp.sum(jnp.log(sigma_arr))
-    else:
-        X, pm, ps = _build_marginal_design(constrained, dataset, eff_cfg)
-        raw_resid = _nonlinear_residual(constrained, dataset, eff_cfg)
-        lm = LinearMarginal(
-            X, prior_mean=pm, prior_sd=ps, method=eff_cfg.whiten_method
-        )
-        u_data, hld = lm.whiten(raw_resid, sigma_arr)
+    u_data, hld = _whiten_model_data(
+        constrained, dataset, eff_cfg, sigma_arr, joint_mode=joint_mode
+    )
     u_prior = (u - parameter_space.prior_means) / parameter_space.prior_sds
     return jnp.concatenate([u_data, u_prior], axis=0), hld
 
@@ -330,14 +313,9 @@ def _run_levenberg_marquardt(
     fast_lk_spec: FastLogLikeSpec | None = None,
 ) -> tuple[jax.Array, bool, int]:
     """Run module-cached ``@eqx.filter_jit`` ``optimistix.LevenbergMarquardt``."""
-    sigma_arr = jnp.asarray(dataset.sigma_flat, dtype=jnp.float64)
-    if sigma_jitter is not None:
-        sigma_arr = jnp.sqrt(
-            jnp.square(sigma_arr)
-            + jnp.square(jnp.asarray(sigma_jitter, dtype=jnp.float64))
-        )
+    sigma_arr = _sigma_with_jitter(dataset.sigma_flat, sigma_jitter)
 
-    joint_mode = bool(_use_joint_mode(model, parameter_space, cfg))
+    joint_mode = bool(_uses_joint_mode(model, parameter_space, cfg))
     if not joint_mode and _extract_single_lgf(model.production)[0] is not None:
         return _run_bfgs(
             u0,
@@ -683,7 +661,7 @@ def fit_map(
             linear_posterior(
                 model,
                 dataset,
-                _offset_only_cfg(cfg) if _use_joint_mode(model, parameter_space, cfg) else cfg,
+                _offset_only_cfg(cfg) if _uses_joint_mode(model, parameter_space, cfg) else cfg,
                 rng_key=rng_key,
                 n_draws=n_fine_draws,
                 t_fine=t_fine,
@@ -802,12 +780,12 @@ def fit_map(
     lin_post = None
     if compute_linear_posterior:
         is_lgf_marg = (
-            not _use_joint_mode(model_map, parameter_space, cfg)
+            not _uses_joint_mode(model_map, parameter_space, cfg)
             and _extract_single_lgf(model_map.production)[0] is not None
         )
         lin_cfg = (
             _offset_only_cfg(cfg)
-            if _use_joint_mode(model_map, parameter_space, cfg) or is_lgf_marg
+            if _uses_joint_mode(model_map, parameter_space, cfg) or is_lgf_marg
             else cfg
         )
         lin_post = linear_posterior(
