@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import functools
 import math
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 import diffrax
 import equinox as eqx
@@ -173,9 +173,9 @@ def _modal_decomposition(
     if n == 0:
         return None
 
-    # Case A: Detailed-balance CBMs (EffectiveCBM, ReversibleCBM) — real symmetric eigh
-    # via flux balance M_i^{-1/2} A_{ij} M_j^{1/2}, valid under both eager and JAX tracers.
-    if isinstance(cbm, (EffectiveCBM, ReversibleCBM)):
+    # Case A: Detailed-balance CBMs (EffectiveCBM, ReversibleCBM, or chart-backed models) —
+    # real symmetric eigh via flux balance M_i^{-1/2} A_{ij} M_j^{1/2}, valid under eager & JIT.
+    if bool(getattr(cbm, "is_detailed_balance", isinstance(cbm, (EffectiveCBM, ReversibleCBM)))):
         masses = cbm.reservoir_masses()
         m_sqrt = jnp.sqrt(masses)
         s_mat = (A / m_sqrt[:, None]) * m_sqrt[None, :]
@@ -1071,7 +1071,7 @@ class ExactLinearSolver(AbstractSolver):
         """
         if _modal_decomposition(cbm.matrix_A(), cbm=cbm) is None:
             return "van_loan"
-        if isinstance(cbm, (EffectiveCBM, ReversibleCBM)):
+        if bool(getattr(cbm, "is_detailed_balance", isinstance(cbm, (EffectiveCBM, ReversibleCBM)))):
             return "modal_symmetric"
         return "modal_general"
 
@@ -1608,6 +1608,107 @@ def _equilibrium_dy0_and_drift_anchor(
     return dy0, secular_rhs_anchor
 
 
+_ODEIVPSetup = NamedTuple("_ODEIVPSetup", [
+    ("ts_sorted", jax.Array), ("inv_order", jax.Array), ("t_start", jax.Array),
+    ("t_end", jax.Array), ("step_ts", jax.Array | None), ("jump_ts", jax.Array | None),
+    ("dy_init", jax.Array), ("rhs_args", tuple[Any, ...]),
+])
+
+
+def _prepare_ode_ivp(
+    cbm: CarbonBoxModel, production: ProductionTerm, ts: jax.Array, *,
+    q_std: ArrayLike, alpha_unit: ArrayLike, t0: ArrayLike | None = None,
+    y0: ArrayLike | None = None, deduplicate: bool = False,
+) -> _ODEIVPSetup:
+    """Sort timestamps, bracket integration horizon/events, and resolve initial state."""
+    if deduplicate and not isinstance(ts, jax.core.Tracer):
+        ts_sorted, inv_order = jnp.unique(ts, return_inverse=True)
+    else:
+        order = jnp.argsort(ts)
+        inv_order, ts_sorted = jnp.argsort(order), ts[order]
+
+    A0 = cbm.matrix_A()
+    b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
+    y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
+    terms = _unpack_terms(production)
+
+    eff_t0 = ts_sorted[0] if (t0 is None and y0 is not None) else t0
+    t_start, step_ts, jump_ts = _collect_initial_time_and_events(
+        terms, ts_sorted[0], ts_sorted[-1], eff_t0)
+    t_end = jnp.maximum(ts_sorted[-1], t_start + 1e-9)
+
+    dy_init, secular_anchor = _equilibrium_dy0_and_drift_anchor(A0, b_scaled, terms, t_start, q_std)
+    if y0 is not None:
+        dy_init = jnp.asarray(y0, dtype=jnp.float64) - y_ss
+        secular_anchor = jnp.zeros_like(secular_anchor)
+
+    rhs_args = (cbm, production, b_scaled, y_ss, A0, secular_anchor, q_std)
+    return _ODEIVPSetup(ts_sorted, inv_order, t_start, t_end, step_ts, jump_ts, dy_init, rhs_args)
+
+
+def _eval_ode_ddy(
+    a_at_fn: Callable[..., jax.Array], t: jax.Array, dy: jax.Array, rhs_args: tuple[Any, ...]
+) -> jax.Array:
+    """Evaluate ``d(delta_y)/dt`` for autonomous or non-autonomous ``A(t)``."""
+    cbm_arg, prod_arg, b_sc, y_ss_arg, A0_arg, sec_anc, q_s = rhs_args
+    At = a_at_fn(cbm_arg, t)
+    return At @ dy + (At - A0_arg) @ y_ss_arg + b_sc * prod_arg.delta_q(t, q_std=q_s) + sec_anc
+
+
+def _combine_subwindows(values: jax.Array, subwindow_meta: tuple[Any, ...]) -> jax.Array:
+    """Combine 1D or weighted 2D ``(N_r, M_w)`` seasonal sub-window values to ``(N_r, n)``."""
+    w_2d, is_1d, orig_shape = subwindow_meta
+    if is_1d:
+        return values
+    assert w_2d is not None
+    return jnp.sum(values.reshape((*orig_shape, values.shape[-1])) * w_2d[:, :, None], axis=1)
+
+
+def _unpack_cumulative_windows(
+    cum_sorted: jax.Array, inv_order: jax.Array, a_flat: jax.Array, b_flat: jax.Array,
+    subwindow_meta: tuple[Any, ...],
+) -> jax.Array:
+    """Convert sorted cumulative-integral boundary states to seasonal-window means."""
+    cum_all, n_w = cum_sorted[inv_order], a_flat.shape[0]
+    win_avg = (cum_all[n_w:] - cum_all[:n_w]) / (b_flat - a_flat)[:, None]
+    return _combine_subwindows(win_avg, subwindow_meta)
+
+
+def _gl16_window_nodes(a_flat: jax.Array, b_flat: jax.Array) -> jax.Array:
+    """Map 16-point Gauss-Legendre nodes onto flattened seasonal windows ``[a, b]``."""
+    xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
+    return (a_flat[:, None] + (b_flat - a_flat)[:, None] * xi[None, :]).reshape(-1)
+
+
+def _gl16_reduce_windows(
+    quad_vals: jax.Array, n_w: int, subwindow_meta: tuple[Any, ...]
+) -> jax.Array:
+    """Integrate ``(N_w * 16, n)`` GL16 node values into seasonal-window means."""
+    wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
+    vals_3d = quad_vals.reshape((n_w, wq.shape[0], quad_vals.shape[-1]))
+    return _combine_subwindows(jnp.einsum("wqn,q->wn", vals_3d, wq), subwindow_meta)
+
+
+def _prepare_suess_params(
+    cbm: CarbonBoxModel, q_std: ArrayLike, alpha_unit: ArrayLike,
+    delta_global: ArrayLike, relative_to: Literal["standard", "ambient"],
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """Compute ``(y_base, excursion_scale, r_ref)`` for time-varying ``M_c(t)`` ``Delta14C``."""
+    y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
+    r_ref = cbm.reference_specific_activity(q_std=q_std, alpha_unit=alpha_unit)
+    scale_amb = 1.0 + jnp.asarray(delta_global, dtype=jnp.float64) / 1000.0
+    excursion_scale = scale_amb if relative_to == "ambient" else jnp.asarray(1.0, dtype=jnp.float64)
+    return y_ss * scale_amb, excursion_scale, r_ref
+
+
+def _suess_instantaneous_d14c(
+    dy: jax.Array, masses: jax.Array, suess_params: tuple[jax.Array, jax.Array, jax.Array]
+) -> jax.Array:
+    """Evaluate instantaneous ``Delta14C`` (``permil``) under time-varying ``M_c(t)``."""
+    y_base, excursion_scale, r_ref = suess_params
+    return 1000.0 * (((y_base + excursion_scale * dy) / masses) / r_ref - 1.0)
+
+
 class DiffraxSolver(AbstractSolver):
     """General adaptive ODE solver backed by ``diffrax`` (``Tsit5`` or ``Kvaerno5``).
 
@@ -1659,28 +1760,16 @@ class DiffraxSolver(AbstractSolver):
             return diffrax.Dopri8()
         raise RuntimeError(f"Unhandled solver method {self.method!r}")
 
-    def _collect_initial_time_and_events(
-        self,
-        terms: tuple[ProductionTerm, ...],
-        earliest_obs: jax.Array,
-        latest_obs: jax.Array,
-        t0_override: ArrayLike | None,
-    ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
-        return _collect_initial_time_and_events(
-            terms, earliest_obs, latest_obs, t0_override
-        )
-
-    def _equilibrium_dy0_and_drift_anchor(
-        self,
-        A0: jax.Array,
-        b_scaled: jax.Array,
-        terms: tuple[ProductionTerm, ...],
-        t_start_int: jax.Array,
-        q_std: ArrayLike,
-    ) -> tuple[jax.Array, jax.Array]:
-        return _equilibrium_dy0_and_drift_anchor(
-            A0, b_scaled, terms, t_start_int, q_std
-        )
+    def _run_diffeqsolve(
+        self, rhs: Callable[..., Any], ivp: _ODEIVPSetup, y0_state: Any, args: Any
+    ) -> Any:
+        return diffrax.diffeqsolve(
+            diffrax.ODETerm(rhs), self._make_diffrax_solver(),
+            t0=ivp.t_start, t1=ivp.t_end, dt0=self.dt0, y0=y0_state, args=args,
+            saveat=diffrax.SaveAt(ts=ivp.ts_sorted), max_steps=self.max_steps,
+            stepsize_controller=diffrax.PIDController(
+                rtol=self.rtol, atol=self.atol, step_ts=ivp.step_ts, jump_ts=ivp.jump_ts),
+        ).ys
 
     def _A_at(self, cbm: CarbonBoxModel, t: jax.Array) -> jax.Array:
         if self.matrix_A_fn is not None:
@@ -1708,56 +1797,13 @@ class DiffraxSolver(AbstractSolver):
         y0: ArrayLike | None = None,
     ) -> jax.Array:
         t_arr = jnp.atleast_1d(jnp.asarray(t_eval, dtype=jnp.float64))
-        order = jnp.argsort(t_arr)
-        inv_order = jnp.argsort(order)
-        t_sorted = t_arr[order]
-
-        A0 = cbm.matrix_A()
-        b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
-        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-        terms = _unpack_terms(production)
-
-        eff_t0 = t_sorted[0] if (t0 is None and y0 is not None) else t0
-        t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
-            terms, t_sorted[0], t_sorted[-1], eff_t0
-        )
-        t_end_int = jnp.maximum(t_sorted[-1], t_start_int + 1e-9)
-
-        dy0_eq, secular_anchor = self._equilibrium_dy0_and_drift_anchor(
-            A0, b_scaled, terms, t_start_int, q_std
-        )
-        if y0 is not None:
-            dy_init = jnp.asarray(y0, dtype=jnp.float64) - y_ss
-            secular_anchor = jnp.zeros_like(secular_anchor)
-        else:
-            dy_init = dy0_eq
+        ivp = _prepare_ode_ivp(
+            cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0)
 
         def _rhs(t: jax.Array, dy: jax.Array, args: Any) -> jax.Array:
-            cbm_arg, prod_arg, b_sc, y_ss_arg, A0_arg, sec_anc, q_s = args
-            At = self._A_at(cbm_arg, t)
-            dq_t = prod_arg.delta_q(t, q_std=q_s)
-            non_auton = (At - A0_arg) @ y_ss_arg
-            return At @ dy + non_auton + b_sc * dq_t + sec_anc
+            return _eval_ode_ddy(self._A_at, t, dy, args)
 
-        controller = diffrax.PIDController(
-            rtol=self.rtol,
-            atol=self.atol,
-            step_ts=step_ts,
-            jump_ts=jump_ts,
-        )
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(_rhs),
-            self._make_diffrax_solver(),
-            t0=t_start_int,
-            t1=t_end_int,
-            dt0=self.dt0,
-            y0=dy_init,
-            args=(cbm, production, b_scaled, y_ss, A0, secular_anchor, q_std),
-            saveat=diffrax.SaveAt(ts=t_sorted),
-            stepsize_controller=controller,
-            max_steps=self.max_steps,
-        )
-        return sol.ys[inv_order]
+        return self._run_diffeqsolve(_rhs, ivp, ivp.dy_init, ivp.rhs_args)[ivp.inv_order]
 
     def solve_delta_binned(
         self,
@@ -1776,74 +1822,19 @@ class DiffraxSolver(AbstractSolver):
             t_starts, t_ends, sub_weights
         )
         all_bounds = jnp.concatenate([a_flat, b_flat])
-        order = jnp.argsort(all_bounds)
-        inv_order = jnp.argsort(order)
-        ts_sorted = all_bounds[order]
-
-        A0 = cbm.matrix_A()
-        b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
-        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-        terms = _unpack_terms(production)
-
-        eff_t0 = ts_sorted[0] if (t0 is None and y0 is not None) else t0
-        t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
-            terms, ts_sorted[0], ts_sorted[-1], eff_t0
-        )
-        t_end_int = jnp.maximum(ts_sorted[-1], t_start_int + 1e-9)
-
-        dy0_eq, secular_anchor = self._equilibrium_dy0_and_drift_anchor(
-            A0, b_scaled, terms, t_start_int, q_std
-        )
-        if y0 is not None:
-            dy_init = jnp.asarray(y0, dtype=jnp.float64) - y_ss
-            secular_anchor = jnp.zeros_like(secular_anchor)
-        else:
-            dy_init = dy0_eq
-
-        Y_init = jnp.zeros_like(dy_init)
+        ivp = _prepare_ode_ivp(
+            cbm, production, all_bounds, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0)
 
         def _aug_rhs(
             t: jax.Array, state: tuple[jax.Array, jax.Array], args: Any
         ) -> tuple[jax.Array, jax.Array]:
             dy, _ = state
-            cbm_arg, prod_arg, b_sc, y_ss_arg, A0_arg, sec_anc, q_s = args
-            At = self._A_at(cbm_arg, t)
-            dq_t = prod_arg.delta_q(t, q_std=q_s)
-            non_auton = (At - A0_arg) @ y_ss_arg
-            ddy = At @ dy + non_auton + b_sc * dq_t + sec_anc
-            return ddy, dy
+            return _eval_ode_ddy(self._A_at, t, dy, args), dy
 
-        controller = diffrax.PIDController(
-            rtol=self.rtol,
-            atol=self.atol,
-            step_ts=step_ts,
-            jump_ts=jump_ts,
-        )
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(_aug_rhs),
-            self._make_diffrax_solver(),
-            t0=t_start_int,
-            t1=t_end_int,
-            dt0=self.dt0,
-            y0=(dy_init, Y_init),
-            args=(cbm, production, b_scaled, y_ss, A0, secular_anchor, q_std),
-            saveat=diffrax.SaveAt(ts=ts_sorted),
-            stepsize_controller=controller,
-            max_steps=self.max_steps,
-        )
-        _, Y_sorted = sol.ys
-        Y_all = Y_sorted[inv_order]
-        n_w = a_flat.shape[0]
-        Y_a = Y_all[:n_w]
-        Y_b = Y_all[n_w:]
-        avg = (Y_b - Y_a) / (b_flat - a_flat)[:, None]
-
-        if is_1d:
-            return avg
-        assert w_2d is not None
-        n_r, m_w = orig_shape
-        reshaped = avg.reshape((n_r, m_w, cbm.n_boxes))
-        return jnp.sum(reshaped * w_2d[:, :, None], axis=1)
+        _, Y_sorted = self._run_diffeqsolve(
+            _aug_rhs, ivp, (ivp.dy_init, jnp.zeros_like(ivp.dy_init)), ivp.rhs_args)
+        return _unpack_cumulative_windows(
+            Y_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape))
 
     def predict_d14c(
         self,
@@ -1891,106 +1882,23 @@ class DiffraxSolver(AbstractSolver):
             t_starts, t_ends, sub_weights
         )
         all_bounds = jnp.concatenate([a_flat, b_flat])
-        order = jnp.argsort(all_bounds)
-        inv_order = jnp.argsort(order)
-        ts_sorted = all_bounds[order]
-
-        A0 = cbm.matrix_A()
-        b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
-        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-        r_ref = cbm.reference_specific_activity(q_std=q_std, alpha_unit=alpha_unit)
-        dg_arr = jnp.asarray(delta_global, dtype=jnp.float64)
-        excursion_scale = (
-            1.0 + dg_arr / 1000.0
-            if relative_to == "ambient"
-            else jnp.asarray(1.0, dtype=jnp.float64)
-        )
-        y_base = y_ss * (1.0 + dg_arr / 1000.0)
-        terms = _unpack_terms(production)
-
-        eff_t0 = ts_sorted[0] if (t0 is None and y0 is not None) else t0
-        t_start_int, step_ts, jump_ts = self._collect_initial_time_and_events(
-            terms, ts_sorted[0], ts_sorted[-1], eff_t0
-        )
-        t_end_int = jnp.maximum(ts_sorted[-1], t_start_int + 1e-9)
-
-        dy0_eq, secular_anchor = self._equilibrium_dy0_and_drift_anchor(
-            A0, b_scaled, terms, t_start_int, q_std
-        )
-        dy_init = (
-            jnp.asarray(y0, dtype=jnp.float64) - y_ss if y0 is not None else dy0_eq
-        )
-        if y0 is not None:
-            secular_anchor = jnp.zeros_like(secular_anchor)
-        R_int_init = jnp.zeros_like(dy_init)
+        ivp = _prepare_ode_ivp(
+            cbm, production, all_bounds, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0)
+        suess_params = _prepare_suess_params(cbm, q_std, alpha_unit, delta_global, relative_to)
 
         def _suess_rhs(
             t: jax.Array, state: tuple[jax.Array, jax.Array], args: Any
         ) -> tuple[jax.Array, jax.Array]:
             dy, _ = state
-            (
-                cbm_arg,
-                prod_arg,
-                b_sc,
-                y_ss_arg,
-                y_base_arg,
-                exc_scale_arg,
-                A0_arg,
-                sec_anc,
-                r_ref_arg,
-                q_s,
-            ) = args
-            At = self._A_at(cbm_arg, t)
-            mt = self._masses_at(cbm_arg, t)
-            dq_t = prod_arg.delta_q(t, q_std=q_s)
-            non_auton = (At - A0_arg) @ y_ss_arg
-            ddy = At @ dy + non_auton + b_sc * dq_t + sec_anc
-            inst_d14c = 1000.0 * (
-                ((y_base_arg + exc_scale_arg * dy) / mt) / r_ref_arg - 1.0
-            )
+            rhs_args, s_params = args
+            ddy = _eval_ode_ddy(self._A_at, t, dy, rhs_args)
+            inst_d14c = _suess_instantaneous_d14c(dy, self._masses_at(rhs_args[0], t), s_params)
             return ddy, inst_d14c
 
-        controller = diffrax.PIDController(
-            rtol=self.rtol,
-            atol=self.atol,
-            step_ts=step_ts,
-            jump_ts=jump_ts,
-        )
-        sol = diffrax.diffeqsolve(
-            diffrax.ODETerm(_suess_rhs),
-            self._make_diffrax_solver(),
-            t0=t_start_int,
-            t1=t_end_int,
-            dt0=self.dt0,
-            y0=(dy_init, R_int_init),
-            args=(
-                cbm,
-                production,
-                b_scaled,
-                y_ss,
-                y_base,
-                excursion_scale,
-                A0,
-                secular_anchor,
-                r_ref,
-                q_std,
-            ),
-            saveat=diffrax.SaveAt(ts=ts_sorted),
-            stepsize_controller=controller,
-            max_steps=self.max_steps,
-        )
-        _, R_sorted = sol.ys
-        R_all = R_sorted[inv_order]
-        n_w = a_flat.shape[0]
-        d14c_win = (R_all[n_w:] - R_all[:n_w]) / (b_flat - a_flat)[:, None]
-
-        if not is_1d:
-            assert w_2d is not None
-            n_r, m_w = orig_shape
-            d14c_win = jnp.sum(
-                d14c_win.reshape((n_r, m_w, cbm.n_boxes)) * w_2d[:, :, None],
-                axis=1,
-            )
+        _, R_sorted = self._run_diffeqsolve(
+            _suess_rhs, ivp, (ivp.dy_init, jnp.zeros_like(ivp.dy_init)), (ivp.rhs_args, suess_params))
+        d14c_win = _unpack_cumulative_windows(
+            R_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape))
 
         selected = _select_boxes(d14c_win, box_indices)
         return selected + jnp.asarray(delta_lab, dtype=jnp.float64)
@@ -2140,41 +2048,13 @@ class ModaxSolver(AbstractSolver):
             )
 
         modax = _load_modax_module()
-        if not isinstance(t_arr, jax.core.Tracer):
-            t_sorted, inv_idx = jnp.unique(t_arr, return_inverse=True)
-        else:
-            order = jnp.argsort(t_arr)
-            inv_idx = jnp.argsort(order)
-            t_sorted = t_arr[order]
-
-        A0 = cbm.matrix_A()
-        b_scaled = jnp.asarray(alpha_unit, dtype=jnp.float64) * cbm.production_vector()
-        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-        terms = _unpack_terms(production)
-
-        eff_t0 = t_sorted[0] if (t0 is None and y0 is not None) else t0
-        t_start_int, _, _ = _collect_initial_time_and_events(
-            terms, t_sorted[0], t_sorted[-1], eff_t0
+        t_sorted, inv_idx, t_start_int, t_end_int, _, _, dy_init, rhs_args = _prepare_ode_ivp(
+            cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0, deduplicate=True
         )
-        t_end_int = jnp.maximum(t_sorted[-1], t_start_int + 1e-9)
-
-        dy0_eq, secular_anchor = _equilibrium_dy0_and_drift_anchor(
-            A0, b_scaled, terms, t_start_int, q_std
-        )
-        if y0 is not None:
-            dy_init = jnp.asarray(y0, dtype=jnp.float64) - y_ss
-            secular_anchor = jnp.zeros_like(secular_anchor)
-        else:
-            dy_init = dy0_eq
-
         solver_cls = getattr(modax, self.method)
 
         def _rhs(t: jax.Array, dy: jax.Array, args: Any) -> jax.Array:
-            cbm_a, prod_a, b_sc, y_ss_a, A0_a, sec_anc, q_s = args
-            At = self._A_at(cbm_a, t)
-            dq_t = prod_a.delta_q(t, q_s)
-            non_auton = (At - A0_a) @ y_ss_a
-            return At @ dy + non_auton + b_sc * dq_t + sec_anc
+            return _eval_ode_ddy(self._A_at, t, dy, args)
 
         sol = modax.diffeqsolve(
             _rhs,
@@ -2183,7 +2063,7 @@ class ModaxSolver(AbstractSolver):
             t1=t_end_int,
             y0=dy_init,
             ts=t_sorted,
-            args=(cbm, production, b_scaled, y_ss, A0, secular_anchor, q_std),
+            args=rhs_args,
             rtol=self.rtol,
             atol=self.atol,
             max_steps=self.max_steps,
@@ -2207,9 +2087,7 @@ class ModaxSolver(AbstractSolver):
         a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
-        xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
-        wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
-        quad_t = (a_flat[:, None] + (b_flat - a_flat)[:, None] * xi[None, :]).reshape(-1)
+        quad_t = _gl16_window_nodes(a_flat, b_flat)
         dy_quad = self.solve_delta_trajectory(
             cbm,
             production,
@@ -2218,13 +2096,8 @@ class ModaxSolver(AbstractSolver):
             alpha_unit=alpha_unit,
             t0=t0,
             y0=y0,
-        ).reshape((a_flat.shape[0], xi.shape[0], cbm.n_boxes))
-        avg = jnp.einsum("wqn,q->wn", dy_quad, wq)
-        if is_1d:
-            return avg
-        assert w_2d is not None
-        n_r, m_w = orig_shape
-        return jnp.sum(avg.reshape((n_r, m_w, cbm.n_boxes)) * w_2d[:, :, None], axis=1)
+        )
+        return _gl16_reduce_windows(dy_quad, a_flat.shape[0], (w_2d, is_1d, orig_shape))
 
     def predict_d14c(
         self,
@@ -2267,9 +2140,7 @@ class ModaxSolver(AbstractSolver):
         a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
-        xi = jnp.asarray(GL16_NODES_01, dtype=jnp.float64)
-        wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
-        quad_t = (a_flat[:, None] + (b_flat - a_flat)[:, None] * xi[None, :]).reshape(-1)
+        quad_t = _gl16_window_nodes(a_flat, b_flat)
         dy_quad = self.solve_delta_trajectory(
             cbm,
             production,
@@ -2280,25 +2151,8 @@ class ModaxSolver(AbstractSolver):
             y0=y0,
         )
         mt_quad = jax.vmap(lambda ti: self._masses_at(cbm, ti))(quad_t)
-        y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
-        r_ref = cbm.reference_specific_activity(q_std=q_std, alpha_unit=alpha_unit)
-        dg_arr = jnp.asarray(delta_global, dtype=jnp.float64)
-        excursion_scale = (
-            1.0 + dg_arr / 1000.0
-            if relative_to == "ambient"
-            else jnp.asarray(1.0, dtype=jnp.float64)
-        )
-        y_base = y_ss * (1.0 + dg_arr / 1000.0)
-        inst_d14c = 1000.0 * (
-            ((y_base[None, :] + excursion_scale * dy_quad) / mt_quad) / r_ref - 1.0
-        ).reshape((a_flat.shape[0], xi.shape[0], cbm.n_boxes))
-        d14c_win = jnp.einsum("wqn,q->wn", inst_d14c, wq)
-        if not is_1d:
-            assert w_2d is not None
-            n_r, m_w = orig_shape
-            d14c_win = jnp.sum(
-                d14c_win.reshape((n_r, m_w, cbm.n_boxes)) * w_2d[:, :, None],
-                axis=1,
-            )
+        suess_params = _prepare_suess_params(cbm, q_std, alpha_unit, delta_global, relative_to)
+        inst_d14c = _suess_instantaneous_d14c(dy_quad, mt_quad, suess_params)
+        d14c_win = _gl16_reduce_windows(inst_d14c, a_flat.shape[0], (w_2d, is_1d, orig_shape))
         selected = _select_boxes(d14c_win, box_indices)
         return selected + jnp.asarray(delta_lab, dtype=jnp.float64)
