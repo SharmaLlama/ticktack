@@ -4795,16 +4795,29 @@ _KERNEL_NAME_ALIASES: dict[str, str] = {
 }
 
 
+def _matern_proto(
+    order: float, zero_mode: bool, *, sigma: float = 0.25, learn_order: bool = False
+) -> MaternSpectrum:
+    return MaternSpectrum(
+        sigma=sigma, length_yr=5.0, order=order, learn_order=learn_order, zero_mode=zero_mode
+    )
+
+
+def _solar_proto(zero_mode: bool) -> QuasiPeriodicSpectrum:
+    return QuasiPeriodicSpectrum(sigma=0.22, period_yr=11.0, quality=5.0, zero_mode=zero_mode)
+
+
 _KERNEL_PROTOTYPES: dict[str, Callable[[bool, int], SpectralKernel]] = {
-    "matern12": lambda zm, _: MaternSpectrum(0.25, 5.0, 1.0, zero_mode=zm),
-    "matern32": lambda zm, _: MaternSpectrum(0.25, 5.0, 2.0, zero_mode=zm),
-    "matern52": lambda zm, _: MaternSpectrum(0.25, 5.0, 3.0, zero_mode=zm),
-    "squared_exp": lambda zm, _: SquaredExpSpectrum(0.25, 5.0, zero_mode=zm),
-    "continuous_matern": lambda zm, _: MaternSpectrum(0.25, 5.0, 2.0, learn_order=True, zero_mode=zm),
-    "sho_solar": lambda zm, _: QuasiPeriodicSpectrum(0.22, 11.0, 5.0, zero_mode=zm),
-    "matern32_plus_solar": lambda zm, _: MaternSpectrum(0.18, 5.0, 2.0, zero_mode=zm)
-    + QuasiPeriodicSpectrum(0.22, 11.0, 5.0, zero_mode=False),
-    "correlated_field": lambda zm, m: CorrelatedFieldSpectrum(0.25, -2.0, n_modes=m, zero_mode=zm),
+    "matern12": lambda zm, _: _matern_proto(1.0, zm),
+    "matern32": lambda zm, _: _matern_proto(2.0, zm),
+    "matern52": lambda zm, _: _matern_proto(3.0, zm),
+    "squared_exp": lambda zm, _: SquaredExpSpectrum(sigma=0.25, length_yr=5.0, zero_mode=zm),
+    "continuous_matern": lambda zm, _: _matern_proto(2.0, zm, learn_order=True),
+    "sho_solar": lambda zm, _: _solar_proto(zm),
+    "matern32_plus_solar": lambda zm, _: _matern_proto(2.0, zm, sigma=0.18) + _solar_proto(False),
+    "correlated_field": lambda zm, m: CorrelatedFieldSpectrum(
+        sigma=0.25, slope=-2.0, n_modes=m, flexibility=0.5, zero_mode=zm
+    ),
 }
 
 
