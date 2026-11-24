@@ -479,9 +479,15 @@ class CBMChart(zdx.Base):
         leaves = jax.tree_util.tree_leaves(eqx.filter(self, eqx.is_inexact_array))
         return np.ones((sum(int(x.size) for x in leaves),), dtype=bool)
 
-    def param_specs(self, prefix: str = "cbm", *, prior_sd: float = 0.35) -> tuple[Any, ...]:
+    def param_specs(self, prefix: str = "cbm", *, prior_sd: float | None = None) -> tuple[Any, ...]:
         """Default :class:`~ticktack.likelihood.ParamSpec` tuple for inference."""
         return ()
+
+
+def _require_prior_sd(prior_sd: float | None) -> float:
+    if prior_sd is None or not math.isfinite(float(prior_sd)) or float(prior_sd) <= 0.0:
+        raise ValueError("prior_sd must be specified explicitly as a finite positive float.")
+    return float(prior_sd)
 
 
 def _box_norm_key(k: Any) -> Any:
@@ -729,7 +735,7 @@ class CarbonBoxModel(zdx.Base):
     def to_fixed(self) -> CarbonBoxModel:
         """Materialize the current box state into a :class:`FixedChart` :class:`CarbonBoxModel`."""
         masses, src = self.reservoir_masses(), np.asarray(self.topology.edges_src, dtype=np.int64)
-        pw = getattr(self, "prod_weights", None) or self.production_vector()
+        pw = self.production_vector() if (pw := getattr(self, "prod_weights", None)) is None else pw
         return CarbonBoxModel(self.topology, _chart_from_state(self.topology, (masses, self.edge_rates() * masses[src], pw, self.sink_rates()), "fixed"), decay_rate=self.decay_rate)
 
     def to_balanced(self, *, tie_matrix: ArrayLike | None = None, symmetric_edge_groups: Sequence[Sequence[int]] | None = None) -> CarbonBoxModel:
@@ -737,7 +743,7 @@ class CarbonBoxModel(zdx.Base):
         if isinstance(self, SubspaceCBM) and tie_matrix is None and symmetric_edge_groups is None:
             return CarbonBoxModel(self.topology, BalancedChart(self.topology, self.log_rates_free(), self.base_log_total_mass, prod_weights=self.prod_weights, tie_matrix=self.tie_matrix_rows), decay_rate=self.decay_rate)
         masses, src = self.reservoir_masses(), np.asarray(self.topology.edges_src, dtype=np.int64)
-        pw = getattr(self, "prod_weights", None) or self.production_vector()
+        pw = self.production_vector() if (pw := getattr(self, "prod_weights", None)) is None else pw
         if tie_matrix is None and symmetric_edge_groups is None:
             return CarbonBoxModel(self.topology, _chart_from_state(self.topology, (masses, self.edge_rates() * masses[src], pw, self.sink_rates()), "balanced"), decay_rate=self.decay_rate)
         if np.any(np.asarray(self.sink_rates(), dtype=np.float64) > 0.0):
@@ -750,7 +756,7 @@ class CarbonBoxModel(zdx.Base):
             return self.chart.param_specs(prefix=prefix, **kwargs)
         if isinstance(self, SubspaceCBM) and self.n_modes > 0:
             from .likelihood import ParamSpec
-            return (ParamSpec(f"{prefix}.alpha", "identity", self.alpha, float(kwargs.get("prior_sd", 1.0))),)
+            return (ParamSpec(f"{prefix}.alpha", "identity", self.alpha, _require_prior_sd(kwargs.get("prior_sd", 1.0))),)
         return ()
 
     def summary(self) -> str:
@@ -775,6 +781,8 @@ class CarbonBoxModel(zdx.Base):
         if not items or any(float(m) <= 0.0 for _, m in items):
             raise ValueError("masses must be non-empty with strictly positive values.")
         has_hemi, names, hemis, lookup = isinstance(items[0][0], tuple), [], [], {}
+        if not all((isinstance(rk, tuple) and len(rk) == 2 and isinstance(rk[0], str)) if has_hemi else isinstance(rk, str) for rk, _ in items):
+            raise ValueError("Reservoir keys must be either all str names or all (name: str, hemisphere) 2-tuples.")
         for idx, (rk, _) in enumerate(items):
             ck = _box_norm_key(rk)
             if ck in lookup:
@@ -1103,11 +1111,11 @@ class BalancedChart(_PerronChart):
                 f"log_rates_free must have shape ({expected_p},), got {self.log_rates_free.shape}."
             )
 
-    def param_specs(self, prefix: str = "cbm", *, prior_sd: float = 0.35) -> tuple[Any, ...]:
+    def param_specs(self, prefix: str = "cbm", *, prior_sd: float | None = None) -> tuple[Any, ...]:
         if self.log_rates_free.size == 0:
             return ()
         from .likelihood import ParamSpec
-        return (ParamSpec(f"{prefix}.log_rates_free", "identity", self.log_rates_free, float(prior_sd)),)
+        return (ParamSpec(f"{prefix}.log_rates_free", "identity", self.log_rates_free, _require_prior_sd(prior_sd)),)
 
     @classmethod
     def from_masses_and_fluxes(cls, topology: Topology, masses: ArrayLike, edge_fluxes: ArrayLike, *, prod_weights: Sequence[float] | ArrayLike | None = None, tie_matrix: ArrayLike | None = None, symmetric_edge_groups: Sequence[Sequence[int]] | None = None) -> BalancedChart:
@@ -1400,13 +1408,13 @@ class ReversibleChart(CBMChart):
         src = np.asarray(topology.edges_src, dtype=np.int64)
         return self.edge_fluxes() / self.reservoir_masses(topology)[src]
 
-    def param_specs(self, prefix: str = "cbm", *, prior_sd: float = 0.35, include_masses: bool = True) -> tuple[Any, ...]:
+    def param_specs(self, prefix: str = "cbm", *, prior_sd: float | None = None, include_masses: bool = True) -> tuple[Any, ...]:
         from .likelihood import ParamSpec
-        sd, specs = float(prior_sd), []
+        specs: list[Any] = []
         if include_masses and self.log_masses.size > 0:
-            specs.append(ParamSpec(f"{prefix}.log_masses", "identity", self.log_masses, sd))
+            specs.append(ParamSpec(f"{prefix}.log_masses", "identity", self.log_masses, _require_prior_sd(prior_sd)))
         if self.log_sym_fluxes.size > 0:
-            specs.append(ParamSpec(f"{prefix}.log_sym_fluxes", "identity", self.log_sym_fluxes, sd))
+            specs.append(ParamSpec(f"{prefix}.log_sym_fluxes", "identity", self.log_sym_fluxes, _require_prior_sd(prior_sd)))
         return tuple(specs)
 
     @classmethod
@@ -1519,13 +1527,13 @@ class OpenChart(_PerronChart):
     def sink_rates(self, topology: Topology, decay_rate: float = DECAY_CAMBRIDGE) -> jax.Array:
         return jnp.zeros((topology.n_boxes,), dtype=jnp.float64).at[np.asarray(self.open_box_indices, dtype=np.int64)].set(jnp.exp(self.log_sink_rates))
 
-    def param_specs(self, prefix: str = "cbm", *, prior_sd: float = 0.35, sink_sd: float | None = None) -> tuple[Any, ...]:
+    def param_specs(self, prefix: str = "cbm", *, prior_sd: float | None = None, sink_sd: float | None = None) -> tuple[Any, ...]:
         from .likelihood import ParamSpec
-        sd, s_sd, specs = float(prior_sd), (float(prior_sd) if sink_sd is None else float(sink_sd)), []
+        specs: list[Any] = []
         if self.log_rates_free.size > 0:
-            specs.append(ParamSpec(f"{prefix}.log_rates_free", "identity", self.log_rates_free, sd))
+            specs.append(ParamSpec(f"{prefix}.log_rates_free", "identity", self.log_rates_free, _require_prior_sd(prior_sd)))
         if self.log_sink_rates.size > 0:
-            specs.append(ParamSpec(f"{prefix}.log_sink_rates", "identity", self.log_sink_rates, s_sd))
+            specs.append(ParamSpec(f"{prefix}.log_sink_rates", "identity", self.log_sink_rates, _require_prior_sd(prior_sd if sink_sd is None else sink_sd)))
         return tuple(specs)
 
     @classmethod

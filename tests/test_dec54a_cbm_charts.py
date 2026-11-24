@@ -395,6 +395,31 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
             masses={"Stratosphere": 90.0, "Troposphere": 510.0},
             fluxes=[("Stratosphere", "Mars", 10.0)],
         )
+    # Mixed or malformed reservoir keys must raise ValueError instead of silent corruption
+    for bad_masses in (
+        {"Stratosphere": 45.0, ("Troposphere", "north"): 250.0},
+        {("Troposphere", "north"): 250.0, "Snow": 45.0},
+        {("Troposphere", "north", "extra"): 250.0, ("Stratosphere", "north", "extra"): 45.0},
+    ):
+        with pytest.raises(ValueError, match="Reservoir keys"):
+            CarbonBoxModel.from_boxes(masses=bad_masses, fluxes=[])
+
+    # Custom CBMChart with multi-element ndarray prod_weights must not trigger bool(ndarray) in to_fixed/to_balanced
+    class _ArrayPWChart(CBMChart):
+        prod_weights: jax.Array
+
+        def __init__(self) -> None:
+            self.prod_weights = jnp.array([0.72, 0.28], dtype=jnp.float64)
+
+        def reservoir_masses(self, topology: Topology) -> jax.Array:
+            return jnp.array([90.0, 510.0, 38000.0], dtype=jnp.float64)
+
+        def edge_rates(self, topology: Topology) -> jax.Array:
+            return jnp.array([45.0 / 90.0, 45.0 / 510.0, 60.0 / 510.0, 60.0 / 38000.0], dtype=jnp.float64)
+
+    custom_cbm = CarbonBoxModel(_sym_3box_topo(), _ArrayPWChart())
+    np.testing.assert_allclose(custom_cbm.to_fixed().production_vector(), [0.72, 0.28, 0.0], rtol=1e-14)
+    np.testing.assert_allclose(custom_cbm.to_balanced().production_vector(), [0.72, 0.28, 0.0], rtol=1e-14)
 
     # Hemispheric custom model via (name, hemisphere) keys + summary()
     cbm_hemi = CarbonBoxModel.from_boxes(
@@ -417,10 +442,19 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
     table = cbm_hemi.summary()
     assert "BalancedChart" in table and "Troposphere (N)" in table and "Troposphere (S)" in table
 
-    # param_specs() + ParameterSpace round-trip and exact Gaussian log-prior check
+    # param_specs() + ParameterSpace round-trip, explicit prior_sd enforcement (Decision 5.6), and Gaussian log-prior
     spike = MiyakeSpike(774.5, 0.3, 6.2)
     sp_spec = ParamSpec("production.spike.fluence", "exp", math.log(6.2), 0.45)
     assert cbm_fix.param_specs() == ()
+    for c_req in (cbm_bal, cbm_rev, cbm_open):
+        with pytest.raises(ValueError, match="prior_sd"):
+            c_req.param_specs()
+    with pytest.raises(ValueError, match="prior_sd"):
+        cbm_bal.param_specs(prior_sd=0.0)
+    with pytest.raises(ValueError, match="prior_sd"):
+        cbm_bal.param_specs(prior_sd=float("inf"))
+    sub_default = SubspaceCBM(_asym_3box_topo(), cbm_bal.log_rates_free, np.ones((5, 2)) * 0.1, float(cbm_bal.log_total_mass))
+    assert sub_default.param_specs()[0].prior_sd == pytest.approx(1.0)
 
     for cbm_case, kwargs, expected_cbm_dim in [
         (cbm_bal, {"prior_sd": 0.37}, 5),
