@@ -953,10 +953,17 @@ def _construct_topology(cbm_mod: Any, spec: PresetSpec) -> Any:
     return Topology(**kwargs)
 
 
+def _finalize_preset_cbm(cbm_mod: Any, model: Any, use_chart: bool) -> Any:
+    if use_chart and getattr(model, "chart", None) is not None:
+        return cbm_mod.CarbonBoxModel(model.topology, model.chart, decay_rate=model.decay_rate)
+    return model
+
+
 def load_preset(
     name: PresetName | str,
-    kind: Literal["fixed", "balanced", "open", "reversible"] = "fixed",
+    kind: Literal["fixed", "balanced", "open", "reversible"] | None = None,
     *,
+    chart: Literal["fixed", "balanced", "open", "reversible"] | None = None,
     legacy_v1_units: bool = False,
     miyake17_closure: Miyake17Closure = "open_ocean_sink",
     tie_symmetric_edges: bool = False,
@@ -964,11 +971,16 @@ def load_preset(
 ) -> Any:
     """Instantiate a ``ticktack.cbm.CarbonBoxModel`` PyTree for a named preset.
 
-    Imports ``.cbm`` lazily so :func:`get_preset_spec` works standalone before
-    all Wave 1 branches are merged.
+    Passing ``chart=...`` returns a concrete :class:`~ticktack.cbm.CarbonBoxModel`
+    backed by the corresponding :class:`~ticktack.cbm.CBMChart`; ``kind=...`` is
+    retained as a backward-compatible alias returning the legacy ``*CBM`` wrapper.
     """
     from . import cbm as cbm_mod  # Lazy import by design.
 
+    if chart is not None and kind is not None and chart != kind:
+        raise ValueError(f"Conflicting preset chart={chart!r} and kind={kind!r}.")
+    use_chart = chart is not None
+    kind = chart if use_chart else ("fixed" if kind is None else kind)  # type: ignore[assignment]
     eff_decay = (
         (_DECAY_KUTSCHERA if legacy_v1_units else _DECAY_CAMBRIDGE)
         if decay_rate is None
@@ -993,50 +1005,50 @@ def load_preset(
         if kind == "fixed" and hasattr(cbm_mod, "FixedCBM"):
             fixed_sig = inspect.signature(cbm_mod.FixedCBM)
             if "sink_rates" in fixed_sig.parameters or "_sink_rates" in fixed_sig.parameters:
-                return _instantiate_fixed_cbm(
+                return _finalize_preset_cbm(cbm_mod, _instantiate_fixed_cbm(
                     cbm_mod.FixedCBM, topology, masses, spec, edge_fluxes, prod_vec, sink_rates, eff_decay
-                )
-        return _instantiate_open_cbm(
+                ), use_chart)
+        return _finalize_preset_cbm(cbm_mod, _instantiate_open_cbm(
             cbm_mod.OpenCBM, topology, masses, spec, edge_fluxes, prod_vec, sink_rates, eff_decay
-        )
+        ), use_chart)
 
     if kind == "fixed":
-        return _instantiate_fixed_cbm(
+        return _finalize_preset_cbm(cbm_mod, _instantiate_fixed_cbm(
             cbm_mod.FixedCBM, topology, masses, spec, edge_fluxes, prod_vec, sink_rates, eff_decay
-        )
+        ), use_chart)
 
     if kind == "balanced":
         if has_open_sink:
             raise ValueError(
-                f"Preset {name!r} has open sink_rates; pass kind='open' or "
-                "miyake17_closure='closed_shallow' for closed BalancedCBM."
+                f"Preset {name!r} has open sink_rates; pass chart='open' or "
+                "miyake17_closure='closed_shallow' for closed BalancedChart/BalancedCBM."
             )
         tie_mat = spec.edge_tie_matrix(tie_symmetric_edges=tie_symmetric_edges)
-        return cbm_mod.BalancedCBM.from_masses_and_fluxes(
+        return _finalize_preset_cbm(cbm_mod, cbm_mod.BalancedCBM.from_masses_and_fluxes(
             topology=topology,
             masses=masses,
             edge_fluxes=edge_fluxes,
             prod_fractions=prod_vec,
             tie_matrix=tie_mat if tie_symmetric_edges else None,
             decay_rate=eff_decay,
-        )
+        ), use_chart)
 
     if kind == "reversible":
         if has_open_sink:
             raise ValueError(
-                f"Preset {name!r} has open sink_rates; pass kind='open' or "
-                "miyake17_closure='closed_shallow' for closed ReversibleCBM."
+                f"Preset {name!r} has open sink_rates; pass chart='open' or "
+                "miyake17_closure='closed_shallow' for closed ReversibleChart/ReversibleCBM."
             )
-        return cbm_mod.ReversibleCBM.from_masses_and_fluxes(
+        return _finalize_preset_cbm(cbm_mod, cbm_mod.ReversibleCBM.from_masses_and_fluxes(
             topology=topology,
             masses=masses,
             edge_fluxes=edge_fluxes,
             prod_fractions=prod_vec,
             decay_rate=eff_decay,
-        )
+        ), use_chart)
 
     raise ValueError(
-        f"Unknown kind={kind!r}; expected 'fixed', 'balanced', 'open', or 'reversible'."
+        f"Unknown chart/kind={kind!r}; expected 'fixed', 'balanced', 'open', or 'reversible'."
     )
 
 
