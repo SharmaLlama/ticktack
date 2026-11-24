@@ -1627,9 +1627,15 @@ class _ODEIVPSetup(NamedTuple):
 
 
 def _prepare_ode_ivp(
-    cbm: CarbonBoxModel, production: ProductionTerm, ts: jax.Array, *,
-    q_std: ArrayLike, alpha_unit: ArrayLike, t0: ArrayLike | None = None,
-    y0: ArrayLike | None = None, deduplicate: bool = False,
+    cbm: CarbonBoxModel,
+    production: ProductionTerm,
+    ts: jax.Array,
+    *,
+    q_std: ArrayLike,
+    alpha_unit: ArrayLike,
+    t0: ArrayLike | None = None,
+    y0: ArrayLike | None = None,
+    deduplicate: bool = False,
 ) -> _ODEIVPSetup:
     """Sort timestamps, bracket integration horizon/events, and resolve initial state."""
     if deduplicate and not isinstance(ts, jax.core.Tracer):
@@ -1645,7 +1651,8 @@ def _prepare_ode_ivp(
 
     eff_t0 = ts_sorted[0] if (t0 is None and y0 is not None) else t0
     t_start, step_ts, jump_ts = _collect_initial_time_and_events(
-        terms, ts_sorted[0], ts_sorted[-1], eff_t0)
+        terms, ts_sorted[0], ts_sorted[-1], eff_t0
+    )
     t_end = jnp.maximum(ts_sorted[-1], t_start + 1e-9)
 
     dy_init, secular_anchor = _equilibrium_dy0_and_drift_anchor(A0, b_scaled, terms, t_start, q_std)
@@ -1676,7 +1683,10 @@ def _combine_subwindows(values: jax.Array, subwindow_meta: tuple[Any, ...]) -> j
 
 
 def _unpack_cumulative_windows(
-    cum_sorted: jax.Array, inv_order: jax.Array, a_flat: jax.Array, b_flat: jax.Array,
+    cum_sorted: jax.Array,
+    inv_order: jax.Array,
+    a_flat: jax.Array,
+    b_flat: jax.Array,
     subwindow_meta: tuple[Any, ...],
 ) -> jax.Array:
     """Convert sorted cumulative-integral boundary states to seasonal-window means."""
@@ -1701,8 +1711,11 @@ def _gl16_reduce_windows(
 
 
 def _prepare_suess_params(
-    cbm: CarbonBoxModel, q_std: ArrayLike, alpha_unit: ArrayLike,
-    delta_global: ArrayLike, relative_to: Literal["standard", "ambient"],
+    cbm: CarbonBoxModel,
+    q_std: ArrayLike,
+    alpha_unit: ArrayLike,
+    delta_global: ArrayLike,
+    relative_to: Literal["standard", "ambient"],
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Compute ``(y_base, excursion_scale, r_ref)`` for time-varying ``M_c(t)`` ``Delta14C``."""
     y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
@@ -1775,11 +1788,18 @@ class DiffraxSolver(AbstractSolver):
         self, rhs: Callable[..., Any], ivp: _ODEIVPSetup, y0_state: Any, args: Any
     ) -> Any:
         return diffrax.diffeqsolve(
-            diffrax.ODETerm(rhs), self._make_diffrax_solver(),
-            t0=ivp.t_start, t1=ivp.t_end, dt0=self.dt0, y0=y0_state, args=args,
-            saveat=diffrax.SaveAt(ts=ivp.ts_sorted), max_steps=self.max_steps,
+            diffrax.ODETerm(rhs),
+            self._make_diffrax_solver(),
+            t0=ivp.t_start,
+            t1=ivp.t_end,
+            dt0=self.dt0,
+            y0=y0_state,
+            args=args,
+            saveat=diffrax.SaveAt(ts=ivp.ts_sorted),
+            max_steps=self.max_steps,
             stepsize_controller=diffrax.PIDController(
-                rtol=self.rtol, atol=self.atol, step_ts=ivp.step_ts, jump_ts=ivp.jump_ts),
+                rtol=self.rtol, atol=self.atol, step_ts=ivp.step_ts, jump_ts=ivp.jump_ts
+            ),
         ).ys
 
     def _A_at(self, cbm: CarbonBoxModel, t: jax.Array) -> jax.Array:
@@ -1809,7 +1829,8 @@ class DiffraxSolver(AbstractSolver):
     ) -> jax.Array:
         t_arr = jnp.atleast_1d(jnp.asarray(t_eval, dtype=jnp.float64))
         ivp = _prepare_ode_ivp(
-            cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0)
+            cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0
+        )
 
         def _rhs(t: jax.Array, dy: jax.Array, args: Any) -> jax.Array:
             return _eval_ode_ddy(self._A_at, t, dy, args)
@@ -1834,7 +1855,8 @@ class DiffraxSolver(AbstractSolver):
         )
         all_bounds = jnp.concatenate([a_flat, b_flat])
         ivp = _prepare_ode_ivp(
-            cbm, production, all_bounds, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0)
+            cbm, production, all_bounds, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0
+        )
 
         def _aug_rhs(
             t: jax.Array, state: tuple[jax.Array, jax.Array], args: Any
@@ -1843,9 +1865,11 @@ class DiffraxSolver(AbstractSolver):
             return _eval_ode_ddy(self._A_at, t, dy, args), dy
 
         _, Y_sorted = self._run_diffeqsolve(
-            _aug_rhs, ivp, (ivp.dy_init, jnp.zeros_like(ivp.dy_init)), ivp.rhs_args)
+            _aug_rhs, ivp, (ivp.dy_init, jnp.zeros_like(ivp.dy_init)), ivp.rhs_args
+        )
         return _unpack_cumulative_windows(
-            Y_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape))
+            Y_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape)
+        )
 
     def predict_d14c(
         self,
@@ -1894,7 +1918,8 @@ class DiffraxSolver(AbstractSolver):
         )
         all_bounds = jnp.concatenate([a_flat, b_flat])
         ivp = _prepare_ode_ivp(
-            cbm, production, all_bounds, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0)
+            cbm, production, all_bounds, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0
+        )
         suess_params = _prepare_suess_params(cbm, q_std, alpha_unit, delta_global, relative_to)
 
         def _suess_rhs(
@@ -1907,9 +1932,14 @@ class DiffraxSolver(AbstractSolver):
             return ddy, inst_d14c
 
         _, R_sorted = self._run_diffeqsolve(
-            _suess_rhs, ivp, (ivp.dy_init, jnp.zeros_like(ivp.dy_init)), (ivp.rhs_args, suess_params))
+            _suess_rhs,
+            ivp,
+            (ivp.dy_init, jnp.zeros_like(ivp.dy_init)),
+            (ivp.rhs_args, suess_params),
+        )
         d14c_win = _unpack_cumulative_windows(
-            R_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape))
+            R_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape)
+        )
 
         selected = _select_boxes(d14c_win, box_indices)
         return selected + jnp.asarray(delta_lab, dtype=jnp.float64)
@@ -2060,7 +2090,14 @@ class ModaxSolver(AbstractSolver):
 
         modax = _load_modax_module()
         ivp = _prepare_ode_ivp(
-            cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0, deduplicate=True
+            cbm,
+            production,
+            t_arr,
+            q_std=q_std,
+            alpha_unit=alpha_unit,
+            t0=t0,
+            y0=y0,
+            deduplicate=True,
         )
         solver_cls = getattr(modax, self.method)
 
