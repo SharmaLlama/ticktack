@@ -83,7 +83,6 @@ from .production import (  # noqa: E402
     ProductionSum,
     ProductionTerm,
     SteadyProduction,
-    kernel_spectral_density,
     solin_sarkka_eigenpairs,
 )
 
@@ -257,7 +256,6 @@ __all__ = [
     "ProductionSum",
     "ProductionTerm",
     "SteadyProduction",
-    "kernel_spectral_density",
     "solin_sarkka_eigenpairs",
     # solvers
     "AbstractSolver",

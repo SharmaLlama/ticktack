@@ -1,6 +1,6 @@
 {
   "baseline_commit": "c67accc4a9dddb76951b27bd58fd9a212ce50702",
-  "count": 131,
+  "count": 130,
   "all": [
     "ALPHA_ATOMS_CM2_S_TO_KG_YR",
     "AbstractSolver",
@@ -92,7 +92,6 @@
     "joint_log_likelihood",
     "joint_log_posterior",
     "kalman_gp_marginal",
-    "kernel_spectral_density",
     "laplace_covariance",
     "laplace_samples",
     "linear_posterior",
