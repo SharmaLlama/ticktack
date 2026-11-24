@@ -334,9 +334,14 @@ class _KernelParamSpec(NamedTuple):
     summary_key: str | None = None
 
 
-_KERNEL_TRANSFORMS: dict[str, tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]] = {
+_KERNEL_TRANSFORMS: dict[
+    str, tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]
+] = {
     "log": (lambda x: jnp.log(jnp.maximum(x, 1e-30)), _safe_exp_hyper),
-    "log_shift_half": (lambda x: jnp.log(jnp.maximum(x - 0.5, 1e-30)), lambda u: 0.5 + _safe_exp_hyper(u)),
+    "log_shift_half": (
+        lambda x: jnp.log(jnp.maximum(x - 0.5, 1e-30)),
+        lambda u: 0.5 + _safe_exp_hyper(u),
+    ),
     "identity": (lambda x: x, lambda u: u),
 }
 
@@ -365,7 +370,9 @@ class SpectralKernel(zdx.Base):
         names: list[str] = []
         for s in self._require_specs():
             v = getattr(self, s.attr)
-            names.extend((s.name,) if v.ndim == 0 else (f"{s.name}_{i + 1}" for i in range(int(v.shape[0]))))
+            names.extend(
+                (s.name,) if v.ndim == 0 else (f"{s.name}_{i + 1}" for i in range(int(v.shape[0])))
+            )
         return tuple(names)
 
     @property
@@ -376,14 +383,19 @@ class SpectralKernel(zdx.Base):
     def unconstrain_hyperparams(self) -> jax.Array:
         """Extract unconstrained hyperparameter vector ``phi`` from ``self``."""
         return jnp.concatenate(
-            [jnp.atleast_1d(_KERNEL_TRANSFORMS[s.transform][0](getattr(self, s.attr))) for s in self._require_specs()]
+            [
+                jnp.atleast_1d(_KERNEL_TRANSFORMS[s.transform][0](getattr(self, s.attr)))
+                for s in self._require_specs()
+            ]
         )
 
     def unconstrained_init(self) -> jax.Array:
         """Initial unconstrained hyperparameter vector ``phi`` for ``self``."""
         return self.unconstrain_hyperparams()
 
-    def _iter_param_slices(self, phi: ArrayLike) -> tuple[tuple[_KernelParamSpec, ...], list[jax.Array]]:
+    def _iter_param_slices(
+        self, phi: ArrayLike
+    ) -> tuple[tuple[_KernelParamSpec, ...], list[jax.Array]]:
         specs = self._require_specs()
         p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
         if p.shape[0] != self.n_hyperparams:
@@ -408,24 +420,36 @@ class SpectralKernel(zdx.Base):
 
     def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
         """Normalized Gaussian log-hyperprior density on unconstrained ``phi``."""
-        specs, slices = self._iter_param_slices(self.unconstrain_hyperparams() if phi is None else phi)
-        return sum((jnp.sum(_normal_logpdf(u, *s.prior)) for s, u in zip(specs, slices)), jnp.float64(0.0))
+        specs, slices = self._iter_param_slices(
+            self.unconstrain_hyperparams() if phi is None else phi
+        )
+        return sum(
+            (jnp.sum(_normal_logpdf(u, *s.prior)) for s, u in zip(specs, slices)), jnp.float64(0.0)
+        )
 
     def summarize(self) -> dict[str, float]:
         """Return a human-readable summary mapping of kernel hyperparameters."""
         specs = self._param_specs()
         if not specs:
-            return {nm: float(v) for nm, v in zip(self.param_names(), self.unconstrain_hyperparams())}
+            return {
+                nm: float(v) for nm, v in zip(self.param_names(), self.unconstrain_hyperparams())
+            }
         out: dict[str, float] = {}
         for s in specs:
             v = getattr(self, s.attr)
-            out[s.summary_key or s.attr] = float(jnp.sqrt(jnp.mean(jnp.square(v))) if s.summary_key else v)
+            out[s.summary_key or s.attr] = float(
+                jnp.sqrt(jnp.mean(jnp.square(v))) if s.summary_key else v
+            )
         return out
 
     def cache_tag(self, zero_mode: bool | None = None) -> str:
         """Deterministic JIT cache tag for this kernel's structural configuration."""
         if self._CACHE_PREFIX is None:
-            return f"custom:{id(self)}" if zero_mode is None else f"custom:{id(self)}:zm={bool(zero_mode)}"
+            return (
+                f"custom:{id(self)}"
+                if zero_mode is None
+                else f"custom:{id(self)}:zm={bool(zero_mode)}"
+            )
         zm = getattr(self, "zero_mode", False) if zero_mode is None else bool(zero_mode)
         return f"{self._CACHE_PREFIX}:zm={zm}"
 
@@ -490,7 +514,11 @@ class MaternSpectrum(SpectralKernel):
 
     def cache_tag(self, zero_mode: bool | None = None) -> str:
         zm = self.zero_mode if zero_mode is None else bool(zero_mode)
-        return f"canon:continuous_matern:zm={zm}" if self.learn_order else f"custom_matern:ord={round(float(self.order), 8)}:zm={zm}"
+        return (
+            f"canon:continuous_matern:zm={zm}"
+            if self.learn_order
+            else f"custom_matern:ord={round(float(self.order), 8)}:zm={zm}"
+        )
 
 
 class SquaredExpSpectrum(SpectralKernel):
@@ -567,7 +595,9 @@ class QuasiPeriodicSpectrum(SpectralKernel):
     _PARAM_SPECS: ClassVar[tuple[_KernelParamSpec, ...]] = (
         _KernelParamSpec("log_sigma", "sigma", DEFAULT_LOG_SIGMA_PRIOR),
         _KernelParamSpec("log_period_yr", "period_yr", DEFAULT_LOG_PERIOD_PRIOR),
-        _KernelParamSpec("log_q_minus_half", "quality", DEFAULT_LOG_QUALITY_PRIOR, "log_shift_half"),
+        _KernelParamSpec(
+            "log_q_minus_half", "quality", DEFAULT_LOG_QUALITY_PRIOR, "log_shift_half"
+        ),
     )
     _CACHE_PREFIX: ClassVar[str] = "canon:sho_solar"
 
@@ -638,7 +668,9 @@ class SumSpectrum(SpectralKernel):
         return acc
 
     def summarize(self) -> dict[str, float]:
-        return {f"p{i + 1}_{k}": v for i, p in enumerate(self.parts) for k, v in p.summarize().items()}
+        return {
+            f"p{i + 1}_{k}": v for i, p in enumerate(self.parts) for k, v in p.summarize().items()
+        }
 
     def cache_tag(self, zero_mode: bool | None = None) -> str:
         return f"sum:({'+'.join(p.cache_tag(zero_mode) for p in self.parts)})"
