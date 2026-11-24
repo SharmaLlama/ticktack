@@ -27,7 +27,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import math
-from typing import Any, Literal, NamedTuple
+from typing import Any, ClassVar, Literal, NamedTuple
 import warnings
 
 import equinox as eqx
@@ -324,28 +324,110 @@ def _safe_exp_hyper(u: jax.Array) -> jax.Array:
     return jnp.exp(jnp.clip(u, -80.0, 80.0))
 
 
+class _KernelParamSpec(NamedTuple):
+    """Declarative hyperparameter specification for a leaf :class:`SpectralKernel`."""
+
+    name: str
+    attr: str
+    prior: tuple[float, float]
+    transform: Literal["log", "log_shift_half", "identity"] = "log"
+    summary_key: str | None = None
+
+
+_KERNEL_TRANSFORMS: dict[str, tuple[Callable[[jax.Array], jax.Array], Callable[[jax.Array], jax.Array]]] = {
+    "log": (lambda x: jnp.log(jnp.maximum(x, 1e-30)), _safe_exp_hyper),
+    "log_shift_half": (lambda x: jnp.log(jnp.maximum(x - 0.5, 1e-30)), lambda u: 0.5 + _safe_exp_hyper(u)),
+    "identity": (lambda x: x, lambda u: u),
+}
+
+
 class SpectralKernel(zdx.Base):
     """Abstract composable 1D DCT-II power-spectrum kernel (:class:`zodiax.Base`)."""
+
+    _PARAM_SPECS: ClassVar[tuple[_KernelParamSpec, ...]] = ()
+    _CACHE_PREFIX: ClassVar[str | None] = None
 
     def spectrum(self, n_grid: int, dt: ArrayLike) -> jax.Array:
         """Evaluate DCT-II mode variances ``S_j`` of shape ``(n_grid,)``."""
         raise NotImplementedError
 
+    def _param_specs(self) -> tuple[_KernelParamSpec, ...]:
+        return self._PARAM_SPECS
+
+    def _require_specs(self) -> tuple[_KernelParamSpec, ...]:
+        specs = self._param_specs()
+        if not specs:
+            raise NotImplementedError(f"{type(self).__name__} must define _PARAM_SPECS.")
+        return specs
+
     def param_names(self) -> tuple[str, ...]:
         """Names of unconstrained hyperparameters ``phi``."""
-        raise NotImplementedError
+        names: list[str] = []
+        for s in self._require_specs():
+            v = getattr(self, s.attr)
+            names.extend((s.name,) if v.ndim == 0 else (f"{s.name}_{i + 1}" for i in range(int(v.shape[0]))))
+        return tuple(names)
+
+    @property
+    def n_hyperparams(self) -> int:
+        """Number of unconstrained hyperparameters in ``phi``."""
+        return len(self.param_names())
 
     def unconstrain_hyperparams(self) -> jax.Array:
         """Extract unconstrained hyperparameter vector ``phi`` from ``self``."""
-        raise NotImplementedError
+        return jnp.concatenate(
+            [jnp.atleast_1d(_KERNEL_TRANSFORMS[s.transform][0](getattr(self, s.attr))) for s in self._require_specs()]
+        )
+
+    def unconstrained_init(self) -> jax.Array:
+        """Initial unconstrained hyperparameter vector ``phi`` for ``self``."""
+        return self.unconstrain_hyperparams()
+
+    def _iter_param_slices(self, phi: ArrayLike) -> tuple[tuple[_KernelParamSpec, ...], list[jax.Array]]:
+        specs = self._require_specs()
+        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        if p.shape[0] != self.n_hyperparams:
+            raise ValueError(f"Expected {self.n_hyperparams} hyperparameters, got {p.shape[0]}.")
+        cursor, slices = 0, []
+        for s in specs:
+            v = getattr(self, s.attr)
+            sz = 1 if v.ndim == 0 else int(v.shape[0])
+            slices.append(p[cursor] if v.ndim == 0 else p[cursor : cursor + sz])
+            cursor += sz
+        return specs, slices
 
     def from_unconstrained_hyperparams(self, phi: ArrayLike) -> SpectralKernel:
         """Construct an updated :class:`SpectralKernel` from unconstrained ``phi``."""
-        raise NotImplementedError
+        specs, slices = self._iter_param_slices(phi)
+        vals = tuple(_KERNEL_TRANSFORMS[s.transform][1](u) for s, u in zip(specs, slices))
+        return eqx.tree_at(lambda k: tuple(getattr(k, s.attr) for s in specs), self, vals)
+
+    def from_unconstrained(self, phi: ArrayLike) -> SpectralKernel:
+        """Construct an updated :class:`SpectralKernel` from unconstrained ``phi``."""
+        return self.from_unconstrained_hyperparams(phi)
 
     def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
         """Normalized Gaussian log-hyperprior density on unconstrained ``phi``."""
-        raise NotImplementedError
+        specs, slices = self._iter_param_slices(self.unconstrain_hyperparams() if phi is None else phi)
+        return sum((jnp.sum(_normal_logpdf(u, *s.prior)) for s, u in zip(specs, slices)), jnp.float64(0.0))
+
+    def summarize(self) -> dict[str, float]:
+        """Return a human-readable summary mapping of kernel hyperparameters."""
+        specs = self._param_specs()
+        if not specs:
+            return {nm: float(v) for nm, v in zip(self.param_names(), self.unconstrain_hyperparams())}
+        out: dict[str, float] = {}
+        for s in specs:
+            v = getattr(self, s.attr)
+            out[s.summary_key or s.attr] = float(jnp.sqrt(jnp.mean(jnp.square(v))) if s.summary_key else v)
+        return out
+
+    def cache_tag(self, zero_mode: bool | None = None) -> str:
+        """Deterministic JIT cache tag for this kernel's structural configuration."""
+        if self._CACHE_PREFIX is None:
+            return f"custom:{id(self)}" if zero_mode is None else f"custom:{id(self)}:zm={bool(zero_mode)}"
+        zm = getattr(self, "zero_mode", False) if zero_mode is None else bool(zero_mode)
+        return f"{self._CACHE_PREFIX}:zm={zm}"
 
     def __add__(self, other: SpectralKernel) -> SumSpectrum:
         if not isinstance(other, SpectralKernel):
@@ -394,42 +476,21 @@ class MaternSpectrum(SpectralKernel):
             zero_mode=self.zero_mode,
         )
 
-    def param_names(self) -> tuple[str, ...]:
-        if self.learn_order:
-            return ("log_sigma", "log_length_yr", "log_nu")
-        return ("log_sigma", "log_length_yr")
+    _PARAM_SPECS: ClassVar[tuple[_KernelParamSpec, ...]] = (
+        _KernelParamSpec("log_sigma", "sigma", DEFAULT_LOG_SIGMA_PRIOR),
+        _KernelParamSpec("log_length_yr", "length_yr", DEFAULT_LOG_LENGTH_PRIOR),
+        _KernelParamSpec("log_nu", "order", DEFAULT_LOG_NU_PRIOR, "log_shift_half"),
+    )
 
-    def unconstrain_hyperparams(self) -> jax.Array:
-        log_sig = jnp.log(jnp.maximum(self.sigma, 1e-30))
-        log_ell = jnp.log(jnp.maximum(self.length_yr, 1e-30))
-        if self.learn_order:
-            log_nu = jnp.log(jnp.maximum(self.order - 0.5, 1e-30))
-            return jnp.stack([log_sig, log_ell, log_nu])
-        return jnp.stack([log_sig, log_ell])
+    def _param_specs(self) -> tuple[_KernelParamSpec, ...]:
+        return self._PARAM_SPECS if self.learn_order else self._PARAM_SPECS[:2]
 
-    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> MaternSpectrum:
-        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        ord_val = (0.5 + _safe_exp_hyper(p[2])) if self.learn_order else self.order
-        return MaternSpectrum(
-            sigma=_safe_exp_hyper(p[0]),
-            length_yr=_safe_exp_hyper(p[1]),
-            order=ord_val,
-            learn_order=self.learn_order,
-            zero_mode=self.zero_mode,
-        )
+    def summarize(self) -> dict[str, float]:
+        return {**super().summarize(), "order": float(self.order)}
 
-    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
-        p = (
-            self.unconstrain_hyperparams()
-            if phi is None
-            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        )
-        lp = _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR) + _normal_logpdf(
-            p[1], *DEFAULT_LOG_LENGTH_PRIOR
-        )
-        if self.learn_order:
-            lp = lp + _normal_logpdf(p[2], *DEFAULT_LOG_NU_PRIOR)
-        return lp
+    def cache_tag(self, zero_mode: bool | None = None) -> str:
+        zm = self.zero_mode if zero_mode is None else bool(zero_mode)
+        return f"canon:continuous_matern:zm={zm}" if self.learn_order else f"custom_matern:ord={round(float(self.order), 8)}:zm={zm}"
 
 
 class SquaredExpSpectrum(SpectralKernel):
@@ -457,34 +518,11 @@ class SquaredExpSpectrum(SpectralKernel):
         log_raw = -0.5 * jnp.square(self.length_yr) * lam
         return _normalize_from_log_spectrum(log_raw, self.sigma, zero_mode=self.zero_mode)
 
-    def param_names(self) -> tuple[str, ...]:
-        return ("log_sigma", "log_length_yr")
-
-    def unconstrain_hyperparams(self) -> jax.Array:
-        return jnp.stack(
-            [
-                jnp.log(jnp.maximum(self.sigma, 1e-30)),
-                jnp.log(jnp.maximum(self.length_yr, 1e-30)),
-            ]
-        )
-
-    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> SquaredExpSpectrum:
-        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        return SquaredExpSpectrum(
-            sigma=_safe_exp_hyper(p[0]),
-            length_yr=_safe_exp_hyper(p[1]),
-            zero_mode=self.zero_mode,
-        )
-
-    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
-        p = (
-            self.unconstrain_hyperparams()
-            if phi is None
-            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        )
-        return _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR) + _normal_logpdf(
-            p[1], *DEFAULT_LOG_LENGTH_PRIOR
-        )
+    _PARAM_SPECS: ClassVar[tuple[_KernelParamSpec, ...]] = (
+        _KernelParamSpec("log_sigma", "sigma", DEFAULT_LOG_SIGMA_PRIOR),
+        _KernelParamSpec("log_length_yr", "length_yr", DEFAULT_LOG_LENGTH_PRIOR),
+    )
+    _CACHE_PREFIX: ClassVar[str] = "canon:squared_exp"
 
 
 class QuasiPeriodicSpectrum(SpectralKernel):
@@ -526,38 +564,12 @@ class QuasiPeriodicSpectrum(SpectralKernel):
         log_raw = -jnp.log(jnp.maximum(denom, 1e-300))
         return _normalize_from_log_spectrum(log_raw, self.sigma, zero_mode=self.zero_mode)
 
-    def param_names(self) -> tuple[str, ...]:
-        return ("log_sigma", "log_period_yr", "log_q_minus_half")
-
-    def unconstrain_hyperparams(self) -> jax.Array:
-        return jnp.stack(
-            [
-                jnp.log(jnp.maximum(self.sigma, 1e-30)),
-                jnp.log(jnp.maximum(self.period_yr, 1e-30)),
-                jnp.log(jnp.maximum(self.quality - 0.5, 1e-30)),
-            ]
-        )
-
-    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> QuasiPeriodicSpectrum:
-        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        return QuasiPeriodicSpectrum(
-            sigma=_safe_exp_hyper(p[0]),
-            period_yr=_safe_exp_hyper(p[1]),
-            quality=0.5 + _safe_exp_hyper(p[2]),
-            zero_mode=self.zero_mode,
-        )
-
-    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
-        p = (
-            self.unconstrain_hyperparams()
-            if phi is None
-            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        )
-        return (
-            _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR)
-            + _normal_logpdf(p[1], *DEFAULT_LOG_PERIOD_PRIOR)
-            + _normal_logpdf(p[2], *DEFAULT_LOG_QUALITY_PRIOR)
-        )
+    _PARAM_SPECS: ClassVar[tuple[_KernelParamSpec, ...]] = (
+        _KernelParamSpec("log_sigma", "sigma", DEFAULT_LOG_SIGMA_PRIOR),
+        _KernelParamSpec("log_period_yr", "period_yr", DEFAULT_LOG_PERIOD_PRIOR),
+        _KernelParamSpec("log_q_minus_half", "quality", DEFAULT_LOG_QUALITY_PRIOR, "log_shift_half"),
+    )
+    _CACHE_PREFIX: ClassVar[str] = "canon:sho_solar"
 
 
 class SumSpectrum(SpectralKernel):
@@ -598,6 +610,8 @@ class SumSpectrum(SpectralKernel):
 
     def from_unconstrained_hyperparams(self, phi: ArrayLike) -> SumSpectrum:
         p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        if p.shape[0] != self.n_hyperparams:
+            raise ValueError(f"Expected {self.n_hyperparams} hyperparameters, got {p.shape[0]}.")
         cursor = 0
         updated: list[SpectralKernel] = []
         for part in self.parts:
@@ -613,6 +627,8 @@ class SumSpectrum(SpectralKernel):
                 acc = acc + part.hyperprior_log_prob()
             return acc
         p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
+        if p.shape[0] != self.n_hyperparams:
+            raise ValueError(f"Expected {self.n_hyperparams} hyperparameters, got {p.shape[0]}.")
         cursor = 0
         acc = jnp.asarray(0.0, dtype=jnp.float64)
         for part in self.parts:
@@ -620,6 +636,12 @@ class SumSpectrum(SpectralKernel):
             acc = acc + part.hyperprior_log_prob(p[cursor : cursor + sz])
             cursor += sz
         return acc
+
+    def summarize(self) -> dict[str, float]:
+        return {f"p{i + 1}_{k}": v for i, p in enumerate(self.parts) for k, v in p.summarize().items()}
+
+    def cache_tag(self, zero_mode: bool | None = None) -> str:
+        return f"sum:({'+'.join(p.cache_tag(zero_mode) for p in self.parts)})"
 
 
 class CorrelatedFieldSpectrum(SpectralKernel):
@@ -690,40 +712,16 @@ class CorrelatedFieldSpectrum(SpectralKernel):
         log_raw = jnp.concatenate([log_pos[:1], log_pos], axis=0)
         return _normalize_from_log_spectrum(log_raw, self.sigma, zero_mode=self.zero_mode)
 
-    def param_names(self) -> tuple[str, ...]:
-        m = int(self.log_deviations.shape[0])
-        return ("log_sigma", "slope") + tuple(f"xi_spec_{i + 1}" for i in range(m))
+    _PARAM_SPECS: ClassVar[tuple[_KernelParamSpec, ...]] = (
+        _KernelParamSpec("log_sigma", "sigma", DEFAULT_LOG_SIGMA_PRIOR),
+        _KernelParamSpec("slope", "slope", DEFAULT_SLOPE_PRIOR, "identity"),
+        _KernelParamSpec("xi_spec", "log_deviations", (0.0, 1.0), "identity", "rms_xi"),
+    )
 
-    def unconstrain_hyperparams(self) -> jax.Array:
-        return jnp.concatenate(
-            [
-                jnp.stack([jnp.log(jnp.maximum(self.sigma, 1e-30)), self.slope]),
-                self.log_deviations,
-            ],
-            axis=0,
-        )
-
-    def from_unconstrained_hyperparams(self, phi: ArrayLike) -> CorrelatedFieldSpectrum:
-        p = jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        return CorrelatedFieldSpectrum(
-            sigma=_safe_exp_hyper(p[0]),
-            slope=p[1],
-            log_deviations=p[2:],
-            flexibility=self.flexibility,
-            zero_mode=self.zero_mode,
-        )
-
-    def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
-        p = (
-            self.unconstrain_hyperparams()
-            if phi is None
-            else jnp.asarray(phi, dtype=jnp.float64).reshape(-1)
-        )
-        lp_head = _normal_logpdf(p[0], *DEFAULT_LOG_SIGMA_PRIOR) + _normal_logpdf(
-            p[1], *DEFAULT_SLOPE_PRIOR
-        )
-        lp_xi = jnp.sum(_normal_logpdf(p[2:], 0.0, 1.0))
-        return lp_head + lp_xi
+    def cache_tag(self, zero_mode: bool | None = None) -> str:
+        zm = self.zero_mode if zero_mode is None else bool(zero_mode)
+        m, flex = int(self.log_deviations.shape[0]), round(float(self.flexibility), 8)
+        return f"custom_cf:m={m}:flex={flex}:zm={zm}"
 
 
 # =============================================================================
@@ -4797,6 +4795,19 @@ _KERNEL_NAME_ALIASES: dict[str, str] = {
 }
 
 
+_KERNEL_PROTOTYPES: dict[str, Callable[[bool, int], SpectralKernel]] = {
+    "matern12": lambda zm, _: MaternSpectrum(0.25, 5.0, 1.0, zero_mode=zm),
+    "matern32": lambda zm, _: MaternSpectrum(0.25, 5.0, 2.0, zero_mode=zm),
+    "matern52": lambda zm, _: MaternSpectrum(0.25, 5.0, 3.0, zero_mode=zm),
+    "squared_exp": lambda zm, _: SquaredExpSpectrum(0.25, 5.0, zero_mode=zm),
+    "continuous_matern": lambda zm, _: MaternSpectrum(0.25, 5.0, 2.0, learn_order=True, zero_mode=zm),
+    "sho_solar": lambda zm, _: QuasiPeriodicSpectrum(0.22, 11.0, 5.0, zero_mode=zm),
+    "matern32_plus_solar": lambda zm, _: MaternSpectrum(0.18, 5.0, 2.0, zero_mode=zm)
+    + QuasiPeriodicSpectrum(0.22, 11.0, 5.0, zero_mode=False),
+    "correlated_field": lambda zm, m: CorrelatedFieldSpectrum(0.25, -2.0, n_modes=m, zero_mode=zm),
+}
+
+
 def _prototype_kernel_from_name(
     canonical_name: str,
     *,
@@ -4804,56 +4815,13 @@ def _prototype_kernel_from_name(
     n_corr_modes: int = 4,
 ) -> SpectralKernel:
     """Return a dataset-independent prototype :class:`SpectralKernel` for ``canonical_name``."""
-    if canonical_name in ("matern12", "matern32", "matern52"):
-        ord_fixed = {"matern12": 1.0, "matern32": 2.0, "matern52": 3.0}[canonical_name]
-        return MaternSpectrum(
-            sigma=0.25,
-            length_yr=5.0,
-            order=ord_fixed,
-            learn_order=False,
-            zero_mode=zero_mode,
+    factory = _KERNEL_PROTOTYPES.get(canonical_name)
+    if factory is None:
+        raise ValueError(
+            f"Unknown kernel identifier {canonical_name!r}; expected one of "
+            f"{sorted(_KERNEL_NAME_ALIASES)}."
         )
-    if canonical_name == "squared_exp":
-        return SquaredExpSpectrum(sigma=0.25, length_yr=5.0, zero_mode=zero_mode)
-    if canonical_name == "continuous_matern":
-        return MaternSpectrum(
-            sigma=0.25,
-            length_yr=5.0,
-            order=2.0,
-            learn_order=True,
-            zero_mode=zero_mode,
-        )
-    if canonical_name == "sho_solar":
-        return QuasiPeriodicSpectrum(
-            sigma=0.22,
-            period_yr=11.0,
-            quality=5.0,
-            zero_mode=zero_mode,
-        )
-    if canonical_name == "matern32_plus_solar":
-        return MaternSpectrum(
-            sigma=0.18,
-            length_yr=5.0,
-            order=2.0,
-            zero_mode=zero_mode,
-        ) + QuasiPeriodicSpectrum(
-            sigma=0.22,
-            period_yr=11.0,
-            quality=5.0,
-            zero_mode=False,
-        )
-    if canonical_name == "correlated_field":
-        return CorrelatedFieldSpectrum(
-            sigma=0.25,
-            slope=-2.0,
-            log_deviations=jnp.zeros((n_corr_modes,), dtype=jnp.float64),
-            flexibility=0.5,
-            zero_mode=zero_mode,
-        )
-    raise ValueError(
-        f"Unknown kernel identifier {canonical_name!r}; expected one of "
-        f"{sorted(_KERNEL_NAME_ALIASES)}."
-    )
+    return factory(zero_mode, n_corr_modes)
 
 def _kernel_builders_from_spec(
     spec_item: str | SpectralKernel,
@@ -4879,28 +4847,20 @@ def _kernel_builders_from_spec(
         cache_tag = f"canon:{canon}:zm={zero_mode}"
     elif isinstance(spec_item, SpectralKernel):
         proto = spec_item
-        cache_tag = _custom_kernel_cache_tag(proto)
+        cache_tag = proto.cache_tag()
     else:
         raise TypeError(
             f"kernel must be a str or SpectralKernel, got {type(spec_item)!r}."
         )
 
-    def build_fn(phi: jax.Array) -> SpectralKernel:
-        return proto.from_unconstrained_hyperparams(phi)
-
+    prior_fn = proto.hyperprior_log_prob if hyperprior_override is None else hyperprior_override
     if hyperprior_override is not None:
-        prior_fn = hyperprior_override
         cache_tag = f"{cache_tag}:hp={id(hyperprior_override)}"
-    else:
-
-        def prior_fn(phi: jax.Array) -> jax.Array:
-            return proto.hyperprior_log_prob(phi)
-
     return (
-        build_fn,
+        proto.from_unconstrained,
         prior_fn,
         proto.param_names(),
-        proto.unconstrain_hyperparams(),
+        proto.unconstrained_init(),
         cache_tag,
     )
 
@@ -4930,43 +4890,6 @@ class OptimizedKernelResult(zdx.Base):
     def log_evidence_hyper(self) -> jax.Array:
         """Alias for :attr:`log_hyper_evidence`."""
         return self.log_hyper_evidence
-
-
-def _summarize_hyperparams(kernel: SpectralKernel) -> dict[str, float]:
-    if isinstance(kernel, MaternSpectrum):
-        out = {
-            "sigma": float(kernel.sigma),
-            "length_yr": float(kernel.length_yr),
-            "order": float(kernel.order),
-        }
-        return out
-    if isinstance(kernel, SquaredExpSpectrum):
-        return {
-            "sigma": float(kernel.sigma),
-            "length_yr": float(kernel.length_yr),
-        }
-    if isinstance(kernel, QuasiPeriodicSpectrum):
-        return {
-            "sigma": float(kernel.sigma),
-            "period_yr": float(kernel.period_yr),
-            "quality": float(kernel.quality),
-        }
-    if isinstance(kernel, CorrelatedFieldSpectrum):
-        return {
-            "sigma": float(kernel.sigma),
-            "slope": float(kernel.slope),
-            "rms_xi": float(jnp.sqrt(jnp.mean(jnp.square(kernel.log_deviations)))),
-        }
-    if isinstance(kernel, SumSpectrum):
-        merged: dict[str, float] = {}
-        for idx, p in enumerate(kernel.parts):
-            for k, v in _summarize_hyperparams(p).items():
-                merged[f"p{idx + 1}_{k}"] = v
-        return merged
-    return {
-        nm: float(val)
-        for nm, val in zip(kernel.param_names(), kernel.unconstrain_hyperparams())
-    }
 
 
 def _preoptimize_extra_production(
@@ -5127,28 +5050,6 @@ def _gram_neg_log_evidence_with_init(
     quad = jnp.maximum(x_sq - (w_sol @ w_sol), 0.0)
     half_logdet = jnp.sum(jnp.log(jnp.diag(chol)))
     return 0.5 * quad + log_norm_d + half_logdet_nuis + half_logdet
-
-
-def _custom_kernel_cache_tag(kernel_obj: SpectralKernel) -> str:
-    """Deterministic recursive JIT cache tag for any custom :class:`SpectralKernel`."""
-    if isinstance(kernel_obj, MaternSpectrum):
-        if kernel_obj.learn_order:
-            return f"canon:continuous_matern:zm={kernel_obj.zero_mode}"
-        return f"custom_matern:ord={round(float(kernel_obj.order), 8)}:zm={kernel_obj.zero_mode}"
-    if isinstance(kernel_obj, SquaredExpSpectrum):
-        return f"canon:squared_exp:zm={kernel_obj.zero_mode}"
-    if isinstance(kernel_obj, QuasiPeriodicSpectrum):
-        return f"canon:sho_solar:zm={kernel_obj.zero_mode}"
-    if isinstance(kernel_obj, CorrelatedFieldSpectrum):
-        return (
-            f"custom_cf:m={int(kernel_obj.log_deviations.shape[0])}"
-            f":flex={round(float(kernel_obj.flexibility), 8)}"
-            f":zm={kernel_obj.zero_mode}"
-        )
-    if isinstance(kernel_obj, SumSpectrum):
-        inner = "+".join(_custom_kernel_cache_tag(p) for p in kernel_obj.parts)
-        return f"sum:({inner})"
-    return f"custom:{id(kernel_obj)}"
 
 
 def _finite_diff_hessian_from_grad(
@@ -5765,7 +5666,7 @@ def _optimize_single_kernel_precomputed(
         kernel=kern_opt,
         fit=fit_res,
         phi_map=phi_opt,
-        hyperparameters=_summarize_hyperparams(kern_opt),
+        hyperparameters=kern_opt.summarize(),
         log_evidence=ln_z_val,
         log_hyperprior=lp_val,
         log_joint_hyper=ln_joint,
@@ -6327,7 +6228,7 @@ def _finalize_cbm_kernel_laplace(
         kernel=kern_opt,
         fit=fit_res,
         phi_map=phi_opt,
-        hyperparameters=_summarize_hyperparams(kern_opt),
+        hyperparameters=kern_opt.summarize(),
         log_evidence=ln_z_val,
         log_hyperprior=lp_val,
         log_joint_hyper=ln_joint,
