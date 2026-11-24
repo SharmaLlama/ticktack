@@ -31,6 +31,7 @@ def plot_cbm_mode_impulse_responses(
     *,
     t_lag: ArrayLike | None = None,
     modes: Sequence[int] = (0, 1, 2, 3, 5, 8),
+    prior_cbm_sd: float | ArrayLike | None = None,
     obs_window_yr: tuple[float, float] | None = (0.0, 6.5),
     ncols: int = 3,
     show_baseline: bool = True,

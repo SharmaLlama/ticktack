@@ -1948,12 +1948,14 @@ def _format_mode_metric_tex(val: float) -> str:
     return f"{val:.2g}"
 
 
+# shape-exempt(carbon): public plotting entry point forwarding explicit prior_cbm_sd in SVD mode
 def plot_cbm_mode_impulse_responses(
     cbm_or_result: Any,
     spectrum: Any | None = None,
     *,
     t_lag: Any | None = None,
     modes: Sequence[int] = (0, 1, 2, 3, 5, 8),
+    prior_cbm_sd: float | Any | None = None,
     obs_window_yr: tuple[float, float] | None = (0.0, 6.5),
     ncols: int = 3,
     show_baseline: bool = True,
@@ -1966,7 +1968,8 @@ def plot_cbm_mode_impulse_responses(
     or a ``(cbm, spectrum)`` pair (calling
     :func:`~ticktack.fisher.cbm_mode_impulse_responses` on ``t_lag``).
     When ``spectrum is None`` and a CBM is passed directly, displays the
-    continuous impulse-response Jacobian SVD modes.
+    continuous impulse-response Jacobian SVD modes (requiring an explicit
+    ``prior_cbm_sd``).
 
     When ``show_baseline=True``, renders a compact full-width reference panel
     across the top showing the nominal tropospheric impulse responses
@@ -2005,7 +2008,7 @@ def plot_cbm_mode_impulse_responses(
             )
             pos_list = list(range(len(res.mode_indices)))
         else:
-            res_all = cbm_mode_impulse_responses(cbm_or_result, lag_grid, None)
+            res_all = cbm_mode_impulse_responses(cbm_or_result, lag_grid, None, prior_cbm_sd=prior_cbm_sd)
             avail_idx = list(res_all.mode_indices)
             pos_list = [avail_idx.index(int(m)) for m in modes if int(m) in avail_idx]
             if not pos_list:

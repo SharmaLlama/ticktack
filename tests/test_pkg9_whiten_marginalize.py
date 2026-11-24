@@ -128,6 +128,22 @@ def test_fisher_requires_explicit_prior_widths_and_drops_parameterisation() -> N
     assert imp.source == "fisher"
     assert imp.mode_contributions["north"].shape == (2, 11)
 
+    # plot_cbm_mode_impulse_responses in direct SVD mode (spectrum=None) requires and forwards prior_cbm_sd:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    cbm_m17 = tt.load_preset("Miyake17", kind="open")
+    with pytest.raises(ValueError, match="prior_cbm_sd"):
+        tt.plot_cbm_mode_impulse_responses(cbm_m17, None, t_lag=t_lag)
+
+    fig_svd, axes_svd = tt.plot_cbm_mode_impulse_responses(
+        cbm_m17, None, t_lag=t_lag, modes=(0, 1), prior_cbm_sd=0.35, ncols=2
+    )
+    assert axes_svd.size >= 2
+    plt.close(fig_svd)
+
 
 # ---------------------------------------------------------------------------
 # 3. Package 1: ticktack._utils shared helpers & inlined _uses_joint_mode
