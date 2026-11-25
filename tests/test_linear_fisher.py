@@ -1821,8 +1821,12 @@ def test_cbm_mode_impulse_responses_and_plot():
     flat_th, unravel_th = _partition_inexact(cbm_b21)
     w0 = svd_res.parameter_loadings[:, 0]
     eps = 1e-6
-    h_plus = tt.cbm_mode_impulse_responses(unravel_th(flat_th + eps * w0), t_lag, None, modes=(0,)).baseline
-    h_minus = tt.cbm_mode_impulse_responses(unravel_th(flat_th - eps * w0), t_lag, None, modes=(0,)).baseline
+    h_plus = tt.cbm_mode_impulse_responses(
+        unravel_th(flat_th + eps * w0), t_lag, None, modes=(0,), prior_cbm_sd=0.35
+    ).baseline
+    h_minus = tt.cbm_mode_impulse_responses(
+        unravel_th(flat_th - eps * w0), t_lag, None, modes=(0,), prior_cbm_sd=0.35
+    ).baseline
     fd_nh = (h_plus["north"] - h_minus["north"]) / (2.0 * eps)
     fd_sh = (h_plus["south"] - h_minus["south"]) / (2.0 * eps)
     np.testing.assert_allclose(svd_res.mode_contributions["north"][0], fd_nh, rtol=1e-6, atol=1e-7)

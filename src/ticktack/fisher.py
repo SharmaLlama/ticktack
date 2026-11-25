@@ -41,6 +41,7 @@ import numpy as onp
 from jax.flatten_util import ravel_pytree
 from jax.typing import ArrayLike
 
+from ._utils import _concrete, _safe_psd_root
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 
 __all__ = [
@@ -56,17 +57,6 @@ __all__ = [
     "regularized_inverse",
     "relaxation_fisher_modes",
 ]
-
-
-def _concrete(value: Any) -> onp.ndarray | None:
-    """Return ``value`` as a NumPy array, or ``None`` inside JAX transformations."""
-    try:
-        return onp.asarray(value)
-    except (
-        jax.errors.TracerArrayConversionError,
-        jax.errors.ConcretizationTypeError,
-    ):
-        return None
 
 
 def _partition_inexact(params: Any) -> tuple[jax.Array, Callable[[jax.Array], Any]]:
@@ -352,38 +342,6 @@ class FisherSpectrumResult(NamedTuple):
     active_mask: jax.Array
 
 
-def _psd_square_root_factor(psd_mat: jax.Array, tol: float = 1e-15) -> jax.Array:
-    """Return ``B`` with ``B @ B.T = psd_mat`` safely for symmetric PSD matrices.
-
-    Uses Cholesky directly when strictly positive definite (preserving exact
-    autodiff across repeated eigenvalues) and falls back to double-``where``
-    guarded symmetric eigendecomposition when singular or zero.
-    """
-    n = psd_mat.shape[0]
-    if n == 0:
-        return jnp.zeros((0, 0), dtype=jnp.float64)
-    sym = 0.5 * (psd_mat + psd_mat.T)
-    chol = jnp.linalg.cholesky(sym)
-    chol_ok = jnp.all(jnp.isfinite(chol))
-
-    # Guarded eigh branch for rank-deficient / zero nuisance precision matrices:
-    c_sym = _concrete(sym)
-    def _eigh_branch(m: jax.Array) -> jax.Array:
-        evals, evecs = jnp.linalg.eigh(m)
-        scale = jnp.maximum(jnp.max(evals), 1.0)
-        pos = evals > tol * scale
-        safe_evals = jnp.where(pos, evals, 1.0)
-        root_evals = jnp.where(pos, jnp.sqrt(safe_evals), 0.0)
-        return evecs * root_evals[None, :]
-
-    if c_sym is not None:
-        if onp.all(onp.isfinite(onp.asarray(chol))):
-            return chol
-        return _eigh_branch(sym)
-
-    return jax.lax.cond(chol_ok, lambda _: chol, _eigh_branch, sym)
-
-
 def _resolve_cbm_prior_root(
     p_full: int,
     *,
@@ -631,10 +589,11 @@ def cbm_fisher_spectrum(
     active_cbm_mask : array-like of bool, optional
         Explicit mask selecting active CBM parameters among flattened ``theta_cbm``.
     exclude_total_mass : bool, optional
-        When ``True`` (default) and ``theta_cbm`` is an ``equinox.Module`` with
-        a ``log_total_mass`` or ``theta_tot`` attribute and no explicit
-        ``active_cbm_mask`` or finite prior on it, automatically masks that
-        exact zero-Fisher gauge coordinate.
+        When ``True`` (default) and ``theta_cbm`` implements
+        ``active_parameter_mask()`` or is an ``equinox.Module`` with a
+        ``log_total_mass`` or ``theta_tot`` attribute, automatically masks
+        inactive gauge coordinates unless an explicit ``active_cbm_mask`` or
+        full-length ``(p_full,)`` / ``(p_full, p_full)`` prior is supplied.
     mass_fn, flux_fn : callable, optional
         Functions mapping ``theta_cbm`` to reservoir masses ``M`` ``(n_boxes,)``
         and directed edge fluxes ``F`` ``(n_edges,)``. When ``log_space_observables``
@@ -656,41 +615,18 @@ def cbm_fisher_spectrum(
     flat_theta, unravel_theta = _partition_inexact(theta_cbm)
     p_full = flat_theta.shape[0]
 
-    # Auto-detect log_total_mass / theta_tot gauge leaf on PyTree CBM objects
-    # if no explicit active_cbm_mask is given and no full-length explicit prior
-    # matrix/vector was supplied for it (scalar prior_cbm_sd projects out
-    # log_total_mass before broadcasting).
-    _sd_is_scalar = prior_cbm_sd is not None and (
-        jnp.asarray(prior_cbm_sd, dtype=jnp.float64).ndim == 0
-        or jnp.asarray(prior_cbm_sd, dtype=jnp.float64).size == 1
-    )
-    if (
-        active_cbm_mask is None
-        and exclude_total_mass
-        and isinstance(theta_cbm, eqx.Module)
-        and prior_cbm_cov is None
-        and prior_cbm_prec is None
-        and prior_cbm_root is None
-        and (prior_cbm_sd is None or _sd_is_scalar)
-    ):
-        for gauge_attr in ("log_total_mass", "theta_tot"):
-            if hasattr(theta_cbm, gauge_attr) and eqx.is_inexact_array(
-                getattr(theta_cbm, gauge_attr)
-            ):
-                diff_tree, _ = eqx.partition(theta_cbm, eqx.is_inexact_array)
-                ones_tree = jax.tree_util.tree_map(
-                    lambda leaf: onp.ones(leaf.shape, dtype=onp.float64), diff_tree
-                )
-                marked_tree = eqx.tree_at(
-                    lambda m, attr=gauge_attr: getattr(m, attr),
-                    ones_tree,
-                    onp.zeros(getattr(diff_tree, gauge_attr).shape, dtype=onp.float64),
-                )
-                flat_mask_np = onp.concatenate(
-                    [onp.ravel(leaf) for leaf in jax.tree_util.tree_leaves(marked_tree)]
-                )
-                active_cbm_mask = flat_mask_np > 0.5
-                break
+    # Auto-detect inactive gauge coordinates (via active_parameter_mask() or
+    # log_total_mass / theta_tot attributes) unless an explicit active_cbm_mask
+    # or full-length (p_full,) / (p_full, p_full) prior was supplied.
+    if active_cbm_mask is None and exclude_total_mass:
+        cand_mask = _auto_exclude_total_mass_mask(theta_cbm)
+        has_full_sd = prior_cbm_sd is not None and jnp.asarray(prior_cbm_sd).shape == (p_full,)
+        has_full_mat = any(
+            m is not None and jnp.asarray(m).shape == (p_full, p_full)
+            for m in (prior_cbm_cov, prior_cbm_prec, prior_cbm_root)
+        )
+        if cand_mask is not None and not (has_full_sd or has_full_mat):
+            active_cbm_mask = cand_mask
 
     if psi_nuisance is None:
         j_theta_raw = _jacfwd_chunked(
@@ -747,7 +683,7 @@ def cbm_fisher_spectrum(
             prior_psi_sd=prior_psi_sd,
         )
         # pi_psi = L_psi @ L_psi.T => L_psi.T has Gram matrix L_psi @ L_psi.T = pi_psi
-        l_psi = _psd_square_root_factor(pi_psi)
+        l_psi = _safe_psd_root(pi_psi, jitter=0.0)
         a_psi = jnp.concatenate([w_psi, l_psi.T], axis=0)
         a_theta_full = jnp.concatenate(
             [w_theta, jnp.zeros((p_psi, p_full), dtype=jnp.float64)], axis=0
@@ -1107,7 +1043,13 @@ def _resolve_trop_box_index(cbm: Any, hemisphere: str) -> int:
 
 
 def _auto_exclude_total_mass_mask(cbm: Any) -> onp.ndarray | None:
-    """Return active-parameter boolean mask excluding ``log_total_mass`` / ``theta_tot``."""
+    """Return active-parameter boolean mask excluding gauge coords (e.g. ``log_total_mass``)."""
+    mask_fn = getattr(cbm, "active_parameter_mask", None)
+    if callable(mask_fn):
+        with jax.ensure_compile_time_eval():
+            raw_mask = mask_fn()
+        if raw_mask is not None and (c_mask := _concrete(raw_mask)) is not None:
+            return onp.asarray(c_mask, dtype=bool).reshape(-1)
     if not isinstance(cbm, eqx.Module):
         return None
     for gauge_attr in ("log_total_mass", "theta_tot"):
@@ -1149,7 +1091,7 @@ def cbm_mode_impulse_responses(
     *,
     modes: Sequence[int] | None = None,
     hemispheres: Sequence[Literal["north", "south"]] = ("north", "south"),
-    prior_cbm_sd: float = 0.35,
+    prior_cbm_sd: float | ArrayLike | None = None,
     q_std: float = DEFAULT_Q_STD,
     alpha_unit: float = ALPHA_ATOMS_CM2_S_TO_KG_YR,
     units: Literal["permil_per_q0_yr", "permil_per_fluence", "raw"] = "permil_per_q0_yr",
@@ -1182,10 +1124,9 @@ def cbm_mode_impulse_responses(
        returns the resulting orthogonal temporal mode contributions.
     """
     if units not in ("permil_per_q0_yr", "permil_per_fluence", "raw"):
-        raise ValueError(
-            "units must be 'permil_per_q0_yr', 'permil_per_fluence', or 'raw'; "
-            f"got {units!r}."
-        )
+        raise ValueError(f"Invalid units {units!r}; use permil_per_q0_yr, permil_per_fluence, or raw.")
+    if spectrum is None and prior_cbm_sd is None:
+        raise ValueError("prior_cbm_sd must be specified explicitly when spectrum is None.")
     hem_tuple = tuple(str(h) for h in hemispheres)
     if not hem_tuple:
         raise ValueError("hemispheres must be a non-empty sequence.")
@@ -1456,16 +1397,15 @@ def _resolve_gp_fisher_model_and_cfg(
                 )
     if cfg.offset_mode not in ("hierarchical", "per_series", "shared", "none"):
         raise ValueError(f"Unsupported offset_mode {cfg.offset_mode!r}.")
-
     cfg_cov = LinearMarginalConfig(
         offset_mode=cfg.offset_mode,
         global_prior_mean=cfg.global_prior_mean,
         global_prior_sd=eff_g_sd,
         lab_prior_sd=cfg.lab_prior_sd,
-        marginalise_solar=False,
-        marginalise_trend=False,
-        marginalise_gp=isinstance(gp_or_field, GPProduction),
-        marginalise_field=isinstance(gp_or_field, (SpectralKernel, GaussianField)),
+        marginalize_solar=False,
+        marginalize_trend=False,
+        marginalize_gp=isinstance(gp_or_field, GPProduction),
+        marginalize_field=isinstance(gp_or_field, (SpectralKernel, GaussianField)),
         n_gp_modes=cfg.n_gp_modes,
         include_gp_initial_cov=cfg.include_gp_initial_cov,
         include_field_initial_cov=cfg.include_field_initial_cov,
@@ -1590,8 +1530,7 @@ def cbm_gp_fisher_spectrum(  # shape-exempt(carbon): public Fisher entry point p
     spike_prior_precision: ArrayLike | None = None,
     marginal_config: Any | None = None,
     per_series_prior_sd: float | Literal["from_config"] | None = "from_config",
-    prior_sd: float | ArrayLike = 0.35,
-    parameterisation: Literal["log_rates"] = "log_rates",
+    prior_sd: float | ArrayLike | None = None,
     n_grid: int = 56,
     pad_years: float = 15.0,
     q_std: float = DEFAULT_Q_STD,
@@ -1671,10 +1610,9 @@ def cbm_gp_fisher_spectrum(  # shape-exempt(carbon): public Fisher entry point p
         ``"from_config"`` (default) uses ``marginal_config.global_prior_sd``; passing
         ``None`` or ``jnp.inf`` projects both mean and covariance rows onto the REML
         orthogonal complement of the per-series indicator matrix.
-    prior_sd : float or ArrayLike, optional
-        Gaussian prior standard deviation on CBM log-rate parameters (default ``0.35``).
-    parameterisation : {"log_rates"}, optional
-        CBM parameterisation convention (default ``"log_rates"``).
+    prior_sd : float or ArrayLike
+        Required Gaussian prior standard deviation on CBM log-rate parameters
+        (no implicit default prior width).
     n_grid : int, optional
         Uniform DCT-II grid size used when ``gp_or_field`` is a :class:`SpectralKernel`
         (default ``56``).
@@ -1695,9 +1633,10 @@ def cbm_gp_fisher_spectrum(  # shape-exempt(carbon): public Fisher entry point p
     from .likelihood import LinearMarginalConfig
     from .production import MiyakeSpike, ProductionTerm
 
-    if parameterisation != "log_rates":
+    if prior_sd is None:
         raise ValueError(
-            f"parameterisation must be 'log_rates'; got {parameterisation!r}."
+            "prior_sd must be specified explicitly for cbm_gp_fisher_spectrum "
+            "(no implicit default prior width)."
         )
 
     if isinstance(dataset, TreeRingSeries):

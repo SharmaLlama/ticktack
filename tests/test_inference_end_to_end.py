@@ -993,7 +993,7 @@ def test_fit_map_warm_xla_cache_hit_zero_recompilation(brehm21_cbm, synthetic_da
             tt.ParamSpec("production.spike.fluence", "exp", math.log(6.0), 0.5),
         ],
     )
-    cfg = tt.LinearMarginalConfig(offset_mode="hierarchical", marginalise_solar=True)
+    cfg = tt.LinearMarginalConfig(offset_mode="hierarchical", marginalize_solar=True)
 
     res_cold = tt.fit_map(model, synthetic_dataset, ps, cfg, method="BFGS")
     jax.block_until_ready(res_cold.u_map)

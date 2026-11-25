@@ -1488,8 +1488,8 @@ def test_item4_psis_pareto_k_diagnostic_and_warning() -> None:
         [tt.ParamSpec("production.spike.fluence", bijector="identity", prior_mean=5.5, prior_sd=5.0)],
     )
     # Surrogate omits the wide GP field variance -> much narrower posterior than exact target
-    cfg_narrow = tt.LinearMarginalConfig(offset_mode="none", marginalise_field=False)
-    cfg_wide = tt.LinearMarginalConfig(offset_mode="none", marginalise_field=True)
+    cfg_narrow = tt.LinearMarginalConfig(offset_mode="none", marginalize_field=False)
+    cfg_wide = tt.LinearMarginalConfig(offset_mode="none", marginalize_field=True)
 
     map_narrow = tt.fit_map(mod, ds, ps, cfg_narrow, compute_laplace=True)
     sd_narrow = float(jnp.sqrt(map_narrow.laplace_cov[0, 0]))
