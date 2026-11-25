@@ -37,6 +37,7 @@ if str(SRC) not in sys.path:
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from scipy import integrate as sp_integrate  # noqa: E402
 
 from ticktack.cbm import (  # noqa: E402
     CarbonBoxModel,
@@ -45,7 +46,11 @@ from ticktack.cbm import (  # noqa: E402
     ReversibleCBM,
     Topology,
 )
-from ticktack.constants import DECAY_CAMBRIDGE  # noqa: E402
+from ticktack.constants import (  # noqa: E402
+    ALPHA_ATOMS_CM2_S_TO_KG_YR,
+    DECAY_CAMBRIDGE,
+    DEFAULT_Q_STD,
+)
 from ticktack.presets import load_preset  # noqa: E402
 from ticktack.production import (  # noqa: E402
     GriddedProduction,
@@ -303,6 +308,93 @@ def test_diffrax_autonomous_miyake_and_gridded_eager_jit_grad() -> None:
     assert float(g_ic_j) == pytest.approx(float(g_ic_e), rel=1e-8, abs=1e-8)
 
 
+def _scipy_suess_2d_oracle(
+    cbm: FixedCBM,
+    prod: SteadyProduction | object,
+    starts_2d: np.ndarray,
+    ends_2d: np.ndarray,
+    weights_2d: np.ndarray,
+    *,
+    t0: float,
+    t_onset: float,
+    amp_gtc: float,
+    t_spike: float,
+    delta_global: float,
+    delta_lab: float,
+    relative_to: str,
+    box_index: int = 1,
+) -> np.ndarray:
+    """Independent SciPy ``DOP853`` + ``quad`` forward oracle for 2D-window Suess ``Delta14C``."""
+    m0 = np.asarray(cbm.reservoir_masses(), dtype=np.float64)
+    K0 = np.asarray(cbm.rate_matrix_K(), dtype=np.float64)
+    decay = float(cbm.decay_rate)
+    eye_n = np.eye(cbm.n_boxes, dtype=np.float64)
+    A0 = K0 - decay * eye_n
+    b_sc = float(ALPHA_ATOMS_CM2_S_TO_KG_YR) * np.asarray(cbm.production_vector(), dtype=np.float64)
+    y_ss = np.linalg.solve(-A0, b_sc * float(DEFAULT_Q_STD))
+    r_ref = float(y_ss[box_index] / m0[box_index])
+
+    def _m_at(t: float) -> np.ndarray:
+        u = float(np.logaddexp(0.0, (t - t_onset) / 10.0) * 10.0)
+        mt = m0.copy()
+        mt[1] += amp_gtc * (u / 100.0) ** 2
+        return mt
+
+    def _rhs_tot(t: float, y_tot: np.ndarray) -> np.ndarray:
+        At = K0 * (m0 / _m_at(t))[None, :] - decay * eye_n
+        q_t = float(DEFAULT_Q_STD) + float(prod.delta_q(t, q_std=DEFAULT_Q_STD))  # type: ignore[attr-defined]
+        return At @ y_tot + b_sc * q_t
+
+    # Eternal SteadyProduction(1.83) equilibrium at t0 = 1840 (pre-spike, pre-Suess)
+    y_init = y_ss + (1.83 - float(DEFAULT_Q_STD)) * np.linalg.solve(-A0, b_sc)
+    t_end = float(np.max(ends_2d)) + 0.1
+    segs = [
+        (t0, t_spike - 1.5, np.inf),
+        (t_spike - 1.5, t_spike + 2.5, 0.02),
+        (t_spike + 2.5, t_end, np.inf),
+    ]
+    sols = []
+    y_cur = y_init
+    for ta, tb, hmax in segs:
+        sol = sp_integrate.solve_ivp(
+            _rhs_tot,
+            (ta, tb),
+            y_cur,
+            method="DOP853",
+            rtol=1e-12,
+            atol=1e-13,
+            max_step=hmax,
+            dense_output=True,
+        )
+        assert sol.success
+        sols.append((ta, tb, sol.sol))
+        y_cur = sol.y[:, -1]
+
+    def _y_tot_at(t: float) -> np.ndarray:
+        for ta, tb, dense in sols:
+            if ta <= t <= tb:
+                return dense(t)
+        return sols[-1][2](t)
+
+    scale_amb = 1.0 + delta_global / 1000.0
+    exc_scale = scale_amb if relative_to == "ambient" else 1.0
+    y_base = y_ss[box_index] * scale_amb
+
+    def _inst_d14c(t: float) -> float:
+        dy_b = float(_y_tot_at(t)[box_index] - y_ss[box_index])
+        m_b = float(_m_at(t)[box_index])
+        return 1000.0 * (((y_base + exc_scale * dy_b) / m_b) / r_ref - 1.0)
+
+    n_r, m_w = starts_2d.shape
+    sub_avgs = np.empty((n_r, m_w), dtype=np.float64)
+    for i in range(n_r):
+        for j in range(m_w):
+            a_ij, b_ij = float(starts_2d[i, j]), float(ends_2d[i, j])
+            val, _ = sp_integrate.quad(_inst_d14c, a_ij, b_ij, epsabs=1e-12, epsrel=1e-12)
+            sub_avgs[i, j] = val / (b_ij - a_ij)
+    return np.sum(sub_avgs * weights_2d, axis=1) + delta_lab
+
+
 def test_diffrax_suess_dilution_callbacks_and_cbm_override_eager_jit_grad() -> None:
     """Verify Suess ``12C`` dilution for both solver callbacks and CBM overrides (2D windows)."""
     g15: FixedCBM = load_preset("Guttler15", kind="fixed")  # type: ignore[assignment]
@@ -340,6 +432,50 @@ def test_diffrax_suess_dilution_callbacks_and_cbm_override_eager_jit_grad() -> N
             return jnp.sum(pred**2)
 
         p0 = jnp.array([1894.4, 0.32, 5.2, 22.5, -1.7], dtype=jnp.float64)
+        prod_p0 = SteadyProduction(1.83) + MiyakeSpike(
+            t_start=p0[0], duration=p0[1], fluence=p0[2], profile="supergaussian"
+        )
+        pred_scipy = _scipy_suess_2d_oracle(
+            g15,
+            prod_p0,
+            np.asarray(starts_2d),
+            np.asarray(ends_2d),
+            np.asarray(weights_2d),
+            t0=1840.0,
+            t_onset=1850.0,
+            amp_gtc=85.0,
+            t_spike=float(p0[0]),
+            delta_global=float(p0[3]),
+            delta_lab=float(p0[4]),
+            relative_to=rel_mode,
+        )
+        pred_cb = dfx_cb.predict_d14c(
+            g15,
+            prod_p0,
+            starts_2d,
+            ends_2d,
+            sub_weights=weights_2d,
+            box_indices=1,
+            delta_global=p0[3],
+            delta_lab=p0[4],
+            relative_to=rel_mode,  # type: ignore[arg-type]
+            t0=1840.0,
+        )
+        pred_ov = dfx_plain.predict_d14c(
+            nonauton_cbm,
+            prod_p0,
+            starts_2d,
+            ends_2d,
+            sub_weights=weights_2d,
+            box_indices=1,
+            delta_global=p0[3],
+            delta_lab=p0[4],
+            relative_to=rel_mode,  # type: ignore[arg-type]
+            t0=1840.0,
+        )
+        np.testing.assert_allclose(pred_cb, pred_scipy, rtol=1e-9, atol=1e-9)
+        np.testing.assert_allclose(pred_ov, pred_scipy, rtol=1e-9, atol=1e-9)
+
         fn_cb = lambda p: _suess_loss(p, use_cbm_override=False)  # noqa: E731
         fn_ov = lambda p: _suess_loss(p, use_cbm_override=True)  # noqa: E731
 

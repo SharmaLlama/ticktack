@@ -28,7 +28,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import functools
 import math
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, TypeGuard, TypeVar
 
 import diffrax
 import equinox as eqx
@@ -164,8 +164,10 @@ def _cached_eig_concrete(
 PropagationBackend = Literal["modal_symmetric", "modal_general", "van_loan"]
 
 
-def _is_detailed_balance(cbm: CarbonBoxModel) -> bool:
-    """True for detailed-balance CBMs (chart flag, else EffectiveCBM / ReversibleCBM)."""
+def _is_detailed_balance(cbm: CarbonBoxModel | None) -> TypeGuard[CarbonBoxModel]:
+    """Return ``True`` for detailed-balance CBMs (static flag, else EffectiveCBM / ReversibleCBM)."""
+    if cbm is None:
+        return False
     return bool(getattr(cbm, "is_detailed_balance", isinstance(cbm, (EffectiveCBM, ReversibleCBM))))
 
 
@@ -1053,7 +1055,10 @@ class ExactLinearSolver(AbstractSolver):
         {"modal_symmetric", "modal_general", "van_loan"}
             * ``"modal_symmetric"``: real symmetric ``eigh`` similarity
               factorization for detailed-balance models (:class:`EffectiveCBM`,
-              :class:`ReversibleCBM`), active both eagerly and under ``jax.jit``.
+              :class:`ReversibleCBM`, or any :class:`CarbonBoxModel` setting
+              a static ``is_detailed_balance: bool = True`` attribute; setting
+              ``is_detailed_balance = False`` opts out), active both eagerly
+              and under ``jax.jit``.
             * ``"modal_general"``: cached ``float64``/``complex128``
               eigendecomposition for concrete non-symmetric models whose
               eigenvector condition number satisfies ``cond(V) < 1e6`` and
@@ -1413,7 +1418,7 @@ class ExactLinearSolver(AbstractSolver):
         y0: ArrayLike | None = None,
         modal: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     ) -> jax.Array:
-        a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
+        a_flat, b_flat, w_2d, _, _ = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
         A = cbm.matrix_A()
@@ -1463,12 +1468,7 @@ class ExactLinearSolver(AbstractSolver):
 
                 total = total + jax.vmap(_hom_win)(a_flat, b_flat)
 
-        if is_1d:
-            return total
-        assert w_2d is not None
-        n_r, m_w = orig_shape
-        reshaped = total.reshape((n_r, m_w, cbm.n_boxes))
-        return jnp.sum(reshaped * w_2d[:, :, None], axis=1)
+        return _combine_subwindows(total, w_2d)
 
 
 def _cbm_has_nonautonomous_masses(cbm: CarbonBoxModel) -> bool:
@@ -1613,6 +1613,14 @@ def _equilibrium_dy0_and_drift_anchor(
     return dy0, secular_rhs_anchor
 
 
+_ODERHSArgs = tuple[
+    CarbonBoxModel, ProductionTerm, jax.Array, jax.Array, jax.Array, jax.Array, ArrayLike
+]
+_SuessParams = tuple[jax.Array, jax.Array, jax.Array]
+_StateT = TypeVar("_StateT")
+_ArgsT = TypeVar("_ArgsT")
+
+
 class _ODEIVPSetup(NamedTuple):
     """Sorted save times, integration bracket, events, initial state, and RHS args."""
 
@@ -1623,7 +1631,7 @@ class _ODEIVPSetup(NamedTuple):
     step_ts: jax.Array | None
     jump_ts: jax.Array | None
     dy_init: jax.Array
-    rhs_args: tuple[Any, ...]
+    rhs_args: _ODERHSArgs
 
 
 def _prepare_ode_ivp(
@@ -1665,7 +1673,10 @@ def _prepare_ode_ivp(
 
 
 def _eval_ode_ddy(
-    a_at_fn: Callable[..., jax.Array], t: jax.Array, dy: jax.Array, rhs_args: tuple[Any, ...]
+    a_at_fn: Callable[[CarbonBoxModel, jax.Array], jax.Array],
+    t: jax.Array,
+    dy: jax.Array,
+    rhs_args: _ODERHSArgs,
 ) -> jax.Array:
     """Evaluate ``d(delta_y)/dt`` for autonomous or non-autonomous ``A(t)``."""
     cbm_arg, prod_arg, b_sc, y_ss_arg, A0_arg, sec_anc, q_s = rhs_args
@@ -1673,13 +1684,11 @@ def _eval_ode_ddy(
     return At @ dy + (At - A0_arg) @ y_ss_arg + b_sc * prod_arg.delta_q(t, q_std=q_s) + sec_anc
 
 
-def _combine_subwindows(values: jax.Array, subwindow_meta: tuple[Any, ...]) -> jax.Array:
+def _combine_subwindows(values: jax.Array, w_2d: jax.Array | None) -> jax.Array:
     """Combine 1D or weighted 2D ``(N_r, M_w)`` seasonal sub-window values to ``(N_r, n)``."""
-    w_2d, is_1d, orig_shape = subwindow_meta
-    if is_1d:
+    if w_2d is None:
         return values
-    assert w_2d is not None
-    return jnp.sum(values.reshape((*orig_shape, values.shape[-1])) * w_2d[:, :, None], axis=1)
+    return jnp.sum(values.reshape((*w_2d.shape, values.shape[-1])) * w_2d[:, :, None], axis=1)
 
 
 def _unpack_cumulative_windows(
@@ -1687,12 +1696,12 @@ def _unpack_cumulative_windows(
     inv_order: jax.Array,
     a_flat: jax.Array,
     b_flat: jax.Array,
-    subwindow_meta: tuple[Any, ...],
+    w_2d: jax.Array | None,
 ) -> jax.Array:
     """Convert sorted cumulative-integral boundary states to seasonal-window means."""
     cum_all, n_w = cum_sorted[inv_order], a_flat.shape[0]
     win_avg = (cum_all[n_w:] - cum_all[:n_w]) / (b_flat - a_flat)[:, None]
-    return _combine_subwindows(win_avg, subwindow_meta)
+    return _combine_subwindows(win_avg, w_2d)
 
 
 def _gl16_window_nodes(a_flat: jax.Array, b_flat: jax.Array) -> jax.Array:
@@ -1702,12 +1711,12 @@ def _gl16_window_nodes(a_flat: jax.Array, b_flat: jax.Array) -> jax.Array:
 
 
 def _gl16_reduce_windows(
-    quad_vals: jax.Array, n_w: int, subwindow_meta: tuple[Any, ...]
+    quad_vals: jax.Array, n_w: int, w_2d: jax.Array | None
 ) -> jax.Array:
     """Integrate ``(N_w * 16, n)`` GL16 node values into seasonal-window means."""
     wq = jnp.asarray(GL16_WEIGHTS_01, dtype=jnp.float64)
     vals_3d = quad_vals.reshape((n_w, wq.shape[0], quad_vals.shape[-1]))
-    return _combine_subwindows(jnp.einsum("wqn,q->wn", vals_3d, wq), subwindow_meta)
+    return _combine_subwindows(jnp.einsum("wqn,q->wn", vals_3d, wq), w_2d)
 
 
 def _prepare_suess_params(
@@ -1716,7 +1725,7 @@ def _prepare_suess_params(
     alpha_unit: ArrayLike,
     delta_global: ArrayLike,
     relative_to: Literal["standard", "ambient"],
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+) -> _SuessParams:
     """Compute ``(y_base, excursion_scale, r_ref)`` for time-varying ``M_c(t)`` ``Delta14C``."""
     y_ss = cbm.steady_state_c14(q_std=q_std, alpha_unit=alpha_unit)
     r_ref = cbm.reference_specific_activity(q_std=q_std, alpha_unit=alpha_unit)
@@ -1726,7 +1735,7 @@ def _prepare_suess_params(
 
 
 def _suess_instantaneous_d14c(
-    dy: jax.Array, masses: jax.Array, suess_params: tuple[jax.Array, jax.Array, jax.Array]
+    dy: jax.Array, masses: jax.Array, suess_params: _SuessParams
 ) -> jax.Array:
     """Evaluate instantaneous ``Delta14C`` (``permil``) under time-varying ``M_c(t)``."""
     y_base, excursion_scale, r_ref = suess_params
@@ -1785,8 +1794,12 @@ class DiffraxSolver(AbstractSolver):
         raise RuntimeError(f"Unhandled solver method {self.method!r}")
 
     def _run_diffeqsolve(
-        self, rhs: Callable[..., Any], ivp: _ODEIVPSetup, y0_state: Any, args: Any
-    ) -> Any:
+        self,
+        rhs: Callable[[jax.Array, _StateT, _ArgsT], _StateT],
+        ivp: _ODEIVPSetup,
+        y0_state: _StateT,
+        args: _ArgsT,
+    ) -> _StateT:
         return diffrax.diffeqsolve(
             diffrax.ODETerm(rhs),
             self._make_diffrax_solver(),
@@ -1800,7 +1813,7 @@ class DiffraxSolver(AbstractSolver):
             stepsize_controller=diffrax.PIDController(
                 rtol=self.rtol, atol=self.atol, step_ts=ivp.step_ts, jump_ts=ivp.jump_ts
             ),
-        ).ys
+        ).ys  # type: ignore[return-value]
 
     def _A_at(self, cbm: CarbonBoxModel, t: jax.Array) -> jax.Array:
         if self.matrix_A_fn is not None:
@@ -1832,7 +1845,7 @@ class DiffraxSolver(AbstractSolver):
             cbm, production, t_arr, q_std=q_std, alpha_unit=alpha_unit, t0=t0, y0=y0
         )
 
-        def _rhs(t: jax.Array, dy: jax.Array, args: Any) -> jax.Array:
+        def _rhs(t: jax.Array, dy: jax.Array, args: _ODERHSArgs) -> jax.Array:
             return _eval_ode_ddy(self._A_at, t, dy, args)
 
         return self._run_diffeqsolve(_rhs, ivp, ivp.dy_init, ivp.rhs_args)[ivp.inv_order]
@@ -1850,7 +1863,7 @@ class DiffraxSolver(AbstractSolver):
         t0: ArrayLike | None = None,
         y0: ArrayLike | None = None,
     ) -> jax.Array:
-        a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
+        a_flat, b_flat, w_2d, _, _ = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
         all_bounds = jnp.concatenate([a_flat, b_flat])
@@ -1859,7 +1872,7 @@ class DiffraxSolver(AbstractSolver):
         )
 
         def _aug_rhs(
-            t: jax.Array, state: tuple[jax.Array, jax.Array], args: Any
+            t: jax.Array, state: tuple[jax.Array, jax.Array], args: _ODERHSArgs
         ) -> tuple[jax.Array, jax.Array]:
             dy, _ = state
             return _eval_ode_ddy(self._A_at, t, dy, args), dy
@@ -1867,9 +1880,7 @@ class DiffraxSolver(AbstractSolver):
         _, Y_sorted = self._run_diffeqsolve(
             _aug_rhs, ivp, (ivp.dy_init, jnp.zeros_like(ivp.dy_init)), ivp.rhs_args
         )
-        return _unpack_cumulative_windows(
-            Y_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape)
-        )
+        return _unpack_cumulative_windows(Y_sorted, ivp.inv_order, a_flat, b_flat, w_2d)
 
     def predict_d14c(
         self,
@@ -1913,7 +1924,7 @@ class DiffraxSolver(AbstractSolver):
         # integrate instantaneous specific activity normalized by M_c(t) * R_ref,
         # diluting both pre-industrial ambient offset (delta_global * y_ss / 1000)
         # and dynamical excursion delta_y(t) consistently by M_c(t).
-        a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
+        a_flat, b_flat, w_2d, _, _ = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
         all_bounds = jnp.concatenate([a_flat, b_flat])
@@ -1923,7 +1934,9 @@ class DiffraxSolver(AbstractSolver):
         suess_params = _prepare_suess_params(cbm, q_std, alpha_unit, delta_global, relative_to)
 
         def _suess_rhs(
-            t: jax.Array, state: tuple[jax.Array, jax.Array], args: Any
+            t: jax.Array,
+            state: tuple[jax.Array, jax.Array],
+            args: tuple[_ODERHSArgs, _SuessParams],
         ) -> tuple[jax.Array, jax.Array]:
             dy, _ = state
             rhs_args, s_params = args
@@ -1937,9 +1950,7 @@ class DiffraxSolver(AbstractSolver):
             (ivp.dy_init, jnp.zeros_like(ivp.dy_init)),
             (ivp.rhs_args, suess_params),
         )
-        d14c_win = _unpack_cumulative_windows(
-            R_sorted, ivp.inv_order, a_flat, b_flat, (w_2d, is_1d, orig_shape)
-        )
+        d14c_win = _unpack_cumulative_windows(R_sorted, ivp.inv_order, a_flat, b_flat, w_2d)
 
         selected = _select_boxes(d14c_win, box_indices)
         return selected + jnp.asarray(delta_lab, dtype=jnp.float64)
@@ -2101,7 +2112,7 @@ class ModaxSolver(AbstractSolver):
         )
         solver_cls = getattr(modax, self.method)
 
-        def _rhs(t: jax.Array, dy: jax.Array, args: Any) -> jax.Array:
+        def _rhs(t: jax.Array, dy: jax.Array, args: _ODERHSArgs) -> jax.Array:
             return _eval_ode_ddy(self._A_at, t, dy, args)
 
         sol = modax.diffeqsolve(
@@ -2132,7 +2143,7 @@ class ModaxSolver(AbstractSolver):
         t0: ArrayLike | None = None,
         y0: ArrayLike | None = None,
     ) -> jax.Array:
-        a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
+        a_flat, b_flat, w_2d, _, _ = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
         quad_t = _gl16_window_nodes(a_flat, b_flat)
@@ -2145,7 +2156,7 @@ class ModaxSolver(AbstractSolver):
             t0=t0,
             y0=y0,
         )
-        return _gl16_reduce_windows(dy_quad, a_flat.shape[0], (w_2d, is_1d, orig_shape))
+        return _gl16_reduce_windows(dy_quad, a_flat.shape[0], w_2d)
 
     def predict_d14c(
         self,
@@ -2185,7 +2196,7 @@ class ModaxSolver(AbstractSolver):
                 y0=y0,
             )
 
-        a_flat, b_flat, w_2d, is_1d, orig_shape = _flatten_windows(
+        a_flat, b_flat, w_2d, _, _ = _flatten_windows(
             t_starts, t_ends, sub_weights
         )
         quad_t = _gl16_window_nodes(a_flat, b_flat)
@@ -2201,6 +2212,6 @@ class ModaxSolver(AbstractSolver):
         mt_quad = jax.vmap(lambda ti: self._masses_at(cbm, ti))(quad_t)
         suess_params = _prepare_suess_params(cbm, q_std, alpha_unit, delta_global, relative_to)
         inst_d14c = _suess_instantaneous_d14c(dy_quad, mt_quad, suess_params)
-        d14c_win = _gl16_reduce_windows(inst_d14c, a_flat.shape[0], (w_2d, is_1d, orig_shape))
+        d14c_win = _gl16_reduce_windows(inst_d14c, a_flat.shape[0], w_2d)
         selected = _select_boxes(d14c_win, box_indices)
         return selected + jnp.asarray(delta_lab, dtype=jnp.float64)
