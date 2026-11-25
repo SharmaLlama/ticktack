@@ -76,18 +76,6 @@ __all__ = [
 ]
 
 
-def _use_joint_mode(
-    model: RadiocarbonModel,
-    parameter_space: ParameterSpace | None = None,
-    cfg: LinearMarginalConfig | None = None,
-) -> bool:
-    return _uses_joint_mode(
-        model,
-        parameter_space,
-        LinearMarginalConfig() if cfg is None else cfg,
-    )
-
-
 def _eval_single_loglike(
     model_eval: RadiocarbonModel,
     dataset: Dataset,
@@ -95,7 +83,7 @@ def _eval_single_loglike(
     sigma_jitter: ArrayLike | None,
     parameter_space: ParameterSpace | None = None,
 ) -> jax.Array:
-    if _use_joint_mode(model_eval, parameter_space, cfg):
+    if _uses_joint_mode(model_eval, parameter_space, cfg):
         return joint_log_likelihood(
             model_eval,
             dataset,
@@ -511,7 +499,7 @@ def sample_nuts(  # shape-exempt(carbon): public NUTS sampler adding Laplace mas
 
     # --- Conditional Gaussian reconstruction of marginalized linear parameters ---
     if reconstruct_linear:
-        joint_mode = _use_joint_mode(model, parameter_space, cfg)
+        joint_mode = _uses_joint_mode(model, parameter_space, cfg)
         is_lgf_marg = (
             not joint_mode
             and _extract_single_lgf(model.production)[0] is not None

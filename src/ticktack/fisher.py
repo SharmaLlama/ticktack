@@ -589,10 +589,11 @@ def cbm_fisher_spectrum(
     active_cbm_mask : array-like of bool, optional
         Explicit mask selecting active CBM parameters among flattened ``theta_cbm``.
     exclude_total_mass : bool, optional
-        When ``True`` (default) and ``theta_cbm`` is an ``equinox.Module`` with
-        a ``log_total_mass`` or ``theta_tot`` attribute and no explicit
-        ``active_cbm_mask`` or finite prior on it, automatically masks that
-        exact zero-Fisher gauge coordinate.
+        When ``True`` (default) and ``theta_cbm`` implements
+        ``active_parameter_mask()`` or is an ``equinox.Module`` with a
+        ``log_total_mass`` or ``theta_tot`` attribute, automatically masks
+        inactive gauge coordinates unless an explicit ``active_cbm_mask`` or
+        full-length ``(p_full,)`` / ``(p_full, p_full)`` prior is supplied.
     mass_fn, flux_fn : callable, optional
         Functions mapping ``theta_cbm`` to reservoir masses ``M`` ``(n_boxes,)``
         and directed edge fluxes ``F`` ``(n_edges,)``. When ``log_space_observables``
@@ -614,23 +615,18 @@ def cbm_fisher_spectrum(
     flat_theta, unravel_theta = _partition_inexact(theta_cbm)
     p_full = flat_theta.shape[0]
 
-    # Auto-detect log_total_mass / theta_tot gauge leaf on PyTree CBM objects
-    # if no explicit active_cbm_mask is given and no full-length explicit prior
-    # matrix/vector was supplied for it (scalar prior_cbm_sd projects out
-    # log_total_mass before broadcasting).
-    _sd_is_scalar = prior_cbm_sd is not None and (
-        jnp.asarray(prior_cbm_sd, dtype=jnp.float64).ndim == 0
-        or jnp.asarray(prior_cbm_sd, dtype=jnp.float64).size == 1
-    )
-    if (
-        active_cbm_mask is None
-        and exclude_total_mass
-        and prior_cbm_cov is None
-        and prior_cbm_prec is None
-        and prior_cbm_root is None
-        and (prior_cbm_sd is None or _sd_is_scalar)
-    ):
-        active_cbm_mask = _auto_exclude_total_mass_mask(theta_cbm)
+    # Auto-detect inactive gauge coordinates (via active_parameter_mask() or
+    # log_total_mass / theta_tot attributes) unless an explicit active_cbm_mask
+    # or full-length (p_full,) / (p_full, p_full) prior was supplied.
+    if active_cbm_mask is None and exclude_total_mass:
+        cand_mask = _auto_exclude_total_mass_mask(theta_cbm)
+        has_full_sd = prior_cbm_sd is not None and jnp.asarray(prior_cbm_sd).shape == (p_full,)
+        has_full_mat = any(
+            m is not None and jnp.asarray(m).shape == (p_full, p_full)
+            for m in (prior_cbm_cov, prior_cbm_prec, prior_cbm_root)
+        )
+        if cand_mask is not None and not (has_full_sd or has_full_mat):
+            active_cbm_mask = cand_mask
 
     if psi_nuisance is None:
         j_theta_raw = _jacfwd_chunked(
@@ -1050,7 +1046,8 @@ def _auto_exclude_total_mass_mask(cbm: Any) -> onp.ndarray | None:
     """Return active-parameter boolean mask excluding gauge coords (e.g. ``log_total_mass``)."""
     mask_fn = getattr(cbm, "active_parameter_mask", None)
     if callable(mask_fn):
-        raw_mask = mask_fn()
+        with jax.ensure_compile_time_eval():
+            raw_mask = mask_fn()
         if raw_mask is not None and (c_mask := _concrete(raw_mask)) is not None:
             return onp.asarray(c_mask, dtype=bool).reshape(-1)
     if not isinstance(cbm, eqx.Module):
@@ -1127,7 +1124,7 @@ def cbm_mode_impulse_responses(
        returns the resulting orthogonal temporal mode contributions.
     """
     if units not in ("permil_per_q0_yr", "permil_per_fluence", "raw"):
-        raise ValueError(f"units must be 'permil_per_q0_yr', 'permil_per_fluence', or 'raw'; got {units!r}.")
+        raise ValueError(f"Invalid units {units!r}; use permil_per_q0_yr, permil_per_fluence, or raw.")
     if spectrum is None and prior_cbm_sd is None:
         raise ValueError("prior_cbm_sd must be specified explicitly when spectrum is None.")
     hem_tuple = tuple(str(h) for h in hemispheres)

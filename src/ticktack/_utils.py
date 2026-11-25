@@ -33,29 +33,32 @@ def _safe_psd_root(sym_mat: ArrayLike, jitter: float = 1e-13) -> jax.Array:
     if n == 0:
         return jnp.zeros((0, 0), dtype=jnp.float64)
     sym = 0.5 * (arr + arr.T)
-    p0 = jax.lax.stop_gradient(jnp.linalg.cholesky(sym))
-    ok0 = jnp.all(jnp.isfinite(p0)) & jnp.all(jnp.diag(p0) > 0.0)
 
     def _eigh_branch(m: jax.Array) -> jax.Array:
         evals, evecs = jnp.linalg.eigh(0.5 * (m + m.T))
-        tol = 1e-30 if jitter > 0.0 else 1e-15 * jnp.maximum(jnp.max(evals), 1.0)
+        tol = 1e-30 if jitter > 0.0 else 1e-15 * jnp.maximum(jnp.max(evals), 0.0)
         pos = evals > tol
-        return evecs * jnp.where(pos, jnp.sqrt(jnp.where(pos, evals, 1.0)), 0.0)[None, :]
+        safe_evals = jnp.where(pos, evals, 1.0)
+        return evecs * jnp.where(pos, jnp.sqrt(safe_evals), 0.0)[None, :]
 
-    def _fallback(m: jax.Array) -> jax.Array:
-        if jitter <= 0.0:
-            return _eigh_branch(m)
-        reg = m + (jitter * jnp.maximum(jnp.trace(m) / n, 0.0) + 1e-30) * jnp.eye(
-            n, dtype=jnp.float64
-        )
+    if jitter > 0.0:
+        reg_diag = jitter * jnp.maximum(jnp.trace(sym) / n, 0.0) + 1e-30
+        reg = sym + reg_diag * jnp.eye(n, dtype=jnp.float64)
         pr = jax.lax.stop_gradient(jnp.linalg.cholesky(reg))
         okr = jnp.all(jnp.isfinite(pr)) & jnp.all(jnp.diag(pr) > 0.0)
         if (cr := _concrete(okr)) is not None:
-            return jnp.linalg.cholesky(reg) if bool(cr) else _eigh_branch(m)
+            return jnp.linalg.cholesky(reg) if bool(cr) else _eigh_branch(sym)
         return jax.lax.cond(
-            okr, lambda p: jnp.linalg.cholesky(p[0]), lambda p: _eigh_branch(p[1]), (reg, m)
+            okr,
+            lambda p: jnp.linalg.cholesky(p[0]),
+            lambda p: _eigh_branch(p[1]),
+            (reg, sym),
         )
 
+    p0 = jax.lax.stop_gradient(jnp.linalg.cholesky(sym))
+    d0 = jnp.diag(p0)
+    d_max = jnp.max(d0)
+    ok0 = jnp.all(jnp.isfinite(p0)) & (d_max > 0.0) & jnp.all(d0 > 1e-6 * d_max)
     if (c0 := _concrete(ok0)) is not None:
-        return jnp.linalg.cholesky(sym) if bool(c0) else _fallback(sym)
-    return jax.lax.cond(ok0, jnp.linalg.cholesky, _fallback, sym)
+        return jnp.linalg.cholesky(sym) if bool(c0) else _eigh_branch(sym)
+    return jax.lax.cond(ok0, jnp.linalg.cholesky, _eigh_branch, sym)
