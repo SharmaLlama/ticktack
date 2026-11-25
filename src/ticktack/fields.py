@@ -27,7 +27,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import math
-from typing import Any, ClassVar, Literal, NamedTuple
+from typing import Any, ClassVar, Literal, NamedTuple, Self
 import warnings
 
 import equinox as eqx
@@ -50,6 +50,7 @@ from scipy.linalg import solve_triangular as _scipy_solve_triangular
 from scipy.optimize import minimize as _scipy_minimize
 import zodiax as zdx
 
+from ._utils import _concrete, _safe_psd_root
 from .cbm import CarbonBoxModel, SubspaceCBM
 from .constants import ALPHA_ATOMS_CM2_S_TO_KG_YR, DEFAULT_Q_STD
 from .data import Dataset, TreeRingSeries
@@ -57,7 +58,6 @@ from .linear import (
     LinearMarginal,
     _GLEG128_W,
     _GLEG128_X,
-    _safe_psd_root,
     _solve_complex_resolvents,
     hierarchical_offset_design,
     posterior as _linear_posterior_std,
@@ -111,23 +111,15 @@ __all__ = [
 ]
 
 
-def _concrete_np(value: Any) -> np.ndarray | None:
-    """Return ``value`` as a host NumPy array when concrete, else ``None``."""
-    try:
-        return np.asarray(value, dtype=np.float64)
-    except (
-        jax.errors.TracerArrayConversionError,
-        jax.errors.ConcretizationTypeError,
-    ):
-        return None
-
-
 def _check_positive_concrete(name: str, value: Any, *, allow_zero: bool = False) -> None:
     """Validate concrete numeric inputs while staying transparent to JAX tracers."""
-    arr = _concrete_np(value)
+    arr = _concrete(value)
     if arr is None:
         return
-    ok = np.all(np.isfinite(arr)) and (np.all(arr >= 0.0) if allow_zero else np.all(arr > 0.0))
+    arr_f = np.asarray(arr, dtype=np.float64)
+    ok = np.all(np.isfinite(arr_f)) and (
+        np.all(arr_f >= 0.0) if allow_zero else np.all(arr_f > 0.0)
+    )
     if not ok:
         rel = "non-negative" if allow_zero else "positive"
         raise ValueError(f"{name} must be finite and {rel}; got {value!r}.")
@@ -288,7 +280,7 @@ def field_spectrum(
     """
     _check_positive_concrete("sigma", sigma, allow_zero=True)
     _check_positive_concrete("length_yr", length_yr)
-    ord_np = _concrete_np(order)
+    ord_np = _concrete(order)
     if ord_np is not None and not (np.isposinf(ord_np) or float(ord_np) > 0.5):
         raise ValueError(f"order must be > 0.5 (or inf), got {order!r}.")
 
@@ -472,7 +464,7 @@ class MaternSpectrum(SpectralKernel):
     ) -> None:
         _check_positive_concrete("sigma", sigma, allow_zero=True)
         _check_positive_concrete("length_yr", length_yr)
-        ord_np = _concrete_np(order)
+        ord_np = _concrete(order)
         if ord_np is not None and not (float(ord_np) > 0.5):
             raise ValueError(f"MaternSpectrum order must be > 0.5, got {order!r}.")
         self.sigma = jnp.asarray(sigma, dtype=jnp.float64).reshape(())
@@ -754,19 +746,36 @@ class CorrelatedFieldSpectrum(SpectralKernel):
 # =============================================================================
 
 
-class GaussianField(ProductionTerm):
-    r"""Linear IFT Gaussian signal-field production perturbation ``delta_q(t) = eta(t)``.
+def _validate_field_init(
+    cls_name: str,
+    latent: ArrayLike,
+    t_start: float,
+    t_end: float,
+    *,
+    sigma: ArrayLike,
+    length_yr: ArrayLike,
+    kernel: SpectralKernel | None,
+    template: ArrayLike | None,
+) -> tuple[jax.Array, float, float, jax.Array | None]:
+    """Validate common signal-field constructor arguments and return normalized values."""
+    z = jnp.asarray(latent, dtype=jnp.float64)
+    if z.ndim != 1 or z.shape[0] < 2:
+        raise ValueError(f"{cls_name} latent must be 1D with length >= 2, got shape {z.shape}.")
+    t0, t1 = float(t_start), float(t_end)
+    if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
+        raise ValueError(f"Expected finite t_end > t_start, got [{t_start}, {t_end}].")
+    _check_positive_concrete("sigma", sigma, allow_zero=True)
+    _check_positive_concrete("length_yr", length_yr)
+    if kernel is not None and not isinstance(kernel, SpectralKernel):
+        raise TypeError(f"kernel must be a SpectralKernel or None, got {type(kernel)!r}.")
+    tmpl = None if template is None else jnp.asarray(template, dtype=jnp.float64)
+    if tmpl is not None and tmpl.shape != z.shape:
+        raise ValueError(f"template shape {tmpl.shape} must match latent shape {z.shape}.")
+    return z, t0, t1, tmpl
 
-    Represents cosmic-ray ``14C`` production excursions on ``[t_start, t_end]`` via
-    standardized cosine excitations ``latent`` ``z ~ N(0, I_N)`` mapped through the
-    orthonormal inverse DCT-II:
 
-    .. math::
-
-        \eta = \operatorname{IDCT}_{\mathrm{II}}\!\left(\sqrt{S(\phi)} \odot z\right),
-
-    optionally modulated by a temporal envelope ``template``.
-    """
+class _FieldBase(ProductionTerm):
+    """Shared base class for standardized DCT-II IFT signal fields."""
 
     latent: jax.Array
     sigma: jax.Array
@@ -778,57 +787,101 @@ class GaussianField(ProductionTerm):
     t_end: float = eqx.field(static=True)
     zero_mode: bool = eqx.field(static=True)
 
-    def __init__(
-        self,
-        latent: ArrayLike,
-        t_start: float,
-        t_end: float,
-        sigma: ArrayLike = 0.3,
-        length_yr: ArrayLike = 5.0,
-        order: ArrayLike = 2.0,
-        *,
-        kernel: SpectralKernel | None = None,
-        zero_mode: bool = False,
-        template: ArrayLike | None = None,
-    ) -> None:
-        z = jnp.asarray(latent, dtype=jnp.float64)
-        if z.ndim != 1 or z.shape[0] < 2:
-            raise ValueError(
-                f"GaussianField latent must be 1D with length >= 2, got shape {z.shape}."
+    @classmethod
+    def zeros(
+        cls, t_start: float, t_end: float, *, n_grid: int = 128,
+        kernel: SpectralKernel | None = None, sigma: ArrayLike = 0.3,
+        length_yr: ArrayLike = 5.0, **kwargs: Any,
+    ) -> Self:
+        """Construct a zero-initialized standardized field on ``[t_start, t_end]``.
+
+        Eliminates ``jnp.zeros(n_grid)`` boilerplate while preserving subclass defaults
+        (``zero_mode=False`` on :class:`GaussianField`; ``zero_mode=True`` and
+        ``ito_corrected=True`` on :class:`LogGaussianField`).
+
+        Parameters
+        ----------
+        t_start, t_end : float
+            Uniform DCT-II grid bounds in years (yr), with ``t_end > t_start``.
+        n_grid : int, optional
+            Number of uniform DCT-II knots (must be ``>= 2``, default ``128``).
+        kernel : SpectralKernel, optional
+            Explicit spectral prior kernel; defaults to a :class:`MaternSpectrum`
+            constructed from ``sigma``, ``length_yr``, ``order``, and ``zero_mode``.
+        sigma : ArrayLike, optional
+            Prior marginal standard deviation (``atoms cm^-2 s^-1`` for
+            :class:`GaussianField`, dimensionless log-amplitude for
+            :class:`LogGaussianField`; default ``0.3``).
+        length_yr : ArrayLike, optional
+            Prior correlation length scale in years (yr; default ``5.0``).
+        **kwargs : Any
+            Additional keyword arguments forwarded to the subclass constructor
+            (e.g. ``order``, ``zero_mode``, ``template``, ``q_mean``,
+            ``mean_floor``, ``ito_corrected``).
+
+        Returns
+        -------
+        Self
+            Zero-latent field instance of ``cls``.
+
+        Examples
+        --------
+        >>> gf = GaussianField.zeros(760.0, 800.0, n_grid=64, sigma=0.4)
+        >>> lgf = LogGaussianField.zeros(760.0, 800.0, n_grid=64, q_mean=1.8)
+        """
+        n_g = int(n_grid)
+        if n_g < 2:
+            raise ValueError(f"n_grid must be >= 2, got {n_grid}.")
+        z0 = jnp.zeros(n_g, dtype=jnp.float64)
+        return cls(z0, t_start, t_end, sigma=sigma, length_yr=length_yr, kernel=kernel, **kwargs)
+
+    @classmethod
+    def from_operator(
+        cls, op: DCTResponseOperator | LinearizedDCTOperator, *,
+        kernel: SpectralKernel | None = None, sigma: ArrayLike = 0.3,
+        length_yr: ArrayLike = 5.0, **kwargs: Any,
+    ) -> Self:
+        """Construct a zero-initialized field aligned with a precomputed DCT operator grid.
+
+        Reads ``(op.t_start, op.t_end, op.n_grid)`` from ``op`` so the field matches the
+        operator geometry without repeating grid bounds.
+
+        Parameters
+        ----------
+        op : DCTResponseOperator or LinearizedDCTOperator
+            Precomputed DCT-II response operator supplying ``t_start`` (yr),
+            ``t_end`` (yr), and ``n_grid``.
+        kernel : SpectralKernel, optional
+            Explicit spectral prior kernel (overrides ``sigma`` / ``length_yr``).
+        sigma : ArrayLike, optional
+            Prior marginal standard deviation (``atoms cm^-2 s^-1`` for
+            :class:`GaussianField`, dimensionless log-amplitude for
+            :class:`LogGaussianField`; default ``0.3``).
+        length_yr : ArrayLike, optional
+            Prior correlation length scale in years (yr; default ``5.0``).
+        **kwargs : Any
+            Additional keyword arguments forwarded to :meth:`zeros` and ``cls``
+            (e.g. ``order``, ``zero_mode``, ``template``, ``q_mean``,
+            ``ito_corrected``).
+
+        Returns
+        -------
+        Self
+            Zero-latent field instance of ``cls`` on ``op``'s grid.
+
+        Examples
+        --------
+        >>> field = GaussianField.from_operator(op, kernel=MaternSpectrum(sigma=0.3))
+        >>> log_field = LogGaussianField.from_operator(op, q_mean=1.8)
+        """
+        if not isinstance(op, (DCTResponseOperator, LinearizedDCTOperator)):
+            raise TypeError(
+                f"op must be a DCTResponseOperator or LinearizedDCTOperator, got {type(op)!r}."
             )
-        t0, t1 = float(t_start), float(t_end)
-        if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
-            raise ValueError(f"Expected finite t_end > t_start, got [{t_start}, {t_end}].")
-        _check_positive_concrete("sigma", sigma, allow_zero=True)
-        _check_positive_concrete("length_yr", length_yr)
-        if kernel is not None and not isinstance(kernel, SpectralKernel):
-            raise TypeError(f"kernel must be a SpectralKernel or None, got {type(kernel)!r}.")
-
-        if template is None:
-            tmpl = None
-        else:
-            tmpl = jnp.asarray(template, dtype=jnp.float64)
-            if tmpl.shape != z.shape:
-                raise ValueError(
-                    f"template shape {tmpl.shape} must match latent shape {z.shape}."
-                )
-
-        self.latent = z
-        self.t_start = t0
-        self.t_end = t1
-        self.sigma = jnp.asarray(sigma, dtype=jnp.float64).reshape(())
-        self.length_yr = jnp.asarray(length_yr, dtype=jnp.float64).reshape(())
-        self.order = jnp.asarray(order, dtype=jnp.float64).reshape(())
-        self.kernel = kernel
-        self.zero_mode = bool(zero_mode)
-        self.template = tmpl
-
-    @property
-    def is_linear_marginalizable(self) -> bool:
-        return True
-
-    def _default_slug_name(self) -> str:
-        return "field"
+        return cls.zeros(
+            op.t_start, op.t_end, n_grid=op.n_grid,
+            kernel=kernel, sigma=sigma, length_yr=length_yr, **kwargs,
+        )
 
     @property
     def n_grid(self) -> int:
@@ -847,10 +900,7 @@ class GaussianField(ProductionTerm):
         if self.kernel is not None:
             return self.kernel
         return MaternSpectrum(
-            sigma=self.sigma,
-            length_yr=self.length_yr,
-            order=self.order,
-            zero_mode=self.zero_mode,
+            sigma=self.sigma, length_yr=self.length_yr, order=self.order, zero_mode=self.zero_mode
         )
 
     def power_spectrum(self) -> jax.Array:
@@ -859,31 +909,146 @@ class GaussianField(ProductionTerm):
 
     def knot_variance(self) -> jax.Array:
         """Exact per-knot prior variance ``Var[eta(t_g)]`` of shape ``(n_grid,)``."""
-        var = dct_knot_variance(self.power_spectrum())
-        if self.template is not None:
-            var = jnp.square(self.template) * var
-        return var
+        return dct_knot_variance(self.power_spectrum())
 
-    def evaluate_grid(self) -> jax.Array:
-        """Evaluate perturbation ``delta_q`` at the ``n_grid`` uniform knots."""
-        amp = _safe_sqrt(self.power_spectrum())
-        eta = idct2(amp * self.latent)
-        if self.template is not None:
-            eta = self.template * eta
-        return eta
-
-    def with_latent(self, latent: ArrayLike) -> GaussianField:
+    def with_latent(self, latent: ArrayLike) -> Self:
         """Return a copy of this field with updated standardized excitations ``latent``."""
         z = jnp.asarray(latent, dtype=jnp.float64)
         if z.shape != self.latent.shape:
             raise ValueError(f"Expected latent shape {self.latent.shape}, got {z.shape}.")
         return eqx.tree_at(lambda f: f.latent, self, z)
 
-    def sample_prior(
-        self,
-        rng_key: jax.Array,
-        n_samples: int | None = None,
+    def operator_template(self) -> jax.Array | None:
+        """Return the grid envelope baked into :class:`DCTResponseOperator`, if any."""
+        return None
+
+    def prior_variance_scale(self) -> jax.Array:
+        """Return the stationary pre-history variance scale factor at ``t_start``."""
+        raise NotImplementedError
+
+    def excess(self, op: DCTResponseOperator, *, q_std: ArrayLike = DEFAULT_Q_STD) -> jax.Array:
+        """Evaluate ``Delta14C`` excursion (permil) induced by this field under ``op``."""
+        raise NotImplementedError
+
+    def evaluate_grid_and_q(
+        self, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> tuple[jax.Array, jax.Array]:
+        """Return ``(delta_q_grid, q_grid)`` in ``atoms cm^-2 s^-1`` on ``t_grid``."""
+        raise NotImplementedError
+
+    def evaluate_draws(
+        self, op: DCTResponseOperator, z_draws: jax.Array, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        """Map latent draws ``(n_samples, n_grid)`` to ``(delta_q, q, d14c_exc)``."""
+        raise NotImplementedError
+
+    def whitened_jacobian(
+        self, op: DCTResponseOperator, inv_sig: ArrayLike, *, q_std: ArrayLike = DEFAULT_Q_STD
     ) -> jax.Array:
+        """Return noise-whitened Jacobian ``diag(inv_sig) @ d(excess)/d(latent)``."""
+        inv_s = jnp.asarray(inv_sig, dtype=jnp.float64)
+        return jax.jacfwd(
+            lambda z_in: inv_s * self.with_latent(z_in).excess(op, q_std=q_std)
+        )(self.latent)
+
+    def linearized_error_scale_inputs(
+        self, op: DCTResponseOperator, d_obs: np.ndarray, base_pred: np.ndarray,
+        inv_sig: np.ndarray, *, q_std: ArrayLike = DEFAULT_Q_STD,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return linearized ``(x_raw, j_raw)`` inputs for MacKay :func:`error_scale`."""
+        f_exc_hat = np.asarray(self.excess(op, q_std=q_std), dtype=np.float64)
+        r_data = inv_sig * (d_obs - base_pred - f_exc_hat)
+        j_raw = np.asarray(self.whitened_jacobian(op, inv_sig, q_std=q_std), dtype=np.float64)
+        return r_data + j_raw @ np.asarray(self.latent, dtype=np.float64), j_raw
+
+
+class GaussianField(_FieldBase):
+    r"""Linear IFT Gaussian signal-field production perturbation ``delta_q(t) = eta(t)``.
+
+    Represents cosmic-ray ``14C`` production excursions on ``[t_start, t_end]`` via
+    standardized cosine excitations ``latent`` ``z ~ N(0, I_N)`` mapped through the
+    orthonormal inverse DCT-II:
+
+    .. math::
+
+        \eta = \operatorname{IDCT}_{\mathrm{II}}\!\left(\sqrt{S(\phi)} \odot z\right),
+
+    optionally modulated by a temporal envelope ``template``.
+    """
+
+    def __init__(
+        self, latent: ArrayLike, t_start: float, t_end: float,
+        sigma: ArrayLike = 0.3, length_yr: ArrayLike = 5.0, order: ArrayLike = 2.0,
+        *, kernel: SpectralKernel | None = None, zero_mode: bool = False,
+        template: ArrayLike | None = None,
+    ) -> None:
+        self.latent, self.t_start, self.t_end, self.template = _validate_field_init(
+            type(self).__name__, latent, t_start, t_end,
+            sigma=sigma, length_yr=length_yr, kernel=kernel, template=template,
+        )
+        self.sigma = jnp.asarray(sigma, dtype=jnp.float64).reshape(())
+        self.length_yr = jnp.asarray(length_yr, dtype=jnp.float64).reshape(())
+        self.order = jnp.asarray(order, dtype=jnp.float64).reshape(())
+        self.kernel, self.zero_mode = kernel, bool(zero_mode)
+
+    @property
+    def is_linear_marginalizable(self) -> bool:
+        return True
+
+    def _default_slug_name(self) -> str:
+        return "field"
+
+    def operator_template(self) -> jax.Array | None:
+        return self.template
+
+    def prior_variance_scale(self) -> jax.Array:
+        if self.template is None:
+            return jnp.asarray(1.0, dtype=jnp.float64)
+        return jnp.square(jnp.asarray(self.template, dtype=jnp.float64)[0])
+
+    def knot_variance(self) -> jax.Array:
+        """Exact per-knot prior variance ``Var[eta(t_g)]`` of shape ``(n_grid,)``."""
+        var = super().knot_variance()
+        return var if self.template is None else jnp.square(self.template) * var
+
+    def evaluate_grid(self) -> jax.Array:
+        """Evaluate perturbation ``delta_q`` at the ``n_grid`` uniform knots."""
+        eta = idct2(_safe_sqrt(self.power_spectrum()) * self.latent)
+        return eta if self.template is None else self.template * eta
+
+    def excess(self, op: DCTResponseOperator, *, q_std: ArrayLike = DEFAULT_Q_STD) -> jax.Array:
+        del q_std
+        return op.w_dct @ (_safe_sqrt(self.power_spectrum()) * self.latent)
+
+    def evaluate_grid_and_q(
+        self, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> tuple[jax.Array, jax.Array]:
+        dq = self.evaluate_grid()
+        return dq, jnp.asarray(q_std, dtype=jnp.float64) + dq
+
+    def evaluate_draws(
+        self, op: DCTResponseOperator, z_draws: jax.Array, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        dq_draws = jax.vmap(lambda z: self.with_latent(z).evaluate_grid())(z_draws)
+        q_draws = jnp.asarray(q_std, dtype=jnp.float64) + dq_draws
+        f_exc_draws = (z_draws * _safe_sqrt(self.power_spectrum())[None, :]) @ op.w_dct.T
+        return dq_draws, q_draws, f_exc_draws
+
+    def whitened_jacobian(
+        self, op: DCTResponseOperator, inv_sig: ArrayLike, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> jax.Array:
+        del q_std
+        inv_s = jnp.asarray(inv_sig, dtype=jnp.float64)
+        return inv_s[:, None] * (op.w_dct * _safe_sqrt(self.power_spectrum())[None, :])
+
+    def linearized_error_scale_inputs(
+        self, op: DCTResponseOperator, d_obs: np.ndarray, base_pred: np.ndarray,
+        inv_sig: np.ndarray, *, q_std: ArrayLike = DEFAULT_Q_STD,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        j_raw = np.asarray(self.whitened_jacobian(op, inv_sig, q_std=q_std), dtype=np.float64)
+        return inv_sig * (d_obs - base_pred), j_raw
+
+    def sample_prior(self, rng_key: jax.Array, n_samples: int | None = None) -> jax.Array:
         """Draw prior realizations of ``delta_q(t_grid)`` from ``z ~ N(0, I_N)``."""
         if n_samples is None:
             z = jax.random.normal(rng_key, (self.n_grid,), dtype=jnp.float64)
@@ -894,8 +1059,7 @@ class GaussianField(ProductionTerm):
     def prior_covariance(self) -> jax.Array:
         """Dense ``(n_grid, n_grid)`` prior covariance ``C^T diag(S) C`` (for validation)."""
         spec = self.power_spectrum()
-        eye = jnp.eye(self.n_grid, dtype=jnp.float64)
-        c_t = idct2(eye, axis=0)  # columns are inverse DCT basis vectors
+        c_t = idct2(jnp.eye(self.n_grid, dtype=jnp.float64), axis=0)
         cov = (c_t * spec[None, :]) @ c_t.T
         if self.template is not None:
             cov = (self.template[:, None] * cov) * self.template[None, :]
@@ -906,19 +1070,13 @@ class GaussianField(ProductionTerm):
         del q_std
         return GriddedProduction(self.t_grid, self.evaluate_grid(), is_delta=True)
 
-    def delta_q(
-        self,
-        t: ArrayLike,
-        q_std: ArrayLike = DEFAULT_Q_STD,
-    ) -> jax.Array:
+    def delta_q(self, t: ArrayLike, q_std: ArrayLike = DEFAULT_Q_STD) -> jax.Array:
         del q_std
         t_arr = jnp.asarray(t, dtype=jnp.float64)
-        return jnp.interp(
-            t_arr, self.t_grid, self.evaluate_grid(), left=0.0, right=0.0
-        )
+        return jnp.interp(t_arr, self.t_grid, self.evaluate_grid(), left=0.0, right=0.0)
 
 
-class LogGaussianField(ProductionTerm):
+class LogGaussianField(_FieldBase):
     r"""Strictly positive IFT log-Gaussian production field ``Q(t) > 0``.
 
     Direct 1D counterpart of ``virgil``'s positive ``Image(GaussianField(...))``:
@@ -934,108 +1092,41 @@ class LogGaussianField(ProductionTerm):
     median-anchored ``median[Q(t_g)] == q_mean * tilde_mu_g``).
     """
 
-    latent: jax.Array
-    sigma: jax.Array
-    length_yr: jax.Array
-    order: jax.Array
     q_mean: jax.Array
-    kernel: SpectralKernel | None
-    template: jax.Array | None
-    t_start: float = eqx.field(static=True)
-    t_end: float = eqx.field(static=True)
     mean_floor: float = eqx.field(static=True)
-    zero_mode: bool = eqx.field(static=True)
     ito_corrected: bool = eqx.field(static=True)
 
     def __init__(
-        self,
-        latent: ArrayLike,
-        t_start: float,
-        t_end: float,
-        sigma: ArrayLike = 0.3,
-        length_yr: ArrayLike = 5.0,
-        order: ArrayLike = 2.0,
-        *,
-        kernel: SpectralKernel | None = None,
-        q_mean: ArrayLike = DEFAULT_Q_STD,
-        template: ArrayLike | None = None,
-        mean_floor: float = 1e-3,
-        zero_mode: bool = True,
-        ito_corrected: bool = True,
+        self, latent: ArrayLike, t_start: float, t_end: float,
+        sigma: ArrayLike = 0.3, length_yr: ArrayLike = 5.0, order: ArrayLike = 2.0,
+        *, kernel: SpectralKernel | None = None, q_mean: ArrayLike = DEFAULT_Q_STD,
+        template: ArrayLike | None = None, mean_floor: float = 1e-3,
+        zero_mode: bool = True, ito_corrected: bool = True,
     ) -> None:
-        z = jnp.asarray(latent, dtype=jnp.float64)
-        if z.ndim != 1 or z.shape[0] < 2:
-            raise ValueError(
-                f"LogGaussianField latent must be 1D with length >= 2, got shape {z.shape}."
-            )
-        t0, t1 = float(t_start), float(t_end)
-        if not (math.isfinite(t0) and math.isfinite(t1) and t1 > t0):
-            raise ValueError(f"Expected finite t_end > t_start, got [{t_start}, {t_end}].")
-        _check_positive_concrete("sigma", sigma, allow_zero=True)
-        _check_positive_concrete("length_yr", length_yr)
+        self.latent, self.t_start, self.t_end, self.template = _validate_field_init(
+            type(self).__name__, latent, t_start, t_end,
+            sigma=sigma, length_yr=length_yr, kernel=kernel, template=template,
+        )
         _check_positive_concrete("q_mean", q_mean)
         _check_positive_concrete("mean_floor", mean_floor)
-        if kernel is not None and not isinstance(kernel, SpectralKernel):
-            raise TypeError(f"kernel must be a SpectralKernel or None, got {type(kernel)!r}.")
-
-        if template is None:
-            tmpl = None
-        else:
-            tmpl = jnp.asarray(template, dtype=jnp.float64)
-            if tmpl.shape != z.shape:
-                raise ValueError(
-                    f"template shape {tmpl.shape} must match latent shape {z.shape}."
-                )
-            t_np = _concrete_np(tmpl)
+        if self.template is not None:
+            t_np = _concrete(self.template)
             if t_np is not None and not (np.all(np.isfinite(t_np)) and np.max(t_np) > 0.0):
                 raise ValueError("template must be finite with a strictly positive peak.")
-
-        self.latent = z
-        self.t_start = t0
-        self.t_end = t1
         self.sigma = jnp.asarray(sigma, dtype=jnp.float64).reshape(())
         self.length_yr = jnp.asarray(length_yr, dtype=jnp.float64).reshape(())
         self.order = jnp.asarray(order, dtype=jnp.float64).reshape(())
         self.q_mean = jnp.asarray(q_mean, dtype=jnp.float64).reshape(())
-        self.kernel = kernel
-        self.template = tmpl
-        self.mean_floor = float(mean_floor)
-        self.zero_mode = bool(zero_mode)
-        self.ito_corrected = bool(ito_corrected)
+        self.kernel, self.mean_floor = kernel, float(mean_floor)
+        self.zero_mode, self.ito_corrected = bool(zero_mode), bool(ito_corrected)
 
     def _default_slug_name(self) -> str:
         return "log_field"
 
-    @property
-    def n_grid(self) -> int:
-        return int(self.latent.shape[0])
-
-    @property
-    def dt(self) -> float:
-        return (self.t_end - self.t_start) / float(self.n_grid - 1)
-
-    @property
-    def t_grid(self) -> jax.Array:
-        return jnp.linspace(self.t_start, self.t_end, self.n_grid, dtype=jnp.float64)
-
-    @property
-    def effective_kernel(self) -> SpectralKernel:
-        if self.kernel is not None:
-            return self.kernel
-        return MaternSpectrum(
-            sigma=self.sigma,
-            length_yr=self.length_yr,
-            order=self.order,
-            zero_mode=self.zero_mode,
+    def prior_variance_scale(self) -> jax.Array:
+        return _log_gaussian_variance_scale(
+            self.effective_kernel, self.q_mean, template=self.template, mean_floor=self.mean_floor
         )
-
-    def power_spectrum(self) -> jax.Array:
-        """Return DCT-II mode variances ``S_j`` of shape ``(n_grid,)``."""
-        return self.effective_kernel.spectrum(self.n_grid, self.dt)
-
-    def knot_variance(self) -> jax.Array:
-        """Exact per-knot variance ``Var[eta(t_g)]`` of shape ``(n_grid,)``."""
-        return dct_knot_variance(self.power_spectrum())
 
     def evaluate_log_field(self) -> jax.Array:
         """Evaluate log-rate perturbation ``eta(t_grid)`` (including optional template & Itô shift)."""
@@ -1044,8 +1135,7 @@ class LogGaussianField(ProductionTerm):
         if self.ito_corrected:
             eta = eta - 0.5 * dct_knot_variance(spec)
         if self.template is not None:
-            tilde_mu = jnp.maximum(self.template, self.mean_floor)
-            eta = eta + jnp.log(tilde_mu)
+            eta = eta + jnp.log(jnp.maximum(self.template, self.mean_floor))
         return eta
 
     def evaluate_q_grid(self) -> jax.Array:
@@ -1056,18 +1146,23 @@ class LogGaussianField(ProductionTerm):
         """Evaluate ``delta_q(t_grid) = Q(t_grid) - q_std`` at uniform knots."""
         return self.evaluate_q_grid() - jnp.asarray(q_std, dtype=jnp.float64)
 
-    def with_latent(self, latent: ArrayLike) -> LogGaussianField:
-        """Return a copy of this field with updated standardized excitations ``latent``."""
-        z = jnp.asarray(latent, dtype=jnp.float64)
-        if z.shape != self.latent.shape:
-            raise ValueError(f"Expected latent shape {self.latent.shape}, got {z.shape}.")
-        return eqx.tree_at(lambda f: f.latent, self, z)
+    def excess(self, op: DCTResponseOperator, *, q_std: ArrayLike = DEFAULT_Q_STD) -> jax.Array:
+        return op.w_grid @ self.evaluate_grid(q_std=q_std)
 
-    def sample_prior(
-        self,
-        rng_key: jax.Array,
-        n_samples: int | None = None,
-    ) -> jax.Array:
+    def evaluate_grid_and_q(
+        self, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> tuple[jax.Array, jax.Array]:
+        q = self.evaluate_q_grid()
+        return q - jnp.asarray(q_std, dtype=jnp.float64), q
+
+    def evaluate_draws(
+        self, op: DCTResponseOperator, z_draws: jax.Array, *, q_std: ArrayLike = DEFAULT_Q_STD
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        q_draws = jax.vmap(lambda z: self.with_latent(z).evaluate_q_grid())(z_draws)
+        dq_draws = q_draws - jnp.asarray(q_std, dtype=jnp.float64)
+        return dq_draws, q_draws, dq_draws @ op.w_grid.T
+
+    def sample_prior(self, rng_key: jax.Array, n_samples: int | None = None) -> jax.Array:
         """Draw strictly positive prior realizations ``Q(t_grid) > 0`` from ``z ~ N(0, I_N)``."""
         if n_samples is None:
             z = jax.random.normal(rng_key, (self.n_grid,), dtype=jnp.float64)
@@ -1080,15 +1175,11 @@ class LogGaussianField(ProductionTerm):
         del q_std
         return GriddedProduction(self.t_grid, self.evaluate_q_grid(), is_delta=False)
 
-    def delta_q(
-        self,
-        t: ArrayLike,
-        q_std: ArrayLike = DEFAULT_Q_STD,
-    ) -> jax.Array:
-        t_arr = jnp.asarray(t, dtype=jnp.float64)
+    def delta_q(self, t: ArrayLike, q_std: ArrayLike = DEFAULT_Q_STD) -> jax.Array:
         q_std_arr = jnp.asarray(q_std, dtype=jnp.float64)
         q_interp = jnp.interp(
-            t_arr, self.t_grid, self.evaluate_q_grid(), left=q_std_arr, right=q_std_arr
+            jnp.asarray(t, dtype=jnp.float64), self.t_grid, self.evaluate_q_grid(),
+            left=q_std_arr, right=q_std_arr,
         )
         return q_interp - q_std_arr
 
@@ -1135,10 +1226,11 @@ def _compute_dataset_digest(cbm: CarbonBoxModel, dataset: Dataset) -> str:
         box_idx = int(cbm.box_index(s.box_name, hemisphere=s.hemisphere))
         h.update(f"s:{s.name}:b={box_idx}:sh={sub_s.shape};".encode())
         for arr in (sub_s, sub_e, w_sub):
-            arr_np = _concrete_np(arr)
+            arr_np = _concrete(arr)
             if arr_np is None:
                 return ""
-            h.update(np.ascontiguousarray(np.round(arr_np, 12)).tobytes())
+            arr_f = np.asarray(arr_np, dtype=np.float64)
+            h.update(np.ascontiguousarray(np.round(arr_f, 12)).tobytes())
     return h.hexdigest()
 
 
@@ -1146,12 +1238,13 @@ def _compute_template_digest(template: ArrayLike | None) -> str:
     """Deterministic SHA-256 fingerprint for an optional grid envelope ``template``."""
     if template is None:
         return "none"
-    t_np = _concrete_np(template)
+    t_np = _concrete(template)
     if t_np is None:
         return ""
+    t_f = np.asarray(t_np, dtype=np.float64)
     h = hashlib.sha256()
-    h.update(f"sh={t_np.shape};".encode())
-    h.update(np.ascontiguousarray(np.round(t_np, 14)).tobytes())
+    h.update(f"sh={t_f.shape};".encode())
+    h.update(np.ascontiguousarray(np.round(t_f, 14)).tobytes())
     return h.hexdigest()
 
 
@@ -1171,13 +1264,13 @@ def _pack_dataset_quadrature(
         sub_s, sub_e, w_sub = s.quadrature_windows()  # (N_s, M_s), (N_s, M_s), (M_s,)
         n_s, m_s = int(sub_s.shape[0]), int(sub_s.shape[1])
         box_idx = int(cbm.box_index(s.box_name, hemisphere=s.hemisphere))
-        s_np = _concrete_np(sub_s)
-        e_np = _concrete_np(sub_e)
+        s_np = _concrete(sub_s)
+        e_np = _concrete(sub_e)
         if s_np is None or e_np is None:
             is_traced = True
         else:
-            starts_np_list.append(s_np.reshape(-1))
-            ends_np_list.append(e_np.reshape(-1))
+            starts_np_list.append(np.asarray(s_np, dtype=np.float64).reshape(-1))
+            ends_np_list.append(np.asarray(e_np, dtype=np.float64).reshape(-1))
         starts_jnp_list.append(jnp.asarray(sub_s, dtype=jnp.float64).reshape(-1))
         ends_jnp_list.append(jnp.asarray(sub_e, dtype=jnp.float64).reshape(-1))
         raw_specs.append((cursor, n_s, m_s, w_sub, box_idx))
@@ -1470,7 +1563,7 @@ def _compute_cbm_digest(cbm: CarbonBoxModel) -> str:
     for leaf in leaves:
         if isinstance(leaf, jax.core.Tracer):
             return ""
-        arr_np = _concrete_np(leaf)
+        arr_np = _concrete(leaf)
         if arr_np is None:
             return ""
         h.update(f";sh={arr_np.shape};dt={arr_np.dtype};".encode("utf-8"))
@@ -1516,8 +1609,8 @@ def build_dct_response_operator(
     ds_digest = _compute_dataset_digest(cbm, ds)
     tmpl_digest = _compute_template_digest(template)
     cbm_digest = _compute_cbm_digest(cbm)
-    q_np = None if isinstance(q_std, jax.core.Tracer) else _concrete_np(q_std)
-    a_np = None if isinstance(alpha_unit, jax.core.Tracer) else _concrete_np(alpha_unit)
+    q_np = None if isinstance(q_std, jax.core.Tracer) else _concrete(q_std)
+    a_np = None if isinstance(alpha_unit, jax.core.Tracer) else _concrete(alpha_unit)
     tmpl_traced = template is not None and isinstance(template, jax.core.Tracer)
     if template is not None:
         tmpl_shape = np.shape(template)
@@ -1582,13 +1675,13 @@ def _ensure_matching_operator(
     op: DCTResponseOperator | None,
     cbm: CarbonBoxModel,
     ds: Dataset,
-    field: GaussianField | LogGaussianField,
+    field: _FieldBase,
     *,
     q_std: ArrayLike,
     alpha_unit: ArrayLike,
 ) -> tuple[DCTResponseOperator, bool]:
     """Return ``(valid_op, matched)`` rebuilding if ``ds`` or ``field`` geometry differs."""
-    tmpl = field.template if isinstance(field, GaussianField) else None
+    tmpl = field.operator_template()
     ds_digest = _compute_dataset_digest(cbm, ds)
     tmpl_digest = _compute_template_digest(tmpl)
     if (
@@ -1899,7 +1992,7 @@ def build_linearized_dct_operator(  # shape-exempt(carbon): public operator buil
         w_ref, ib_ref = _w_and_init_of_alpha(alpha_ref)
         dw_dalpha = jnp.zeros((0, w_ref.shape[0], n_g), dtype=jnp.float64)
         dib_dalpha = jnp.zeros((0, ib_ref.shape[0], ib_ref.shape[1]), dtype=jnp.float64)
-    elif _concrete_np(alpha_ref) is not None:
+    elif _concrete(alpha_ref) is not None:
         @jax.jit
         def _jvp_one(
             a_val: jax.Array, tang: jax.Array
@@ -1947,13 +2040,13 @@ def build_linearized_dct_operator(  # shape-exempt(carbon): public operator buil
 def _extract_field_and_extras(
     production: ProductionTerm,
     prefix: str = "production",
-) -> tuple[GaussianField | LogGaussianField, str, tuple[tuple[str, ProductionTerm], ...]]:
+) -> tuple[_FieldBase, str, tuple[tuple[str, ProductionTerm], ...]]:
     """Locate the single IFT field term and any sibling ``ProductionTerm`` components."""
-    found_fields: list[tuple[str, GaussianField | LogGaussianField]] = []
+    found_fields: list[tuple[str, _FieldBase]] = []
     extras: list[tuple[str, ProductionTerm]] = []
 
     def _walk(term: ProductionTerm, path: str) -> None:
-        if isinstance(term, (GaussianField, LogGaussianField)):
+        if isinstance(term, _FieldBase):
             found_fields.append((path, term))
         elif isinstance(term, ProductionSum):
             for name, part in zip(term.names, term.parts):
@@ -2190,10 +2283,7 @@ def predict_field_d14c(
         model.alpha_unit,
         op.steady_unit_response,
     )
-    if isinstance(field, GaussianField):
-        field_exc = op.w_dct @ (_safe_sqrt(field.power_spectrum()) * field.latent)
-    else:
-        field_exc = op.w_grid @ field.evaluate_grid(q_std=model.q_std)
+    field_exc = field.excess(op, q_std=model.q_std)
 
     pred = op.ss_d14c + extra_exc + field_exc
     if fit_res is not None and fit_res.initial_state_mean is not None:
@@ -2367,7 +2457,7 @@ def _spectral_part_log_raw(
     """Continuous unnormalized log-power shape ``ln P_tilde(omega^2)`` on ``omegas``."""
     lam = jnp.square(omegas)
     if isinstance(part, MaternSpectrum):
-        ord_np = _concrete_np(part.order)
+        ord_np = _concrete(part.order)
         if ord_np is not None and bool(np.isposinf(ord_np)):
             return -0.5 * jnp.square(part.length_yr) * lam
         return -part.order * jnp.log1p(jnp.square(part.length_yr) * lam)
@@ -2423,7 +2513,7 @@ def _spectral_kernel_quad_weights(
                 0.0,
             )
         elif isinstance(part, MaternSpectrum):
-            ord_np = _concrete_np(part.order)
+            ord_np = _concrete(part.order)
             if ord_np is not None and bool(np.isposinf(ord_np)):
                 log_norm = 0.5 * math.log(0.5 * math.pi) - jnp.log(part.length_yr)
                 part_w = jnp.where(
@@ -2585,23 +2675,10 @@ def _log_gaussian_variance_scale(
     return scale
 
 
-def _field_variance_scale(field: GaussianField | LogGaussianField) -> jax.Array:
-    if isinstance(field, GaussianField):
-        if field.template is None:
-            return jnp.asarray(1.0, dtype=jnp.float64)
-        return jnp.square(jnp.asarray(field.template, dtype=jnp.float64)[0])
-    return _log_gaussian_variance_scale(
-        field.effective_kernel,
-        field.q_mean,
-        template=field.template,
-        mean_floor=field.mean_floor,
-    )
-
-
 def _field_prehistory_root_y0(
     cbm: CarbonBoxModel,
     alpha_unit: ArrayLike,
-    field: GaussianField | LogGaussianField,
+    field: _FieldBase,
 ) -> jax.Array:
     """Return stationary pre-history root ``root_y0`` derived from ``field``'s spectral kernel."""
     _, root_y0 = stationary_cbm_spectral_cov(
@@ -2609,7 +2686,7 @@ def _field_prehistory_root_y0(
         cbm.production_vector(),
         field.effective_kernel,
         alpha_unit=alpha_unit,
-        variance_scale=_field_variance_scale(field),
+        variance_scale=field.prior_variance_scale(),
         omega_bounds=_field_omega_bounds(field.n_grid, field.dt),
     )
     return root_y0
@@ -2645,7 +2722,7 @@ def _resolve_prehistory_root_y0(
 def _resolve_effective_prehistory_root_y0(
     cbm: CarbonBoxModel,
     alpha_unit: ArrayLike,
-    field: GaussianField | LogGaussianField,
+    field: _FieldBase,
     *,
     prehistory_root_y0: jax.Array | None = None,
     prehistory_kernel: Any | None = None,
@@ -3162,7 +3239,7 @@ def fit_ift_field(
         )
         m_base = op.ss_d14c + extra_exc + (x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0)
         x_raw = inv_sig * (d_obs - m_base)
-        j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
+        j_raw = field.whitened_jacobian(op, inv_sig, q_std=model.q_std)
         x_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(x_raw, j_raw, u_nuis)
         z_hat, s_vals, vt_svd, chi2_eff = _wiener_solve_from_svd(x_eff, j_eff)
         j_raw_at_z = j_raw
@@ -3193,7 +3270,7 @@ def fit_ift_field(
             op.steady_unit_response,
         )
         nuis_mean_shift = x_nuis @ mu_nuis if x_nuis.shape[1] else 0.0
-        j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
+        j_raw = field.whitened_jacobian(op, inv_sig, q_std=model.q_std)
         u_all = jnp.concatenate([u_nuis, j_raw], axis=1)
         k_all = int(u_all.shape[1])
         eye_k = jnp.eye(k_all, dtype=jnp.float64)
@@ -3356,11 +3433,7 @@ def fit_ift_field(
 
         def _lm_residual(y_vec: jax.Array, _args: Any) -> jax.Array:
             z_cur = y_vec[:n_z]
-            f_cur = field.with_latent(z_cur)
-            if isinstance(f_cur, GaussianField):
-                f_exc = op.w_dct @ (_safe_sqrt(f_cur.power_spectrum()) * z_cur)
-            else:
-                f_exc = op.w_grid @ f_cur.evaluate_grid(q_std=model.q_std)
+            f_exc = field.with_latent(z_cur).excess(op, q_std=model.q_std)
 
             if spike_entries:
                 u_sp = y_vec[n_z:]
@@ -3433,16 +3506,9 @@ def fit_ift_field(
             op.steady_unit_response,
         )
 
-        def _r_raw_of_z(z_in: jax.Array) -> jax.Array:
-            f_in = fitted_field.with_latent(z_in)
-            if isinstance(f_in, GaussianField):
-                fe = op.w_dct @ (_safe_sqrt(f_in.power_spectrum()) * z_in)
-            else:
-                fe = op.w_grid @ f_in.evaluate_grid(q_std=fitted_model.q_std)
-            return inv_sig * (op.ss_d14c + extra_exc + fe + nuis_mean_shift - d_obs)
-
-        r_raw_map = _r_raw_of_z(z_hat)
-        j_raw_map = jax.jacfwd(_r_raw_of_z)(z_hat)
+        f_map_exc = fitted_field.excess(op, q_std=fitted_model.q_std)
+        r_raw_map = inv_sig * (op.ss_d14c + extra_exc + f_map_exc + nuis_mean_shift - d_obs)
+        j_raw_map = fitted_field.whitened_jacobian(op, inv_sig, q_std=fitted_model.q_std)
         j_raw_at_z = j_raw_map
         r_eff_map, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(
             r_raw_map, j_raw_map, u_nuis
@@ -3451,11 +3517,6 @@ def fit_ift_field(
         chi2_eff = r_eff_map @ r_eff_map
         if spike_entries:
             u_sp_opt = y_opt[n_z:]
-            f_map_exc = (
-                op.w_dct @ (_safe_sqrt(fitted_field.power_spectrum()) * z_hat)
-                if isinstance(fitted_field, GaussianField)
-                else op.w_grid @ fitted_field.evaluate_grid(q_std=fitted_model.q_std)
-            )
 
             def _r_eff_sp_only(u_in: jax.Array) -> jax.Array:
                 sp_in = eqx.tree_at(
@@ -3512,14 +3573,8 @@ def fit_ift_field(
         fitted_model.alpha_unit,
         op.steady_unit_response,
     )
-    if isinstance(fitted_field, GaussianField):
-        f_grid = fitted_field.evaluate_grid()
-        q_grid = fitted_model.q_std + f_grid
-        f_exc_final = op.w_dct @ (_safe_sqrt(fitted_field.power_spectrum()) * z_hat)
-    else:
-        q_grid = fitted_field.evaluate_q_grid()
-        f_grid = q_grid - fitted_model.q_std
-        f_exc_final = op.w_grid @ f_grid
+    f_grid, q_grid = fitted_field.evaluate_grid_and_q(q_std=fitted_model.q_std)
+    f_exc_final = fitted_field.excess(op, q_std=fitted_model.q_std)
 
     pred_no_off = op.ss_d14c + extra_exc_final + f_exc_final
     (
@@ -3819,7 +3874,7 @@ def log_evidence(
             model.cbm, solver, ds, extras, model.q_std, model.alpha_unit, op.steady_unit_response
         )
         x_raw = inv_sig * (d_obs - op.ss_d14c - extra_exc - nuis_shift)
-        j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
+        j_raw = field.whitened_jacobian(op, inv_sig, q_std=model.q_std)
         x_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(x_raw, j_raw, u_nuis)
         ln_z, _ = _exact_linear_evidence_core(x_eff, j_eff, log_norm_d, half_logdet_nuis)
         return ln_z
@@ -3830,14 +3885,10 @@ def log_evidence(
             model.cbm, solver, ds, extras, model.q_std, model.alpha_unit, op.steady_unit_response
         )
         z_val = field.latent
-
-        def _r_raw_z_only(z_in: jax.Array) -> jax.Array:
-            f_in = field.with_latent(z_in)
-            f_exc = op.w_grid @ f_in.evaluate_grid(q_std=model.q_std)
-            return inv_sig * (op.ss_d14c + extra_exc + f_exc + nuis_shift - d_obs)
-
-        r_raw = _r_raw_z_only(z_val)
-        j_z_raw = jax.jacfwd(_r_raw_z_only)(z_val)
+        r_raw = inv_sig * (
+            op.ss_d14c + extra_exc + field.excess(op, q_std=model.q_std) + nuis_shift - d_obs
+        )
+        j_z_raw = field.whitened_jacobian(op, inv_sig, q_std=model.q_std)
         r_eff, j_eff, half_logdet_nuis = _whiten_vec_and_mat_qr(r_raw, j_z_raw, u_nuis)
         half_logdet_field, _ = _smooth_logdet_and_gamma(j_eff)
         return (
@@ -3892,9 +3943,7 @@ def log_evidence(
                 modal=modal_ext,
             )
             x_raw_u = inv_sig * (d_obs - op.ss_d14c - ext_exc - nuis_shift)
-            j_raw_u = inv_sig[:, None] * (
-                op.w_dct * _safe_sqrt(f_cur.power_spectrum())[None, :]
-            )
+            j_raw_u = f_cur.whitened_jacobian(op, inv_sig, q_std=m_cur.q_std)
             x_eff_u, j_eff_u, h_ld_nuis = _whiten_vec_and_mat_qr(x_raw_u, j_raw_u, u_nuis)
             ln_z_cond, _ = _exact_linear_evidence_core(
                 x_eff_u, j_eff_u, log_norm_d, h_ld_nuis
@@ -3948,7 +3997,7 @@ def log_evidence(
             op.steady_unit_response,
             modal=modal_ext,
         )
-        f_exc = op.w_grid @ f_cur.evaluate_grid(q_std=m_cur.q_std)
+        f_exc = f_cur.excess(op, q_std=m_cur.q_std)
         return inv_sig * (op.ss_d14c + ext_exc + f_exc + nuis_shift - d_obs)
 
     def _r_eff_joint_u(z_in: jax.Array, u_vec: jax.Array) -> jax.Array:
@@ -4133,18 +4182,7 @@ def laplace_samples(
     z_hat = field.latent
     n_z = field.n_grid
 
-    if isinstance(field, GaussianField):
-        j_raw = inv_sig[:, None] * (op.w_dct * _safe_sqrt(field.power_spectrum())[None, :])
-    else:
-        j_raw = jax.jacfwd(
-            lambda z_in: inv_sig
-            * (
-                op.ss_d14c
-                + extra_exc
-                + op.w_grid @ field.with_latent(z_in).evaluate_grid(q_std=model.q_std)
-                - ds.d14c_flat
-            )
-        )(z_hat)
+    j_raw = field.whitened_jacobian(op, inv_sig, q_std=model.q_std)
 
     _, j_eff, _ = _whiten_vec_and_mat_qr(jnp.zeros((ds.n_obs,), dtype=jnp.float64), j_raw, u_nuis)
     _, s_vals, vt_svd = jnp.linalg.svd(j_eff, full_matrices=False)
@@ -4156,14 +4194,7 @@ def laplace_samples(
     fluct = fluct + (e2 - (e2 @ vt_svd.T) @ vt_svd)
     z_draws = z_hat[None, :] + fluct
 
-    if isinstance(field, GaussianField):
-        dq_draws = jax.vmap(lambda z: field.with_latent(z).evaluate_grid())(z_draws)
-        q_draws = model.q_std + dq_draws
-        f_exc_draws = (z_draws * _safe_sqrt(field.power_spectrum())[None, :]) @ op.w_dct.T
-    else:
-        q_draws = jax.vmap(lambda z: field.with_latent(z).evaluate_q_grid())(z_draws)
-        dq_draws = q_draws - model.q_std
-        f_exc_draws = dq_draws @ op.w_grid.T
+    dq_draws, q_draws, f_exc_draws = field.evaluate_draws(op, z_draws, q_std=model.q_std)
 
     pred_no_off_draws = op.ss_d14c[None, :] + extra_exc[None, :] + f_exc_draws
     k_nuis = u_nuis.shape[1]
@@ -4328,33 +4359,10 @@ def error_scale(
     )
     inv_sig = np.asarray(1.0 / ds.sigma_flat, dtype=np.float64)
     d_obs = np.asarray(ds.d14c_flat, dtype=np.float64)
-    z_hat = np.asarray(field.latent, dtype=np.float64)
-
-    if isinstance(field, GaussianField):
-        x_raw = inv_sig * (
-            d_obs - np.asarray(op.ss_d14c + extra_exc, dtype=np.float64) - nuis_shift
-        )
-        j_raw = inv_sig[:, None] * np.asarray(
-            op.w_dct * _safe_sqrt(field.power_spectrum())[None, :], dtype=np.float64
-        )
-    else:
-        f_exc_hat = np.asarray(
-            op.w_grid @ field.evaluate_grid(q_std=model.q_std), dtype=np.float64
-        )
-        r_data = inv_sig * (
-            d_obs
-            - np.asarray(op.ss_d14c + extra_exc, dtype=np.float64)
-            - nuis_shift
-            - f_exc_hat
-        )
-        j_raw = np.asarray(
-            jax.jacfwd(
-                lambda z_in: inv_sig[:, None][:, 0]
-                * (op.w_grid @ field.with_latent(z_in).evaluate_grid(q_std=model.q_std))
-            )(field.latent),
-            dtype=np.float64,
-        )
-        x_raw = r_data + j_raw @ z_hat
+    base_pred = np.asarray(op.ss_d14c + extra_exc, dtype=np.float64) + nuis_shift
+    x_raw, j_raw = field.linearized_error_scale_inputs(
+        op, d_obs, base_pred, inv_sig, q_std=model.q_std
+    )
 
     slices_by_idx: list[np.ndarray] = []
     counts_by_idx: list[int] = []
