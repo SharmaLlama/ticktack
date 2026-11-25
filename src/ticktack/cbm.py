@@ -81,7 +81,9 @@ def _normalize_hemisphere(h: str | None) -> str:
         return "north"
     if val in ("south", "s", "sh"):
         return "south"
-    raise ValueError(f"Invalid hemisphere {h!r}; expected 'none', 'north', or 'south'.")
+    raise ValueError(
+        f"Invalid hemisphere {h!r}; expected 'none', 'north', or 'south'."
+    )
 
 
 def tarjan_scc(
@@ -214,7 +216,9 @@ def _build_tie_matrix(
     if tie_matrix is not None:
         arr = np.asarray(tie_matrix, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[0] != n_edges:
-            raise ValueError(f"tie_matrix must have shape ({n_edges}, p_free), got {arr.shape}.")
+            raise ValueError(
+                f"tie_matrix must have shape ({n_edges}, p_free), got {arr.shape}."
+            )
         return tuple(tuple(float(v) for v in row) for row in arr)
 
     if symmetric_edge_groups is None:
@@ -333,7 +337,9 @@ class Topology(eqx.Module):
             seen_edges.add((s, d))
 
         if trop_box_indices is None:
-            trop_t = tuple(i for i, name in enumerate(names) if "trop" in name.lower())
+            trop_t = tuple(
+                i for i, name in enumerate(names) if "trop" in name.lower()
+            )
         else:
             trop_t = tuple(int(i) for i in trop_box_indices)
         if not trop_t or any(i < 0 or i >= n for i in trop_t):
@@ -386,7 +392,9 @@ class Topology(eqx.Module):
     def check_strongly_connected(self) -> None:
         sccs = self.strongly_connected_components()
         if len(sccs) != 1:
-            comp_desc = [[f"{i}:{self.box_names[i]}" for i in comp] for comp in sccs]
+            comp_desc = [
+                [f"{i}:{self.box_names[i]}" for i in comp] for comp in sccs
+            ]
             raise ValueError(
                 f"Carbon-box topology is not strongly connected ({len(sccs)} SCCs: {comp_desc})."
             )
@@ -748,7 +756,9 @@ class CarbonBoxModel(zdx.Base):
         alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
     ) -> jax.Array:
         """Equilibrium ``14C`` inventory ``y_ss = alpha_unit * q_std * (-A)^{-1} b`` (``kg``)."""
-        scale = jnp.asarray(alpha_unit, dtype=jnp.float64) * jnp.asarray(q_std, dtype=jnp.float64)
+        scale = jnp.asarray(alpha_unit, dtype=jnp.float64) * jnp.asarray(
+            q_std, dtype=jnp.float64
+        )
         rhs = scale * self.production_vector()
         return jnp.linalg.solve(-self.matrix_A(), rhs)
 
@@ -863,6 +873,10 @@ class CarbonBoxModel(zdx.Base):
                 )
                 return CarbonBoxModel(self.topology, chart, decay_rate=self.decay_rate)
 
+        if isinstance(self.chart, OpenChart) or (
+            isinstance(self, EffectiveCBM) and self.calibrate_deep_sink
+        ):
+            raise ValueError("balanced chart does not allow positive sinks; use chart='open'.")
         sinks = self.sink_rates()
         if not isinstance(sinks, jax.core.Tracer) and np.any(
             np.asarray(sinks, dtype=np.float64) > 0.0
@@ -884,16 +898,24 @@ class CarbonBoxModel(zdx.Base):
         """Return default :class:`~ticktack.likelihood.ParamSpec` tuple for ``ParameterSpace``."""
         if isinstance(self.chart, CBMChart):
             return self.chart.param_specs(prefix=prefix, **kwargs)
-        if isinstance(self, SubspaceCBM) and self.n_modes > 0:
+        if isinstance(self, SubspaceCBM):
+            unknown = set(kwargs) - {"prior_sd"}
+            if unknown:
+                raise TypeError(
+                    f"SubspaceCBM.param_specs() got unexpected keyword argument(s): {sorted(unknown)}"
+                )
+            sd = _require_prior_sd(kwargs.get("prior_sd", 1.0))
+            if self.n_modes == 0:
+                return ()
             from .likelihood import ParamSpec
 
-            return (
-                ParamSpec(
-                    f"{prefix}.alpha",
-                    "identity",
-                    self.alpha,
-                    _require_prior_sd(kwargs.get("prior_sd", 1.0)),
-                ),
+            return (ParamSpec(f"{prefix}.alpha", "identity", self.alpha, sd),)
+        leaves = jax.tree_util.tree_leaves(eqx.filter(self, eqx.is_inexact_array))
+        if any(int(x.size) > 0 for x in leaves):
+            raise NotImplementedError(f"{type(self).__name__} must implement param_specs().")
+        if kwargs:
+            raise TypeError(
+                f"{type(self).__name__}.param_specs() got unexpected keyword argument(s): {sorted(kwargs)}"
             )
         return ()
 
@@ -1231,18 +1253,9 @@ class FixedChart(CBMChart):
 
     def _validate_topology(self, topology: Topology) -> None:
         super()._validate_topology(topology)
-        if self.masses.shape != (topology.n_boxes,):
-            raise ValueError(
-                f"masses shape {self.masses.shape} does not match ({topology.n_boxes},)."
-            )
-        if self.edge_fluxes.shape != (topology.n_edges,):
-            raise ValueError(
-                f"edge_fluxes shape {self.edge_fluxes.shape} does not match ({topology.n_edges},)."
-            )
-        if self.sink_rates_arr.shape != (topology.n_boxes,):
-            raise ValueError(
-                f"sink_rates shape {self.sink_rates_arr.shape} does not match ({topology.n_boxes},)."
-            )
+        _require_finite_positive_1d(self.masses, topology.n_boxes, "masses")
+        _require_finite_nonneg_1d(self.edge_fluxes, topology.n_edges, "edge_fluxes")
+        _require_finite_nonneg_1d(self.sink_rates_arr, topology.n_boxes, "sink_rates")
 
     def reservoir_masses(self, topology: Topology) -> jax.Array:
         del topology
@@ -1343,6 +1356,18 @@ def _require_finite_positive_1d(arr: ArrayLike, expected_len: int, name: str) ->
     return out
 
 
+def _require_finite_nonneg_1d(arr: ArrayLike, expected_len: int, name: str) -> jax.Array:
+    """Convert ``arr`` to a 1D ``float64`` JAX array and check concrete finite non-negativity."""
+    out = jnp.asarray(arr, dtype=jnp.float64)
+    if out.shape != (expected_len,):
+        raise ValueError(f"{name} must have shape ({expected_len},), got {out.shape}.")
+    if not isinstance(out, jax.core.Tracer):
+        np_arr = np.asarray(out, dtype=np.float64)
+        if not np.all(np.isfinite(np_arr)) or np.any(np_arr < 0.0):
+            raise ValueError(f"{name} must be finite and non-negative.")
+    return out
+
+
 def _prepare_masses_and_edge_fluxes(
     topology: Topology,
     masses: ArrayLike,
@@ -1439,7 +1464,9 @@ class _PerronCBM(CarbonBoxModel):
             symmetric_edge_groups=symmetric_edge_groups,
         )
         return (
-            self.topology.n_edges if self.tie_matrix_rows is None else len(self.tie_matrix_rows[0])
+            self.topology.n_edges
+            if self.tie_matrix_rows is None
+            else len(self.tie_matrix_rows[0])
         )
 
     def _free_log_rates(self) -> jax.Array:
@@ -1658,17 +1685,14 @@ class BalancedChart(_PerronChart):
         symmetric_edge_groups : Sequence[Sequence[int]], optional
             Optional groups of equal-rate edge indices.
         """
-        theta_free, log_m_tot = _invert_perron_chart(
-            topology, masses, edge_fluxes, tie_matrix, symmetric_edge_groups
-        )
-        return cls(
+        return BalancedCBM.from_masses_and_fluxes(
             topology,
-            theta_free,
-            log_m_tot,
+            masses,
+            edge_fluxes,
             prod_weights=prod_weights,
             tie_matrix=tie_matrix,
             symmetric_edge_groups=symmetric_edge_groups,
-        )
+        ).chart  # type: ignore[return-value]
 
 
 class BalancedCBM(CarbonBoxModel):
@@ -1815,7 +1839,9 @@ class SubspaceCBM(_PerronCBM):
         else:
             alpha_arr = jnp.asarray(alpha, dtype=jnp.float64)
             if alpha_arr.shape != (m_modes,):
-                raise ValueError(f"alpha must have shape ({m_modes},), got {alpha_arr.shape}.")
+                raise ValueError(
+                    f"alpha must have shape ({m_modes},), got {alpha_arr.shape}."
+                )
             self.alpha = alpha_arr
 
         self.base_log_rates_free = tuple(float(v) for v in base_arr)
@@ -1886,7 +1912,9 @@ class SubspaceCBM(_PerronCBM):
         max_modes = int(loadings.shape[1])
         m = int(n_modes)
         if not (1 <= m <= max_modes):
-            raise ValueError(f"n_modes must satisfy 1 <= n_modes <= {max_modes}, got {m}.")
+            raise ValueError(
+                f"n_modes must satisfy 1 <= n_modes <= {max_modes}, got {m}."
+            )
         return cls(
             topology=base_cbm.topology,
             base_log_rates_free=np.asarray(base_cbm.log_rates_free, dtype=np.float64),
@@ -2361,15 +2389,8 @@ class OpenCBM(CarbonBoxModel):
         decay_rate: float = DECAY_CAMBRIDGE,
     ) -> OpenCBM:
         _require_topology(topology)
-        s_jax = jnp.asarray(sink_rates, dtype=jnp.float64)
-        if s_jax.shape != (topology.n_boxes,):
-            raise ValueError(
-                f"sink_rates must have shape ({topology.n_boxes},), got {s_jax.shape}."
-            )
-        is_traced = isinstance(s_jax, jax.core.Tracer)
-        s_np = None if is_traced else np.asarray(s_jax, dtype=np.float64)
-        if s_np is not None and (not np.all(np.isfinite(s_np)) or np.any(s_np < 0.0)):
-            raise ValueError("sink_rates must be finite and >= 0 across all boxes.")
+        s_jax = _require_finite_nonneg_1d(sink_rates, topology.n_boxes, "sink_rates")
+        s_np = None if isinstance(s_jax, jax.core.Tracer) else np.asarray(s_jax, dtype=np.float64)
 
         if open_box_indices is None:
             if s_np is None:
@@ -2387,8 +2408,17 @@ class OpenCBM(CarbonBoxModel):
             )
         if len(set(open_idx)) != len(open_idx):
             raise ValueError(f"open_box_indices must not contain duplicates, got {open_idx}.")
-        if s_np is not None and np.any(s_np[list(open_idx)] <= 0.0):
-            raise ValueError("sink_rates must be strictly positive (> 0) on all open_box_indices.")
+        if s_np is not None:
+            if np.any(s_np[list(open_idx)] <= 0.0):
+                raise ValueError(
+                    "sink_rates must be strictly positive (> 0) on all open_box_indices."
+                )
+            closed_mask = np.ones((topology.n_boxes,), dtype=bool)
+            closed_mask[list(open_idx)] = False
+            if np.any(s_np[closed_mask] > 0.0):
+                raise ValueError(
+                    "sink_rates has positive entries outside explicit open_box_indices."
+                )
 
         theta_free, log_m_tot = _invert_perron_chart(
             topology, masses, edge_fluxes, tie_matrix, symmetric_edge_groups
@@ -2546,7 +2576,9 @@ class EffectiveCBM(CarbonBoxModel):
             raise ValueError(f"eta_strat must lie strictly in (0, 1), got {eta_strat}.")
 
         n_sinks = k_int - 2
-        box_names = ("Stratosphere", "Troposphere") + tuple(f"Sink_{j + 1}" for j in range(n_sinks))
+        box_names = ("Stratosphere", "Troposphere") + tuple(
+            f"Sink_{j + 1}" for j in range(n_sinks)
+        )
         edges_src_list = [0, 1]
         edges_dst_list = [1, 0]
         for j in range(n_sinks):
@@ -2575,18 +2607,22 @@ class EffectiveCBM(CarbonBoxModel):
         default_k10 = 45.0 / float(trop_mass)
 
         if log_k_strat_to_trop is None:
-            self.log_k_strat_to_trop = jnp.asarray(math.log(default_k01), dtype=jnp.float64)
-        else:
-            self.log_k_strat_to_trop = jnp.asarray(log_k_strat_to_trop, dtype=jnp.float64).reshape(
-                ()
+            self.log_k_strat_to_trop = jnp.asarray(
+                math.log(default_k01), dtype=jnp.float64
             )
+        else:
+            self.log_k_strat_to_trop = jnp.asarray(
+                log_k_strat_to_trop, dtype=jnp.float64
+            ).reshape(())
 
         if log_k_trop_to_strat is None:
-            self.log_k_trop_to_strat = jnp.asarray(math.log(default_k10), dtype=jnp.float64)
-        else:
-            self.log_k_trop_to_strat = jnp.asarray(log_k_trop_to_strat, dtype=jnp.float64).reshape(
-                ()
+            self.log_k_trop_to_strat = jnp.asarray(
+                math.log(default_k10), dtype=jnp.float64
             )
+        else:
+            self.log_k_trop_to_strat = jnp.asarray(
+                log_k_trop_to_strat, dtype=jnp.float64
+            ).reshape(())
 
         if n_sinks == 0:
             self.log_k_trop_to_sinks = jnp.zeros((0,), dtype=jnp.float64)
@@ -2597,9 +2633,13 @@ class EffectiveCBM(CarbonBoxModel):
                 weights = np.geomspace(1.0, 0.35, n_sinks)
                 weights = weights / np.sum(weights)
                 k_up_default = (180.0 * weights) / float(trop_mass)
-                self.log_k_trop_to_sinks = jnp.asarray(np.log(k_up_default), dtype=jnp.float64)
+                self.log_k_trop_to_sinks = jnp.asarray(
+                    np.log(k_up_default), dtype=jnp.float64
+                )
             else:
-                self.log_k_trop_to_sinks = jnp.asarray(log_k_trop_to_sinks, dtype=jnp.float64)
+                self.log_k_trop_to_sinks = jnp.asarray(
+                    log_k_trop_to_sinks, dtype=jnp.float64
+                )
 
             if sink_tau_params is None:
                 # Log-spaced residence times starting around ~8 yr with ratio ~5x per sink
@@ -2627,9 +2667,9 @@ class EffectiveCBM(CarbonBoxModel):
             self.explicit_deep_sink_rate = None
         else:
             self.calibrate_deep_sink = False
-            self.explicit_deep_sink_rate = jnp.asarray(deep_sink_rate, dtype=jnp.float64).reshape(
-                ()
-            )
+            self.explicit_deep_sink_rate = jnp.asarray(
+                deep_sink_rate, dtype=jnp.float64
+            ).reshape(())
 
     @property
     def n_parameters(self) -> int:
@@ -2707,3 +2747,39 @@ class EffectiveCBM(CarbonBoxModel):
         out = out.at[0].set(self.eta_strat)
         out = out.at[1].set(1.0 - self.eta_strat)
         return out
+
+    def param_specs(
+        self,
+        prefix: str = "cbm",
+        *,
+        prior_sd: float | None = None,
+        sink_sd: float | None = None,
+    ) -> tuple[Any, ...]:
+        """Return :class:`~ticktack.likelihood.ParamSpec` entries for all active leaves."""
+        from .likelihood import ParamSpec
+
+        sd = _require_prior_sd(prior_sd)
+        specs: list[Any] = [
+            ParamSpec(f"{prefix}.log_k_strat_to_trop", "identity", self.log_k_strat_to_trop, sd),
+            ParamSpec(f"{prefix}.log_k_trop_to_strat", "identity", self.log_k_trop_to_strat, sd),
+        ]
+        if self.log_k_trop_to_sinks.size > 0:
+            specs.append(
+                ParamSpec(
+                    f"{prefix}.log_k_trop_to_sinks", "identity", self.log_k_trop_to_sinks, sd
+                )
+            )
+            specs.append(
+                ParamSpec(f"{prefix}.sink_tau_params", "identity", self.sink_tau_params, sd)
+            )
+        if not self.calibrate_deep_sink and self.explicit_deep_sink_rate is not None:
+            s_val = float(self.explicit_deep_sink_rate)
+            if not math.isfinite(s_val) or s_val <= 0.0:
+                raise ValueError(
+                    "explicit_deep_sink_rate must be finite and > 0 to build a log-scale ParamSpec."
+                )
+            sd_s = _require_prior_sd(prior_sd if sink_sd is None else sink_sd)
+            specs.append(
+                ParamSpec(f"{prefix}.explicit_deep_sink_rate", "exp", math.log(s_val), sd_s)
+            )
+        return tuple(specs)

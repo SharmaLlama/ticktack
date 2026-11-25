@@ -974,3 +974,76 @@ def test_reversible_scale_gauge_docstrings_and_getattr_leafwrapper_guard() -> No
         assert eqx.tree_at(target_fn, chartless, repl) is not None
         with pytest.raises(AttributeError, match="leaf"):
             eqx.tree_at(lambda m: m.leaf, chartless, repl)
+
+
+def test_effective_param_specs_jit_open_sink_guards_and_fixed_validation() -> None:
+    """Verify EffectiveCBM.param_specs, SubspaceCBM kwargs, jit to_balanced sink rejection, and FixedChart guards."""
+    topo_asym = _asym_3box_topo()
+    masses = [94.0, 525.0, 3600.0]
+    fluxes = [47.0, 39.0, 84.0, 76.0, 8.0]
+    spike = MiyakeSpike(774.5, 0.3, 6.2)
+
+    # 1. EffectiveCBM.param_specs covers all 2K - 2 (or 2K - 1) leaves and round-trips ParameterSpace
+    for eff_case, expected_dim in [
+        (EffectiveCBM(K=2), 2),
+        (EffectiveCBM(K=3), 4),
+        (EffectiveCBM(K=4), 6),
+        (EffectiveCBM(K=3, deep_sink_rate=0.015), 5),
+    ]:
+        with pytest.raises(ValueError, match="prior_sd"):
+            eff_case.param_specs()
+        rm = RadiocarbonModel(eff_case, SteadyProduction(1.76) + spike)
+        ps = ParameterSpace(rm, list(eff_case.param_specs(prior_sd=0.35)))
+        assert ps.n_params == expected_dim
+        u0 = ps.unconstrain(rm)
+        u_pert = u0 + jnp.linspace(0.08, -0.14, ps.n_params, dtype=jnp.float64)
+        np.testing.assert_allclose(ps.unconstrain(ps.constrain(u_pert)), u_pert, rtol=1e-13, atol=1e-14)
+
+    with pytest.raises(ValueError, match="explicit_deep_sink_rate"):
+        EffectiveCBM(K=3, deep_sink_rate=0.0).param_specs(prior_sd=0.35)
+
+    # SubspaceCBM rejects unexpected kwargs; custom chartless subclass with leaves raises NotImplementedError
+    sub = SubspaceCBM(topo_asym, [-0.6, -2.5, -1.9, -3.7, -5.8], np.ones((5, 2)) * 0.2, 8.3)
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        sub.param_specs(bogus_kwarg=0.35)
+
+    class _CustomDynamicCBM(CarbonBoxModel):
+        theta: jax.Array
+
+        def __init__(self, topology: Topology) -> None:
+            self.topology = topology
+            self.decay_rate = 1.2e-4
+            self.theta = jnp.array([1.0, 2.0], dtype=jnp.float64)
+
+    with pytest.raises(NotImplementedError, match="param_specs"):
+        _CustomDynamicCBM(topo_asym).param_specs(prior_sd=0.35)
+
+    # 2. to_balanced() rejects OpenChart, OpenCBM, and calibrated EffectiveCBM under eqx.filter_jit / jax.jit
+    for open_model in (
+        load_preset("Miyake17", chart="open"),
+        load_preset("Miyake17", kind="open"),
+        EffectiveCBM(K=3),
+    ):
+        with pytest.raises(ValueError, match="positive sinks"):
+            eqx.filter_jit(lambda m: m.to_balanced())(open_model)
+        with pytest.raises(ValueError, match="positive sinks"):
+            jax.jit(lambda m: m.to_balanced().matrix_A())(open_model)
+
+    # OpenChart / OpenCBM rejects positive sinks outside explicit open_box_indices
+    with pytest.raises(ValueError, match="outside explicit open_box_indices"):
+        OpenChart.from_masses_and_fluxes(
+            topo_asym, masses, fluxes, [0.0, 1e-3, 2.5e-4], open_box_indices=(2,)
+        )
+
+    # 3. FixedChart / FixedCBM rejects non-positive/non-finite masses and negative/non-finite fluxes & sinks
+    for bad_m in ([0.0, 525.0, 3600.0], [-10.0, 525.0, 3600.0], [float("nan"), 525.0, 3600.0]):
+        with pytest.raises(ValueError, match="masses"):
+            FixedChart(topo_asym, bad_m, fluxes)
+    for bad_f in ([-1.0, 39.0, 84.0, 76.0, 8.0], [float("inf"), 39.0, 84.0, 76.0, 8.0]):
+        with pytest.raises(ValueError, match="edge_fluxes"):
+            FixedChart(topo_asym, masses, bad_f)
+    for bad_s in ([0.0, -1e-4, 0.0], [0.0, float("nan"), 0.0]):
+        with pytest.raises(ValueError, match="sink_rates"):
+            FixedChart(topo_asym, masses, fluxes, sink_rates=bad_s)
+    # Zero edge_fluxes / sink_rates remain valid on FixedChart
+    assert FixedChart(topo_asym, masses, [0.0, 39.0, 84.0, 76.0, 8.0], sink_rates=[0.0, 0.0, 0.0]) is not None
