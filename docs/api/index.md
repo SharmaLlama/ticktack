@@ -21,7 +21,7 @@ Specialized constants, preset serialization helpers, and low-level linear-algebr
 ### Data & Non-Parametric Fields
 
 - **[Data & Calendar Auditing](data.md)** (`ticktack.data`): `SeasonalWeights`, `TreeRingSeries`, `Dataset`, `BUNDLED_DATASET_CATALOGUE`, `load_bundled_series`, `load_bundled_event`, `convert_calendar_years`, and `parse_growth_season_bounds`.
-- **[Linear Marginalization & POD](linear.md)** (`ticktack.linear`): `LinearMarginal`, `posterior`, `solin_sarkka_basis`, `project_causal_gp`, `canonical_pod_modes`, `stationary_cbm_gp_cov`, `kalman_gp_marginal`, and whitening/arrow-matrix solvers.
+- **[Linear Marginalization & POD](linear.md)** (`ticktack.linear`, `ticktack.kalman`): `LinearMarginal`, `posterior`, `solin_sarkka_basis`, `project_causal_gp`, `canonical_pod_modes`, `stationary_cbm_gp_cov`, `kalman_gp_marginal`, and whitening/arrow-matrix solvers.
 - **[IFT Fields & Kernel Selection](fields.md)** (`ticktack.fields`): `GaussianField`, `LogGaussianField`, `MaternSpectrum`, `SquaredExpSpectrum`, `QuasiPeriodicSpectrum`, `CorrelatedFieldSpectrum`, `SumSpectrum`, `fit_ift_field`, `log_evidence`, `error_scale`, `evidence_grid`, `optimize_gp_kernel`, and `select_gp_kernel`.
 
 ### Bayesian Inference, Fisher Geometry, & Visualization

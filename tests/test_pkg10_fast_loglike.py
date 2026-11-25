@@ -571,7 +571,7 @@ def test_dynamic_modes_cbm_subspace_lgf_and_traced_jitter(
         ),
     )
     cfg_lgf = LinearMarginalConfig(
-        offset_mode="hierarchical", marginalise_field=True, include_field_initial_cov=False
+        offset_mode="hierarchical", marginalize_field=True, include_field_initial_cov=False
     )
     ps_lgf_lap = ParameterSpace(
         m_lgf, [ParamSpec("production.spike.fluence", "exp", 1.8, 0.4)]

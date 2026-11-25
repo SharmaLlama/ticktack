@@ -40,6 +40,7 @@ import optimistix as optx
 import zodiax as zdx
 from jax.typing import ArrayLike
 
+from ._utils import _concrete, _safe_psd_root, _sigma_with_jitter
 from .cbm import CarbonBoxModel
 from .data import Dataset
 from .fields import (
@@ -56,7 +57,6 @@ from .fields import (
 from .linear import (
     CausalGPProjection,
     LinearMarginal,
-    _concrete,
     _solve_complex_resolvents,
     harmonic_solar_design,
     hierarchical_offset_design,
@@ -420,10 +420,10 @@ class LinearMarginalConfig(eqx.Module):
     lab_prior_sd: float = eqx.field(static=True)
     solar_prior_sd: float = eqx.field(static=True)
     trend_prior_sd: float = eqx.field(static=True)
-    marginalise_solar: bool = eqx.field(static=True)
-    marginalise_trend: bool = eqx.field(static=True)
-    marginalise_gp: bool = eqx.field(static=True)
-    marginalise_field: bool = eqx.field(static=True)
+    marginalize_solar: bool = eqx.field(static=True)
+    marginalize_trend: bool = eqx.field(static=True)
+    marginalize_gp: bool = eqx.field(static=True)
+    marginalize_field: bool = eqx.field(static=True)
     n_gp_modes: int | None = eqx.field(static=True)
     include_gp_initial_cov: bool = eqx.field(static=True)
     include_field_initial_cov: bool = eqx.field(static=True)
@@ -441,13 +441,9 @@ class LinearMarginalConfig(eqx.Module):
         lab_prior_sd: float | None = 1.5,
         solar_prior_sd: float = 1.0,
         trend_prior_sd: float = 5.0,
-        marginalise_solar: bool | None = None,
-        marginalise_trend: bool | None = None,
-        marginalise_gp: bool | None = None,
-        marginalise_field: bool | None = None,
-        marginalize_solar: bool | None = None,
-        marginalize_trend: bool | None = None,
-        marginalize_gp: bool | None = None,
+        marginalize_solar: bool = True,
+        marginalize_trend: bool = True,
+        marginalize_gp: bool = True,
         marginalize_field: bool | None = None,
         n_gp_modes: int | None = None,
         include_gp_initial_cov: bool = True,
@@ -467,26 +463,6 @@ class LinearMarginalConfig(eqx.Module):
                 "dct_operator must be a DCTResponseOperator, LinearizedDCTOperator, or None; "
                 f"got {type(dct_operator).__name__}."
             )
-        eff_solar = (
-            marginalize_solar
-            if marginalize_solar is not None
-            else (True if marginalise_solar is None else marginalise_solar)
-        )
-        eff_trend = (
-            marginalize_trend
-            if marginalize_trend is not None
-            else (True if marginalise_trend is None else marginalise_trend)
-        )
-        eff_gp = (
-            marginalize_gp
-            if marginalize_gp is not None
-            else (True if marginalise_gp is None else marginalise_gp)
-        )
-        eff_field = (
-            marginalize_field
-            if marginalize_field is not None
-            else (eff_gp if marginalise_field is None else marginalise_field)
-        )
         self.offset_mode = str(offset_mode)
         self.global_prior_mean = float(global_prior_mean)
         self.global_prior_sd = (
@@ -495,31 +471,17 @@ class LinearMarginalConfig(eqx.Module):
         self.lab_prior_sd = math.inf if lab_prior_sd is None else float(lab_prior_sd)
         self.solar_prior_sd = float(solar_prior_sd)
         self.trend_prior_sd = float(trend_prior_sd)
-        self.marginalise_solar = bool(eff_solar)
-        self.marginalise_trend = bool(eff_trend)
-        self.marginalise_gp = bool(eff_gp)
-        self.marginalise_field = bool(eff_field)
+        self.marginalize_solar = bool(marginalize_solar)
+        self.marginalize_trend = bool(marginalize_trend)
+        self.marginalize_gp = bool(marginalize_gp)
+        self.marginalize_field = bool(
+            self.marginalize_gp if marginalize_field is None else marginalize_field
+        )
         self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.include_field_initial_cov = bool(include_field_initial_cov)
         self.whiten_method = str(whiten_method)
         self.dct_operator = dct_operator
-
-    @property
-    def marginalize_solar(self) -> bool:
-        return self.marginalise_solar
-
-    @property
-    def marginalize_trend(self) -> bool:
-        return self.marginalise_trend
-
-    @property
-    def marginalize_gp(self) -> bool:
-        return self.marginalise_gp
-
-    @property
-    def marginalize_field(self) -> bool:
-        return self.marginalise_field
 
 
 # ---------------------------------------------------------------------------
@@ -563,13 +525,13 @@ def _partition_terms_for_cfg(
     field_terms: list[GaussianField] = []
 
     for term in parts:
-        if isinstance(term, HarmonicSolar) and cfg.marginalise_solar:
+        if isinstance(term, HarmonicSolar) and cfg.marginalize_solar:
             solar_terms.append(term)
-        elif isinstance(term, LinearTrend) and cfg.marginalise_trend:
+        elif isinstance(term, LinearTrend) and cfg.marginalize_trend:
             trend_terms.append(term)
-        elif isinstance(term, GPProduction) and cfg.marginalise_gp:
+        elif isinstance(term, GPProduction) and cfg.marginalize_gp:
             gp_terms.append(term)
-        elif isinstance(term, GaussianField) and cfg.marginalise_field:
+        elif isinstance(term, GaussianField) and cfg.marginalize_field:
             field_terms.append(term)
         else:
             unmarginalized.append(term)
@@ -951,7 +913,7 @@ def _uses_joint_mode(
         return True
     lgf, _ = _extract_single_lgf(model.production)
     if lgf is not None:
-        if not cfg.marginalise_field:
+        if not cfg.marginalize_field:
             return True
         if parameter_space is None:
             return False
@@ -1237,9 +1199,7 @@ def _make_fast_unconstrained_loglike(
         and not isinstance(base_model.solver, ModaxSolver)
         and _marginal_design_is_static(base_model, parameter_space, cfg_eff)
     ):
-        sigma = jnp.asarray(dataset.sigma_flat, dtype=jnp.float64)
-        if jit_arr is not None:
-            sigma = jnp.sqrt(jnp.square(sigma) + jnp.square(jit_arr))
+        sigma = _sigma_with_jitter(dataset.sigma_flat, jit_arr)
         design_cfg = _offset_only_cfg(cfg_eff) if joint_mode else cfg_eff
         static_cache = _StaticLogLikeCache(
             whiten=_prefactor_design(base_model, dataset, design_cfg, sigma),
@@ -1294,10 +1254,10 @@ def _laplace_marginal_log_likelihood_lgf(
         lab_prior_sd=cfg.lab_prior_sd,
         solar_prior_sd=cfg.solar_prior_sd,
         trend_prior_sd=cfg.trend_prior_sd,
-        marginalise_solar=cfg.marginalise_solar,
-        marginalise_trend=cfg.marginalise_trend,
-        marginalise_gp=cfg.marginalise_gp,
-        marginalise_field=False,
+        marginalize_solar=cfg.marginalize_solar,
+        marginalize_trend=cfg.marginalize_trend,
+        marginalize_gp=cfg.marginalize_gp,
+        marginalize_field=False,
         n_gp_modes=cfg.n_gp_modes,
         include_gp_initial_cov=cfg.include_gp_initial_cov,
         include_field_initial_cov=False,
@@ -1363,6 +1323,26 @@ def _laplace_marginal_log_likelihood_lgf(
     return whiten.const_norm - 0.5 * (r_map @ r_map) - 0.5 * (z_c @ z_c) - half_ld_field
 
 
+def _whiten_model_data(
+    model: RadiocarbonModel,
+    dataset: Dataset,
+    cfg: LinearMarginalConfig,
+    sigma: jax.Array,
+    *,
+    joint_mode: bool = False,
+) -> tuple[jax.Array, jax.Array]:
+    """Return ``(whitened_residual, half_logdet)`` for marginal or joint likelihood."""
+    eff_cfg = _offset_only_cfg(cfg) if joint_mode else cfg
+    if joint_mode and eff_cfg.offset_mode == "none":
+        pred = model.predict_d14c(dataset, offsets=None, concat=True)
+        return (dataset.d14c_flat - pred) / sigma, jnp.sum(jnp.log(sigma))
+    resid = _nonlinear_residual(model, dataset, eff_cfg)
+    X, pm, ps = _build_marginal_design(model, dataset, eff_cfg)
+    return LinearMarginal(X, prior_mean=pm, prior_sd=ps, method=eff_cfg.whiten_method).whiten(
+        resid, sigma
+    )
+
+
 def marginal_log_likelihood(
     model: RadiocarbonModel,
     dataset: Dataset,
@@ -1373,31 +1353,17 @@ def marginal_log_likelihood(
     """Exact marginal Gaussian log-likelihood (or Laplace-marginalized for ``LogGaussianField``)."""
     if cfg is None:
         cfg = LinearMarginalConfig()
+    sigma = _sigma_with_jitter(dataset.sigma_flat, sigma_jitter)
 
-    sigma = dataset.sigma_flat
-    if sigma_jitter is not None:
-        sigma = jnp.sqrt(
-            jnp.square(sigma)
-            + jnp.square(jnp.asarray(sigma_jitter, dtype=jnp.float64))
-        )
-
-    if cfg.marginalise_field and not isinstance(model.solver, ModaxSolver):
+    if cfg.marginalize_field and not isinstance(model.solver, ModaxSolver):
         lgf, other_parts = _extract_single_lgf(model.production)
         if lgf is not None:
             return _laplace_marginal_log_likelihood_lgf(
                 model, dataset, lgf, other_parts, cfg, sigma
             )
 
-    resid = _nonlinear_residual(model, dataset, cfg)
-    X, prior_mean, prior_sd = _build_marginal_design(model, dataset, cfg)
-
-    lm = LinearMarginal(
-        X,
-        prior_mean=prior_mean,
-        prior_sd=prior_sd,
-        method=cfg.whiten_method,
-    )
-    return lm.loglike(resid, sigma)
+    u_out, log_norm = _whiten_model_data(model, dataset, cfg, sigma, joint_mode=False)
+    return -0.5 * (u_out @ u_out) - log_norm - 0.5 * u_out.size * math.log(2.0 * math.pi)
 
 
 def marginal_log_posterior(
@@ -1434,10 +1400,10 @@ def _offset_only_cfg(cfg: LinearMarginalConfig) -> LinearMarginalConfig:
         lab_prior_sd=cfg.lab_prior_sd,
         solar_prior_sd=cfg.solar_prior_sd,
         trend_prior_sd=cfg.trend_prior_sd,
-        marginalise_solar=False,
-        marginalise_trend=False,
-        marginalise_gp=False,
-        marginalise_field=False,
+        marginalize_solar=False,
+        marginalize_trend=False,
+        marginalize_gp=False,
+        marginalize_field=False,
         whiten_method=cfg.whiten_method,
     )
 
@@ -1456,12 +1422,7 @@ def _eval_joint_loglike_core(
             sigma_jitter=sigma_jitter,
         )
 
-    sigma = jnp.asarray(dataset.sigma_flat, dtype=jnp.float64)
-    if sigma_jitter is not None:
-        sigma = jnp.sqrt(
-            jnp.square(sigma)
-            + jnp.square(jnp.asarray(sigma_jitter, dtype=jnp.float64))
-        )
+    sigma = _sigma_with_jitter(dataset.sigma_flat, sigma_jitter)
     pred_flat = model.predict_d14c(dataset, offsets=None, concat=True)
     resid = dataset.d14c_flat - pred_flat
     return (
@@ -1584,6 +1545,25 @@ def _offset_column_count(cfg: LinearMarginalConfig, n_series: int) -> int:
     return 0
 
 
+def _unpack_offset_coeffs(
+    coeffs: jax.Array, cfg: LinearMarginalConfig, n_series: int
+) -> tuple[jax.Array, jax.Array]:
+    """Extract ``(offset_global, offset_lab)`` from leading columns of ``(..., k_tot)``."""
+    batch = coeffs.shape[:-1]
+    n_off = _offset_column_count(cfg, n_series)
+    zeros_lab = jnp.zeros((*batch, n_series), dtype=jnp.float64)
+    if n_off <= 0 or coeffs.shape[-1] < n_off:
+        return jnp.zeros(batch, dtype=jnp.float64), zeros_lab
+    if cfg.offset_mode == "hierarchical":
+        return coeffs[..., 0], (
+            coeffs[..., 1 : 1 + n_series] if n_off == 1 + n_series else zeros_lab
+        )
+    if cfg.offset_mode == "shared":
+        return coeffs[..., 0], zeros_lab
+    l_out = coeffs[..., :n_series]
+    return jnp.mean(l_out, axis=-1), l_out
+
+
 def _reconstruct_initial_state_posterior(
     model: RadiocarbonModel,
     init_state_blocks: list[tuple[slice, jax.Array, jax.Array]],
@@ -1653,9 +1633,7 @@ def _linear_posterior_impl(
     box: int | None,
     sigma_jitter_arr: jax.Array | None,
 ) -> LinearPosteriorResult:
-    sigma = dataset.sigma_flat
-    if sigma_jitter_arr is not None:
-        sigma = jnp.sqrt(jnp.square(sigma) + jnp.square(sigma_jitter_arr))
+    sigma = _sigma_with_jitter(dataset.sigma_flat, sigma_jitter_arr)
 
     resid = _nonlinear_residual(model, dataset, cfg)
     X, prior_mean, prior_sd, gp_projs, field_init_roots, init_state_blocks = (
@@ -1684,23 +1662,7 @@ def _linear_posterior_impl(
     # --- Reconstruct offsets ---
     n_series = dataset.n_series
     n_off = _offset_column_count(cfg, n_series)
-    if n_off > 0 and coeff_mean.shape[0] >= n_off:
-        if cfg.offset_mode == "hierarchical":
-            offset_global_mean = coeff_mean[0]
-            if n_off == 1 + n_series:
-                offset_lab_means = coeff_mean[1 : 1 + n_series]
-            else:
-                offset_lab_means = jnp.zeros((n_series,), dtype=jnp.float64)
-        elif cfg.offset_mode == "shared":
-            offset_global_mean = coeff_mean[0]
-            offset_lab_means = jnp.zeros((n_series,), dtype=jnp.float64)
-        else:  # per_series
-            offset_lab_means = coeff_mean[:n_series]
-            offset_global_mean = jnp.mean(offset_lab_means)
-    else:
-        offset_global_mean = jnp.asarray(0.0, dtype=jnp.float64)
-        offset_lab_means = jnp.zeros((n_series,), dtype=jnp.float64)
-
+    offset_global_mean, offset_lab_means = _unpack_offset_coeffs(coeff_mean, cfg, n_series)
     baseline_d14c = offset_global_mean
 
     # --- Optional joint conditional Gaussian coefficient draws ---
@@ -1709,8 +1671,7 @@ def _linear_posterior_impl(
         assert rng_key is not None
         k_tot = coeff_mean.shape[0]
         if k_tot > 0:
-            jitter_eye = 1e-12 * jnp.eye(k_tot, dtype=jnp.float64)
-            L_cov = jnp.linalg.cholesky(0.5 * (coeff_cov + coeff_cov.T) + jitter_eye)
+            L_cov = _safe_psd_root(coeff_cov, jitter=1e-12)
             z = jax.random.normal(
                 rng_key, shape=(n_draws, k_tot), dtype=jnp.float64
             )

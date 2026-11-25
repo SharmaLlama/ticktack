@@ -38,6 +38,7 @@ if not hasattr(dist, "distribution"):
 from jax.typing import ArrayLike
 from numpyro.infer import MCMC, NUTS, SVI, Trace_ELBO, autoguide
 
+from ._utils import _safe_psd_root, _sigma_with_jitter
 from .cbm import SubspaceCBM
 from .data import Dataset
 from .fields import LinearizedDCTOperator, build_linearized_dct_operator
@@ -53,6 +54,7 @@ from .likelihood import (
     _offset_column_count,
     _offset_only_cfg,
     _partition_terms_for_cfg,
+    _unpack_offset_coeffs,
     _uses_joint_mode,
     joint_log_likelihood,
     linear_posterior,
@@ -74,18 +76,6 @@ __all__ = [
 ]
 
 
-def _use_joint_mode(
-    model: RadiocarbonModel,
-    parameter_space: ParameterSpace | None = None,
-    cfg: LinearMarginalConfig | None = None,
-) -> bool:
-    return _uses_joint_mode(
-        model,
-        parameter_space,
-        LinearMarginalConfig() if cfg is None else cfg,
-    )
-
-
 def _eval_single_loglike(
     model_eval: RadiocarbonModel,
     dataset: Dataset,
@@ -93,7 +83,7 @@ def _eval_single_loglike(
     sigma_jitter: ArrayLike | None,
     parameter_space: ParameterSpace | None = None,
 ) -> jax.Array:
-    if _use_joint_mode(model_eval, parameter_space, cfg):
+    if _uses_joint_mode(model_eval, parameter_space, cfg):
         return joint_log_likelihood(
             model_eval,
             dataset,
@@ -172,9 +162,7 @@ def _jit_static_linear_draw_factors(
     )
     mu_0, coeff_cov = lm.posterior(jnp.zeros_like(dataset.d14c_flat), sigma)
     coeff_cov = 0.5 * (coeff_cov + coeff_cov.T)
-    L_cov = jnp.linalg.cholesky(
-        coeff_cov + 1e-12 * jnp.eye(k_tot, dtype=jnp.float64)
-    )
+    L_cov = _safe_psd_root(coeff_cov, jitter=1e-12)
     gain_T = (X / jnp.square(sigma)[:, None]) @ coeff_cov
     return mu_0, gain_T, L_cov
 
@@ -221,23 +209,7 @@ def _nuts_cond_draw_batch_jit(
         else:
             w_draw = lp.coeff_mean
 
-        if n_off > 0 and k_tot >= n_off:
-            if lin_cfg.offset_mode == "hierarchical":
-                g_draw = w_draw[0]
-                l_draw = (
-                    w_draw[1 : 1 + n_series]
-                    if n_off == 1 + n_series
-                    else jnp.zeros((n_series,), dtype=jnp.float64)
-                )
-            elif lin_cfg.offset_mode == "shared":
-                g_draw = w_draw[0]
-                l_draw = jnp.zeros((n_series,), dtype=jnp.float64)
-            else:
-                l_draw = w_draw[:n_series]
-                g_draw = jnp.mean(l_draw)
-        else:
-            g_draw = jnp.asarray(0.0, dtype=jnp.float64)
-            l_draw = jnp.zeros((n_series,), dtype=jnp.float64)
+        g_draw, l_draw = _unpack_offset_coeffs(w_draw, lin_cfg, n_series)
 
         if n_solar > 0:
             s_draw = (
@@ -527,7 +499,7 @@ def sample_nuts(  # shape-exempt(carbon): public NUTS sampler adding Laplace mas
 
     # --- Conditional Gaussian reconstruction of marginalized linear parameters ---
     if reconstruct_linear:
-        joint_mode = _use_joint_mode(model, parameter_space, cfg)
+        joint_mode = _uses_joint_mode(model, parameter_space, cfg)
         is_lgf_marg = (
             not joint_mode
             and _extract_single_lgf(model.production)[0] is not None
@@ -571,14 +543,7 @@ def sample_nuts(  # shape-exempt(carbon): public NUTS sampler adding Laplace mas
                         if (lp.coeff_draws is not None and lp.coeff_mean.shape[0] > 0)
                         else lp.coeff_mean
                     )
-                    g_d = w_draw[0] if n_off > 0 and w_draw.shape[0] >= 1 else jnp.asarray(0.0, dtype=jnp.float64)
-                    l_d = (
-                        w_draw[1 : 1 + n_series]
-                        if (lin_cfg.offset_mode == "hierarchical" and n_off == 1 + n_series)
-                        else (w_draw[:n_series] if lin_cfg.offset_mode == "per_series" and n_off == n_series else jnp.zeros((n_series,), dtype=jnp.float64))
-                    )
-                    if lin_cfg.offset_mode == "per_series" and n_off > 0:
-                        g_d = jnp.mean(l_d)
+                    g_d, l_d = _unpack_offset_coeffs(w_draw, lin_cfg, n_series)
                     s_d = (
                         w_draw[n_off : n_off + n_solar]
                         if n_solar > 0 and w_draw.shape[0] >= n_off + n_solar
@@ -597,11 +562,7 @@ def sample_nuts(  # shape-exempt(carbon): public NUTS sampler adding Laplace mas
                 and dataset.n_obs > 0
                 and _marginal_design_is_static(model, parameter_space, lin_cfg)
             ):
-                sigma_eff = jnp.asarray(dataset.sigma_flat, dtype=jnp.float64)
-                if jit_arr is not None:
-                    sigma_eff = jnp.sqrt(
-                        jnp.square(sigma_eff) + jnp.square(jit_arr)
-                    )
+                sigma_eff = _sigma_with_jitter(dataset.sigma_flat, jit_arr)
                 mu_0, gain_T, L_cov = _jit_static_linear_draw_factors(
                     model, dataset, lin_cfg, sigma_eff
                 )
@@ -617,23 +578,7 @@ def sample_nuts(  # shape-exempt(carbon): public NUTS sampler adding Laplace mas
                 else:
                     w_draws = jnp.zeros((n_draws_tot, 0), dtype=jnp.float64)
 
-                if n_off > 0 and k_tot >= n_off:
-                    if lin_cfg.offset_mode == "hierarchical":
-                        g_all = w_draws[:, 0]
-                        l_all = (
-                            w_draws[:, 1 : 1 + n_series]
-                            if n_off == 1 + n_series
-                            else jnp.zeros((n_draws_tot, n_series), dtype=jnp.float64)
-                        )
-                    elif lin_cfg.offset_mode == "shared":
-                        g_all = w_draws[:, 0]
-                        l_all = jnp.zeros((n_draws_tot, n_series), dtype=jnp.float64)
-                    else:
-                        l_all = w_draws[:, :n_series]
-                        g_all = jnp.mean(l_all, axis=1)
-                else:
-                    g_all = jnp.zeros((n_draws_tot,), dtype=jnp.float64)
-                    l_all = jnp.zeros((n_draws_tot, n_series), dtype=jnp.float64)
+                g_all, l_all = _unpack_offset_coeffs(w_draws, lin_cfg, n_series)
                 if n_solar > 0 and k_tot >= n_off + n_solar:
                     s_all = w_draws[:, n_off : n_off + n_solar]
                 else:
@@ -1087,7 +1032,7 @@ def sample_smc(
                 cov = 0.5 * (cov + cov.T)
             else:
                 cov = jnp.diag(jnp.square(prior_sds))
-            L_cov = jnp.linalg.cholesky(cov)
+            L_cov = _safe_psd_root(cov)
             particles, curr_lp, current_log_lks, stage_acc = _smc_mutate_particles_jit(
                 mut_key,
                 particles,

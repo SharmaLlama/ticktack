@@ -1963,10 +1963,9 @@ def plot_cbm_mode_impulse_responses(
     """Plot per-mode tropospheric impulse-response perturbations ``δh_k(τ)``.
 
     Accepts either a precomputed :class:`~ticktack.fisher.CBMModeImpulseResult`
-    or a ``(cbm, spectrum)`` pair (calling
-    :func:`~ticktack.fisher.cbm_mode_impulse_responses` on ``t_lag``).
-    When ``spectrum is None`` and a CBM is passed directly, displays the
-    continuous impulse-response Jacobian SVD modes.
+    (from Fisher pushforward or direct SVD via
+    :func:`~ticktack.fisher.cbm_mode_impulse_responses`) or a ``(cbm, spectrum)``
+    pair (calling :func:`~ticktack.fisher.cbm_mode_impulse_responses` on ``t_lag``).
 
     When ``show_baseline=True``, renders a compact full-width reference panel
     across the top showing the nominal tropospheric impulse responses
@@ -1989,28 +1988,26 @@ def plot_cbm_mode_impulse_responses(
                 pos_list = list(range(len(avail_idx)))
         else:
             pos_list = list(range(len(avail_idx)))
+    elif spectrum is None:
+        raise ValueError(
+            "spectrum is required when passing a CarbonBoxModel to "
+            "plot_cbm_mode_impulse_responses; for direct SVD modes, pass "
+            "cbm_mode_impulse_responses(cbm, t_lag, None, prior_cbm_sd=...) instead."
+        )
     else:
         lag_grid = (
             np.linspace(0.0, 30.0, 301, dtype=np.float64)
             if t_lag is None
             else np.asarray(t_lag, dtype=np.float64).reshape(-1)
         )
-        if spectrum is not None:
-            n_avail = int(np.asarray(spectrum.parameter_loadings).shape[1])
-            req_modes = tuple(int(m) for m in modes if 0 <= int(m) < n_avail)
-            if not req_modes:
-                req_modes = tuple(range(min(6, n_avail)))
-            res = cbm_mode_impulse_responses(
-                cbm_or_result, lag_grid, spectrum, modes=req_modes
-            )
-            pos_list = list(range(len(res.mode_indices)))
-        else:
-            res_all = cbm_mode_impulse_responses(cbm_or_result, lag_grid, None)
-            avail_idx = list(res_all.mode_indices)
-            pos_list = [avail_idx.index(int(m)) for m in modes if int(m) in avail_idx]
-            if not pos_list:
-                pos_list = list(range(min(6, len(avail_idx))))
-            res = res_all
+        n_avail = int(np.asarray(spectrum.parameter_loadings).shape[1])
+        req_modes = tuple(int(m) for m in modes if 0 <= int(m) < n_avail)
+        if not req_modes:
+            req_modes = tuple(range(min(6, n_avail)))
+        res = cbm_mode_impulse_responses(
+            cbm_or_result, lag_grid, spectrum, modes=req_modes
+        )
+        pos_list = list(range(len(res.mode_indices)))
 
     n_modes = len(pos_list)
     if n_modes == 0:
