@@ -105,19 +105,35 @@ def arrow_problem(
     Raises
     ------
     ValueError
-        If ``rows`` is concrete (not JAX-traced) and contains duplicate active
+        If array ranks, shapes, or ``rows`` integer dtype are invalid, or if
+        ``rows`` is concrete (not JAX-traced) and contains duplicate active
         indices in ``[0, N)``.
     """
     from .linear import _concrete
 
     x = jnp.asarray(x, dtype=jnp.float64)
-    local = jnp.asarray(local, dtype=jnp.float64)
+    if x.ndim != 1:
+        raise ValueError(f"x must be a 1D array of shape (N,); got shape {x.shape}.")
     rows = jnp.asarray(rows)
+    if rows.ndim != 2 or not jnp.issubdtype(rows.dtype, jnp.integer):
+        raise ValueError(
+            f"rows must be a 2D integer array of shape (B, R); "
+            f"got shape {rows.shape} and dtype {rows.dtype}."
+        )
+    local = jnp.asarray(local, dtype=jnp.float64)
+    if local.ndim != 3 or local.shape[:2] != rows.shape:
+        raise ValueError(
+            f"local must have shape ({rows.shape[0]}, {rows.shape[1]}, M); got {local.shape}."
+        )
     n_obs = x.shape[0]
     if spanning is None:
         spanning = jnp.zeros((n_obs, 0), dtype=x.dtype)
     else:
         spanning = jnp.asarray(spanning, dtype=jnp.float64)
+        if spanning.ndim != 2 or spanning.shape[0] != n_obs:
+            raise ValueError(
+                f"spanning must have shape ({n_obs}, K); got {spanning.shape}."
+            )
     valid = (rows >= 0) & (rows < n_obs)
     safe_rows = jnp.where(valid, rows, n_obs)
     c_rows = _concrete(rows)
@@ -185,9 +201,22 @@ def arrow_at(
         Returned only when ``trace=True``: scalar parameter-space trace
         ``tr((s² I_P + Ũᵀ Ũ)⁻¹)`` of size ``P × P`` (not the ``N × N``
         data-space covariance trace).
+
+    Raises
+    ------
+    ValueError
+        If ``scale2`` is not a scalar, or is concrete and non-finite or
+        non-positive.
     """
+    from .linear import _concrete
+
     p = problem
     scale2 = jnp.asarray(scale2, dtype=jnp.float64)
+    if scale2.ndim != 0:
+        raise ValueError(f"scale2 must be a scalar; got shape {scale2.shape}.")
+    c_s2 = _concrete(scale2)
+    if c_s2 is not None and (not onp.isfinite(c_s2) or float(c_s2) <= 0.0):
+        raise ValueError(f"scale2 must be finite and strictly positive; got {c_s2}.")
     hi = jax.lax.Precision.HIGHEST
     n_block, n_mode = p.gram_bb.shape[:2]
     n_span = p.gram_out.shape[0]
@@ -271,7 +300,10 @@ class CanonicalPODResult(NamedTuple):
         Orthogonal rotation matrix ``V_prior = [V_thin, V_null]`` of shape
         ``(r, r)`` in standardized prior-mode space (``V_priorᵀ V_prior = I_r``).
         When ``N_d < r``, the trailing ``r - m_sing`` nullspace columns are
-        completed under ``jax.lax.stop_gradient`` via complete QR.
+        seeded via ``jax.lax.stop_gradient`` complete QR and projected
+        orthogonal to live ``V_thin`` so ``V_priorᵀ V_prior = I_r`` holds
+        through second-order autodiff without differentiating degenerate zero
+        singular values.
     production_modes : jax.Array
         Canonical production basis ``Φ_eval V_prior`` of shape ``(N_eval, r)``
         in production-anomaly units (matching ``project_causal_gp``).
@@ -338,13 +370,18 @@ def _wiener_pod_svd(
     post_var = jnp.sum((phi_rot_thin**2) * coeff_var_thin[None, :], axis=1) + jnp.sum(
         phi_perp**2, axis=1
     )
-    post_sd = jnp.sqrt(jnp.maximum(post_var, 0.0))
+    pos_var = post_var > 0.0
+    post_sd = jnp.where(pos_var, jnp.sqrt(jnp.where(pos_var, post_var, 1.0)), 0.0)
     d_eff = jnp.sum(wiener_thin)
     info_nats = 0.5 * jnp.sum(jnp.log1p(s_sq))
 
     if m_sing < r_modes:
         q_full, _ = jnp.linalg.qr(jax.lax.stop_gradient(v_thin), mode="complete")
-        v_prior = jnp.concatenate([v_thin, q_full[:, m_sing:]], axis=1)
+        v_null0 = q_full[:, m_sing:]
+        proj_null = v_thin.T @ v_null0
+        v_null = v_null0 - v_thin @ proj_null
+        v_null = v_null + 0.5 * (v_null @ proj_null.T) @ proj_null
+        v_prior = jnp.concatenate([v_thin, v_null], axis=1)
         n_null = r_modes - m_sing
         zeros_null = jnp.zeros((n_null,), dtype=jnp.float64)
         wiener = jnp.concatenate([wiener_thin, zeros_null])

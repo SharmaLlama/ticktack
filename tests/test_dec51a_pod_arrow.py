@@ -334,6 +334,50 @@ def test_arrow_negative_sentinel_duplicate_rows_and_float32_scale2():
             spanning,
         )
 
+    # Reject invalid ranks, shapes, and non-integer (including boolean) rows in arrow_problem
+    with pytest.raises(ValueError, match="x must be a 1D"):
+        arrow_problem(x[:, None], jnp.asarray(rows_neg_np, dtype=jnp.int32), local, spanning)
+    with pytest.raises(ValueError, match="rows must be a 2D integer"):
+        arrow_problem(x, jnp.arange(5, dtype=jnp.int32), local, spanning)
+    with pytest.raises(ValueError, match="rows must be a 2D integer"):
+        arrow_problem(
+            x,
+            jnp.array([[True, False], [False, True]], dtype=jnp.bool_),
+            jnp.ones((2, 2, 2), dtype=jnp.float64),
+            spanning,
+        )
+    with pytest.raises(ValueError, match="local must have shape"):
+        arrow_problem(
+            x,
+            jnp.asarray(rows_neg_np, dtype=jnp.int32),
+            jnp.ones((3, 1, 2), dtype=jnp.float64),
+            spanning,
+        )
+    with pytest.raises(ValueError, match="spanning must have shape"):
+        arrow_problem(
+            x,
+            jnp.asarray(rows_neg_np, dtype=jnp.int32),
+            local,
+            jnp.ones((n_obs,), dtype=jnp.float64),
+        )
+    with pytest.raises(ValueError, match="spanning must have shape"):
+        arrow_problem(
+            x,
+            jnp.asarray(rows_neg_np, dtype=jnp.int32),
+            local,
+            jnp.ones((n_obs - 1, 3), dtype=jnp.float64),
+        )
+
+    # Reject non-scalar, non-positive, or non-finite scale2 in arrow_at
+    with pytest.raises(ValueError, match="scale2 must be a scalar"):
+        arrow_at(prob, jnp.array([1.5, 2.5], dtype=jnp.float64))
+    with pytest.raises(ValueError, match="scale2 must be finite and strictly positive"):
+        arrow_at(prob, 0.0)
+    with pytest.raises(ValueError, match="scale2 must be finite and strictly positive"):
+        arrow_at(prob, -1.5)
+    with pytest.raises(ValueError, match="scale2 must be finite and strictly positive"):
+        arrow_at(prob, jnp.nan)
+
 
 def test_wiener_pod_svd_kernel_high_snr_and_underdetermined_grad():
     rng = np.random.default_rng(5105)
@@ -526,7 +570,10 @@ def test_canonical_pod_modes_against_full_gp_covariance_and_svd(
 
 
 def test_canonical_pod_modes_grad_and_jvp_underdetermined():
-    """Verify NaN-free jax.grad and jax.jvp when r_modes - n_obs >= 2."""
+    """Verify NaN-free jax.grad and jax.jvp when r_modes - n_obs >= 2, including
+    boundary t_eval == projection.a (post_var == 0) and reconstructed covariance
+    through prior_rotation and production_modes.
+    """
     rng = np.random.default_rng(5106)
     n_obs, r_modes = 8, 20
     a_mat0, b_vec, c_obs = _make_asymmetric_cbm()
@@ -539,10 +586,18 @@ def test_canonical_pod_modes_grad_and_jvp_underdetermined():
         rng.standard_normal((n_obs, 2)) * np.array([120.0, 1.8])[None, :],
         dtype=jnp.float64,
     )
-    t_eval = jnp.linspace(770.0, 778.0, 15, dtype=jnp.float64)
+    # Include the left boundary projection.a = t_starts[0] - 14.0 where phi_eval == 0
+    # and post_var == 0.0 to exercise the double-where sqrt guard under reverse-mode AD.
+    a_left = float(t_starts[0]) - 14.0
+    t_eval = jnp.concatenate(
+        [jnp.array([a_left], dtype=jnp.float64), jnp.linspace(770.0, 778.0, 14, dtype=jnp.float64)]
+    )
     log_hyp0 = jnp.array([math.log(1.45), math.log(2.6)], dtype=jnp.float64)
     w_mean = jnp.linspace(-0.8, 1.2, t_eval.shape[0], dtype=jnp.float64)
     w_sd = jnp.linspace(0.5, 1.4, t_eval.shape[0], dtype=jnp.float64)
+    w_cov = jnp.asarray(
+        rng.standard_normal((t_eval.shape[0], t_eval.shape[0])), dtype=jnp.float64
+    )
 
     def pod_scalar(
         resid_in: jax.Array,
@@ -571,9 +626,11 @@ def test_canonical_pod_modes_grad_and_jvp_underdetermined():
             nuisance_whitened_design=nuis_w,
             include_initial_cov=True,
         )
+        q_cov_pod = (pod.production_modes * pod.coeff_var[None, :]) @ pod.production_modes.T
         return (
             jnp.dot(w_mean, pod.posterior_mean)
             + jnp.dot(w_sd, pod.posterior_sd)
+            + 0.35 * jnp.sum(w_cov * q_cov_pod)
             + 0.6 * pod.d_eff
             - 0.4 * pod.info_nats
         )
@@ -609,12 +666,16 @@ def test_canonical_pod_modes_grad_and_jvp_underdetermined():
         basis_eval = solin_sarkka_basis(t_eval, proj.a, proj.b_bound, r_modes)
         phi_eval = basis_eval.psi * jnp.sqrt(proj.spectral_weights)[None, :]
         post_mean = phi_eval @ mean_c
-        post_sd = jnp.sqrt(jnp.maximum(jnp.sum((phi_eval @ cov_c) * phi_eval, axis=1), 0.0))
+        q_cov_ref = phi_eval @ cov_c @ phi_eval.T
+        post_var = jnp.diag(q_cov_ref)
+        pos_var = post_var > 0.0
+        post_sd = jnp.where(pos_var, jnp.sqrt(jnp.where(pos_var, post_var, 1.0)), 0.0)
         d_eff = jnp.trace(jnp.eye(r_modes, dtype=jnp.float64) - cov_c)
         _, ld_p = jnp.linalg.slogdet(prec_c)
         return (
             jnp.dot(w_mean, post_mean)
             + jnp.dot(w_sd, post_sd)
+            + 0.35 * jnp.sum(w_cov * q_cov_ref)
             + 0.6 * d_eff
             - 0.4 * (0.5 * ld_p)
         )
