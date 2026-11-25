@@ -365,11 +365,14 @@ class SpectralKernel(zdx.Base):
             raise NotImplementedError(f"{type(self).__name__} must define _PARAM_SPECS.")
         return specs
 
+    def _param_array(self, attr: str) -> jax.Array:
+        return jnp.asarray(getattr(self, attr), dtype=jnp.float64)
+
     def param_names(self) -> tuple[str, ...]:
         """Names of unconstrained hyperparameters ``phi``."""
         names: list[str] = []
         for s in self._require_specs():
-            v = getattr(self, s.attr)
+            v = self._param_array(s.attr)
             names.extend(
                 (s.name,) if v.ndim == 0 else (f"{s.name}_{i + 1}" for i in range(int(v.shape[0])))
             )
@@ -384,14 +387,10 @@ class SpectralKernel(zdx.Base):
         """Extract unconstrained hyperparameter vector ``phi`` from ``self``."""
         return jnp.concatenate(
             [
-                jnp.atleast_1d(_KERNEL_TRANSFORMS[s.transform][0](getattr(self, s.attr)))
+                jnp.atleast_1d(_KERNEL_TRANSFORMS[s.transform][0](self._param_array(s.attr)))
                 for s in self._require_specs()
             ]
         )
-
-    def unconstrained_init(self) -> jax.Array:
-        """Initial unconstrained hyperparameter vector ``phi`` for ``self``."""
-        return self.unconstrain_hyperparams()
 
     def _iter_param_slices(
         self, phi: ArrayLike
@@ -402,7 +401,7 @@ class SpectralKernel(zdx.Base):
             raise ValueError(f"Expected {self.n_hyperparams} hyperparameters, got {p.shape[0]}.")
         cursor, slices = 0, []
         for s in specs:
-            v = getattr(self, s.attr)
+            v = self._param_array(s.attr)
             sz = 1 if v.ndim == 0 else int(v.shape[0])
             slices.append(p[cursor] if v.ndim == 0 else p[cursor : cursor + sz])
             cursor += sz
@@ -413,10 +412,6 @@ class SpectralKernel(zdx.Base):
         specs, slices = self._iter_param_slices(phi)
         vals = tuple(_KERNEL_TRANSFORMS[s.transform][1](u) for s, u in zip(specs, slices))
         return eqx.tree_at(lambda k: tuple(getattr(k, s.attr) for s in specs), self, vals)
-
-    def from_unconstrained(self, phi: ArrayLike) -> SpectralKernel:
-        """Construct an updated :class:`SpectralKernel` from unconstrained ``phi``."""
-        return self.from_unconstrained_hyperparams(phi)
 
     def hyperprior_log_prob(self, phi: ArrayLike | None = None) -> jax.Array:
         """Normalized Gaussian log-hyperprior density on unconstrained ``phi``."""
@@ -436,22 +431,18 @@ class SpectralKernel(zdx.Base):
             }
         out: dict[str, float] = {}
         for s in specs:
-            v = getattr(self, s.attr)
-            out[s.summary_key or s.attr] = float(
-                jnp.sqrt(jnp.mean(jnp.square(v))) if s.summary_key else v
-            )
+            v = self._param_array(s.attr)
+            reduced = v if v.ndim == 0 else jnp.sqrt(jnp.mean(jnp.square(v)))
+            out[s.summary_key or s.attr] = float(reduced)
         return out
 
-    def cache_tag(self, zero_mode: bool | None = None) -> str:
+    def cache_tag(self) -> str:
         """Deterministic JIT cache tag for this kernel's structural configuration."""
-        if self._CACHE_PREFIX is None:
-            return (
-                f"custom:{id(self)}"
-                if zero_mode is None
-                else f"custom:{id(self)}:zm={bool(zero_mode)}"
-            )
-        zm = getattr(self, "zero_mode", False) if zero_mode is None else bool(zero_mode)
-        return f"{self._CACHE_PREFIX}:zm={zm}"
+        prefix = type(self).__dict__.get("_CACHE_PREFIX")
+        if prefix is not None:
+            return f"{prefix}:zm={self.zero_mode}"
+        cls = type(self)
+        return f"custom:{cls.__module__}.{cls.__qualname__}:{id(self)}"
 
     def __add__(self, other: SpectralKernel) -> SumSpectrum:
         if not isinstance(other, SpectralKernel):
@@ -512,13 +503,12 @@ class MaternSpectrum(SpectralKernel):
     def summarize(self) -> dict[str, float]:
         return {**super().summarize(), "order": float(self.order)}
 
-    def cache_tag(self, zero_mode: bool | None = None) -> str:
-        zm = self.zero_mode if zero_mode is None else bool(zero_mode)
-        return (
-            f"canon:continuous_matern:zm={zm}"
-            if self.learn_order
-            else f"custom_matern:ord={round(float(self.order), 8)}:zm={zm}"
-        )
+    def cache_tag(self) -> str:
+        if type(self) is not MaternSpectrum:
+            return SpectralKernel.cache_tag(self)
+        if self.learn_order:
+            return f"canon:continuous_matern:zm={self.zero_mode}"
+        return f"custom_matern:ord={round(float(self.order), 8)}:zm={self.zero_mode}"
 
 
 class SquaredExpSpectrum(SpectralKernel):
@@ -645,7 +635,7 @@ class SumSpectrum(SpectralKernel):
         cursor = 0
         updated: list[SpectralKernel] = []
         for part in self.parts:
-            sz = len(part.param_names())
+            sz = part.n_hyperparams
             updated.append(part.from_unconstrained_hyperparams(p[cursor : cursor + sz]))
             cursor += sz
         return SumSpectrum(updated)
@@ -662,7 +652,7 @@ class SumSpectrum(SpectralKernel):
         cursor = 0
         acc = jnp.asarray(0.0, dtype=jnp.float64)
         for part in self.parts:
-            sz = len(part.param_names())
+            sz = part.n_hyperparams
             acc = acc + part.hyperprior_log_prob(p[cursor : cursor + sz])
             cursor += sz
         return acc
@@ -672,8 +662,10 @@ class SumSpectrum(SpectralKernel):
             f"p{i + 1}_{k}": v for i, p in enumerate(self.parts) for k, v in p.summarize().items()
         }
 
-    def cache_tag(self, zero_mode: bool | None = None) -> str:
-        return f"sum:({'+'.join(p.cache_tag(zero_mode) for p in self.parts)})"
+    def cache_tag(self) -> str:
+        if type(self) is not SumSpectrum:
+            return SpectralKernel.cache_tag(self)
+        return f"sum:({'+'.join(p.cache_tag() for p in self.parts)})"
 
 
 class CorrelatedFieldSpectrum(SpectralKernel):
@@ -750,10 +742,11 @@ class CorrelatedFieldSpectrum(SpectralKernel):
         _KernelParamSpec("xi_spec", "log_deviations", (0.0, 1.0), "identity", "rms_xi"),
     )
 
-    def cache_tag(self, zero_mode: bool | None = None) -> str:
-        zm = self.zero_mode if zero_mode is None else bool(zero_mode)
+    def cache_tag(self) -> str:
+        if type(self) is not CorrelatedFieldSpectrum:
+            return SpectralKernel.cache_tag(self)
         m, flex = int(self.log_deviations.shape[0]), round(float(self.flexibility), 8)
-        return f"custom_cf:m={m}:flex={flex}:zm={zm}"
+        return f"custom_cf:m={m}:flex={flex}:zm={self.zero_mode}"
 
 
 # =============================================================================
@@ -4902,10 +4895,10 @@ def _kernel_builders_from_spec(
     if hyperprior_override is not None:
         cache_tag = f"{cache_tag}:hp={id(hyperprior_override)}"
     return (
-        proto.from_unconstrained,
+        proto.from_unconstrained_hyperparams,
         prior_fn,
         proto.param_names(),
-        proto.unconstrained_init(),
+        proto.unconstrain_hyperparams(),
         cache_tag,
     )
 
