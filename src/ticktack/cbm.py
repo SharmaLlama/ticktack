@@ -6,21 +6,24 @@ for graph topology and structural metadata:
 
 * :class:`Topology`: directed carbon-cycle graph metadata with Tarjan strongly
   connected components (SCC) verification and hemisphere-aware box lookup.
-* :class:`CarbonBoxModel`: abstract base interface defining ``rate_matrix_K()``,
-  ``sink_rates()``, ``matrix_A()``, ``production_vector()``, ``reservoir_masses()``,
-  ``flux_matrix()``, ``steady_state_c14()``, single global tropospheric
-  ``reference_specific_activity()`` (preserving inter-hemispheric gradients),
-  and closed-form Güttler ``production_for_target_c14()``.
-* :class:`FixedCBM`: fixed reservoir inventories, inter-box fluxes, and optional
-  sink rates.
-* :class:`BalancedCBM`: unconstrained Perron–Frobenius equilibrium flow-balance
-  chart ``theta = M_tie @ theta_free`` plus ``theta_tot = ln M_tot``, with optional
-  edge-symmetry tying and exact inverse ``from_masses_and_fluxes``.
-* :class:`ReversibleCBM`: detailed-balance symmetric-flux chart (unconstrained
-  ``ln M`` and undirected ``ln F_{i,j}``).
-* :class:`OpenCBM`: Perron–Frobenius inter-box exchange augmented with explicit
-  unconstrained ``log_sink_rates`` on open reservoirs (e.g. truncated shallow
-  models losing ``14C`` to the deep ocean).
+* :class:`CBMChart` (:class:`FixedChart`, :class:`BalancedChart`,
+  :class:`ReversibleChart`, :class:`OpenChart`): coordinate charts mapping
+  unconstrained JAX array leaves to physical LTI box transfer rates, steady-state
+  ``12C`` inventories, and irreversible open sink rates.
+* :class:`CarbonBoxModel`: concrete PyTree combining a static :class:`Topology`
+  with a :class:`CBMChart` (plus :meth:`~CarbonBoxModel.from_boxes` reservoir-name
+  construction, chart conversions, ``steady_state_c14()``, single global
+  tropospheric ``reference_specific_activity()`` preserving inter-hemispheric
+  gradients, and closed-form Güttler ``production_for_target_c14()``).
+* :class:`FixedCBM`, :class:`BalancedCBM`, :class:`ReversibleCBM`, and
+  :class:`OpenCBM`: compatible ``CarbonBoxModel`` subclasses wrapping the
+  corresponding :class:`CBMChart` without duplicating PyTree leaves. In
+  :class:`ReversibleChart` / :class:`ReversibleCBM`, ``n`` unconstrained
+  ``log_masses`` (``ln M_i``) and ``|E_undir|`` undirected ``log_sym_fluxes``
+  (``ln F_{ij}``) enforce detailed balance up to a 1D simultaneous mass–flux
+  scale gauge ``(1_n, 1_{|E_undir|})``.
+* :class:`SubspaceCBM` (:class:`FisherSubspaceCBM`): Perron–Frobenius CBM
+  restricted to a linear log-rate subspace ``ln k_free = ln k_0 + B @ alpha``.
 * :class:`EffectiveCBM`: minimal gauge-free ``K``-box mammillary model
   (``Stratosphere <-> Troposphere <-> {Sink_1, ..., Sink_{K-2}}``, ``K >= 2``)
   with fixed ``eta_strat = 0.70``, calibrated deep-ocean loss rate on the slowest
@@ -78,9 +81,7 @@ def _normalize_hemisphere(h: str | None) -> str:
         return "north"
     if val in ("south", "s", "sh"):
         return "south"
-    raise ValueError(
-        f"Invalid hemisphere {h!r}; expected 'none', 'north', or 'south'."
-    )
+    raise ValueError(f"Invalid hemisphere {h!r}; expected 'none', 'north', or 'south'.")
 
 
 def tarjan_scc(
@@ -213,9 +214,7 @@ def _build_tie_matrix(
     if tie_matrix is not None:
         arr = np.asarray(tie_matrix, dtype=np.float64)
         if arr.ndim != 2 or arr.shape[0] != n_edges:
-            raise ValueError(
-                f"tie_matrix must have shape ({n_edges}, p_free), got {arr.shape}."
-            )
+            raise ValueError(f"tie_matrix must have shape ({n_edges}, p_free), got {arr.shape}.")
         return tuple(tuple(float(v) for v in row) for row in arr)
 
     if symmetric_edge_groups is None:
@@ -334,9 +333,7 @@ class Topology(eqx.Module):
             seen_edges.add((s, d))
 
         if trop_box_indices is None:
-            trop_t = tuple(
-                i for i, name in enumerate(names) if "trop" in name.lower()
-            )
+            trop_t = tuple(i for i, name in enumerate(names) if "trop" in name.lower())
         else:
             trop_t = tuple(int(i) for i in trop_box_indices)
         if not trop_t or any(i < 0 or i >= n for i in trop_t):
@@ -389,9 +386,7 @@ class Topology(eqx.Module):
     def check_strongly_connected(self) -> None:
         sccs = self.strongly_connected_components()
         if len(sccs) != 1:
-            comp_desc = [
-                [f"{i}:{self.box_names[i]}" for i in comp] for comp in sccs
-            ]
+            comp_desc = [[f"{i}:{self.box_names[i]}" for i in comp] for comp in sccs]
             raise ValueError(
                 f"Carbon-box topology is not strongly connected ({len(sccs)} SCCs: {comp_desc})."
             )
@@ -445,38 +440,63 @@ class Topology(eqx.Module):
 
 
 class CBMChart(zdx.Base):
-    """Abstract coordinate chart mapping unconstrained JAX leaves to LTI box rates."""
+    """Abstract coordinate chart mapping unconstrained JAX leaves to LTI box quantities.
+
+    Subclasses store unconstrained ``float64`` JAX array parameters as PyTree leaves
+    and map them to directed inter-box transfer rates (``yr^-1``), steady-state
+    ``12C`` reservoir inventories (``GtC``), and non-negative open sink loss rates
+    (``yr^-1``) on a compatible :class:`Topology`.
+
+    Attributes
+    ----------
+    is_detailed_balance : ClassVar[bool]
+        ``True`` when the chart guarantees detailed balance ``M_i k_{i->j} = M_j k_{j->i}``
+        across all parameter values (enabling symmetric real-spectrum solvers).
+    is_subspace : ClassVar[bool]
+        ``True`` when the chart restricts rates to a low-dimensional linear subspace.
+    """
 
     is_detailed_balance: ClassVar[bool] = False
     is_subspace: ClassVar[bool] = False
 
+    def _validate_topology(self, topology: Topology) -> None:
+        """Validate structural compatibility between ``self`` and ``topology``."""
+        pw = getattr(self, "prod_weights", None)
+        if pw is not None:
+            pw_len = int(pw.shape[0]) if hasattr(pw, "shape") else len(pw)
+            if pw_len != len(topology.prod_box_indices):
+                raise ValueError(
+                    f"{type(self).__name__} prod_weights length ({pw_len}) does not match "
+                    f"topology.prod_box_indices length ({len(topology.prod_box_indices)})."
+                )
+
     def edge_rates(self, topology: Topology) -> jax.Array:
-        """Directed inter-box transfer rates ``k_{src->dst}`` (``yr^-1``)."""
+        """Directed inter-box transfer rates ``k_{src->dst}`` in ``yr^-1``, shape ``(n_edges,)``."""
         raise NotImplementedError
 
     def rate_matrix_K(self, topology: Topology) -> jax.Array:
-        """Column-conserving inter-box transfer matrix ``K`` (``yr^-1``)."""
+        """Column-conserving inter-box transfer matrix ``K`` in ``yr^-1``, shape ``(n_boxes, n_boxes)``."""
         return _assemble_rate_matrix(
             topology.n_boxes, topology.edges_src, topology.edges_dst, self.edge_rates(topology)
         )
 
     def reservoir_masses(self, topology: Topology) -> jax.Array:
-        """Steady-state ``12C`` reservoir inventories ``M_0`` in ``GtC``."""
+        """Steady-state ``12C`` reservoir inventories ``M_0`` in ``GtC``, shape ``(n_boxes,)``."""
         raise NotImplementedError
 
     def sink_rates(self, topology: Topology, decay_rate: float = DECAY_CAMBRIDGE) -> jax.Array:
-        """Non-negative open reservoir loss rates ``k_sink`` (``yr^-1``)."""
+        """Non-negative open reservoir loss rates ``k_sink`` in ``yr^-1``, shape ``(n_boxes,)``."""
         return jnp.zeros((topology.n_boxes,), dtype=jnp.float64)
 
     def production_vector(self, topology: Topology) -> jax.Array:
-        """Normalized cosmic-ray ``14C`` production allocation ``b`` summing to 1."""
+        """Normalized cosmic-ray ``14C`` production allocation ``b`` summing to 1, shape ``(n_boxes,)``."""
         pw = getattr(self, "prod_weights", None)
         if pw is None:
             raise NotImplementedError
         return _make_prod_vector(topology.n_boxes, topology.prod_box_indices, pw)
 
     def relative_reservoir_masses(self, topology: Topology) -> jax.Array:
-        """Reservoir ``12C`` inventories normalized by global tropospheric mass."""
+        """Dimensionless ``12C`` inventories normalized by global tropospheric mass, shape ``(n_boxes,)``."""
         m_0 = self.reservoir_masses(topology)
         return m_0 / jnp.sum(m_0[jnp.asarray(topology.trop_box_indices, dtype=jnp.int32)])
 
@@ -488,6 +508,19 @@ class CBMChart(zdx.Base):
     def param_specs(self, prefix: str = "cbm", *, prior_sd: float | None = None) -> tuple[Any, ...]:
         """Default :class:`~ticktack.likelihood.ParamSpec` tuple for inference."""
         return ()
+
+
+def _require_topology(topology: Any) -> Topology:
+    if not isinstance(topology, Topology):
+        raise TypeError(f"topology must be a Topology, got {type(topology).__name__}.")
+    return topology
+
+
+def _require_decay_rate(decay_rate: float) -> float:
+    val = float(decay_rate)
+    if not math.isfinite(val) or val < 0.0:
+        raise ValueError(f"decay_rate must be finite and >= 0, got {decay_rate!r}.")
+    return val
 
 
 def _require_prior_sd(prior_sd: float | None) -> float:
@@ -514,33 +547,71 @@ def _lookup_box(k: Any, lookup: dict[Any, int]) -> int:
 def _resolve_named_vector(
     spec: Mapping[Any, float] | Sequence[float] | None, n: int, lookup: dict[Any, int]
 ) -> np.ndarray | None:
-    if spec is None or not isinstance(spec, Mapping):
-        arr = None if spec is None else np.asarray(spec, dtype=np.float64)
-        if arr is not None and arr.shape != (n,):
+    if spec is None:
+        return None
+    if not isinstance(spec, Mapping):
+        arr = np.asarray(spec, dtype=np.float64)
+        if arr.shape != (n,):
             raise ValueError(f"Sequence length {arr.shape} must match reservoir count ({n},).")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("Named vector values must be finite.")
         return arr
     arr = np.zeros(n, dtype=np.float64)
+    seen_indices: set[int] = set()
     for k, v in spec.items():
-        arr[_lookup_box(k, lookup)] = float(v)
+        idx = _lookup_box(k, lookup)
+        if idx in seen_indices:
+            raise ValueError(f"Duplicate reservoir key {k!r} in named vector.")
+        val = float(v)
+        if not math.isfinite(val):
+            raise ValueError(f"Non-finite value {v!r} for reservoir {k!r}.")
+        seen_indices.add(idx)
+        arr[idx] = val
     return arr
 
 
+def _extract_prod_weights(cbm: CarbonBoxModel) -> Sequence[float] | jax.Array:
+    pw = getattr(cbm, "prod_weights", None)
+    if pw is not None:
+        return pw
+    if isinstance(cbm, EffectiveCBM):
+        return (cbm.eta_strat, 1.0 - cbm.eta_strat)
+    return cbm.production_vector()
+
+
 class CarbonBoxModel(zdx.Base):
-    """Concrete immutable ``zodiax`` Carbon Box Model combining :class:`Topology` and :class:`CBMChart`."""
+    """Concrete immutable ``zodiax`` Carbon Box Model combining :class:`Topology` and :class:`CBMChart`.
+
+    Parameters
+    ----------
+    topology : Topology
+        Static directed carbon-cycle reservoir graph metadata.
+    chart : CBMChart
+        Coordinate chart mapping unconstrained JAX array leaves to physical box
+        inventories (``GtC``), transfer rates (``yr^-1``), and sink rates (``yr^-1``).
+    decay_rate : float, optional
+        Radiocarbon decay constant ``lambda_14`` in ``yr^-1`` (``>= 0``, finite;
+        defaults to ``DECAY_CAMBRIDGE = ln(2) / 5730 yr^-1``).
+    """
 
     topology: Topology = eqx.field(static=True)
     chart: CBMChart | None = None
     decay_rate: float = eqx.field(static=True, default=DECAY_CAMBRIDGE)
 
     def __init__(self, topology: Topology, chart: CBMChart, *, decay_rate: float = DECAY_CAMBRIDGE):
+        _require_topology(topology)
         if not isinstance(chart, CBMChart):
             raise TypeError(f"chart must be a CBMChart, got {type(chart).__name__}.")
-        self.topology, self.chart, self.decay_rate = topology, chart, float(decay_rate)
+        decay_val = _require_decay_rate(decay_rate)
+        chart._validate_topology(topology)
+        self.topology = topology
+        self.chart = chart
+        self.decay_rate = decay_val
 
     def __getattr__(self, name: str) -> Any:
         if not (name.startswith("__") and name.endswith("__")):
             chart = self.__dict__.get("chart")
-            if chart is not None and hasattr(chart, name):
+            if isinstance(chart, CBMChart) and hasattr(chart, name):
                 return getattr(chart, name)
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
@@ -552,10 +623,12 @@ class CarbonBoxModel(zdx.Base):
         *,
         require_scc: bool = False,
     ) -> None:
+        _require_topology(topology)
+        decay_val = _require_decay_rate(decay_rate)
         if require_scc:
             topology.check_strongly_connected()
         self.topology = topology
-        self.decay_rate = float(decay_rate)
+        self.decay_rate = decay_val
         self.prod_weights = _resolve_prod_weights(topology, prod_weights)
 
     @property
@@ -566,7 +639,7 @@ class CarbonBoxModel(zdx.Base):
     def is_detailed_balance(self) -> bool:
         return (
             bool(self.chart.is_detailed_balance)
-            if self.chart is not None
+            if isinstance(self.chart, CBMChart)
             else isinstance(self, EffectiveCBM)
         )
 
@@ -574,13 +647,13 @@ class CarbonBoxModel(zdx.Base):
     def is_subspace(self) -> bool:
         return (
             bool(self.chart.is_subspace)
-            if self.chart is not None
+            if isinstance(self.chart, CBMChart)
             else isinstance(self, SubspaceCBM)
         )
 
     def active_parameter_mask(self) -> np.ndarray:
         """Boolean mask over flattened inexact JAX leaves excluding gauge coordinates."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.active_parameter_mask()
         leaves = jax.tree_util.tree_leaves(eqx.filter(self, eqx.is_inexact_array))
         return np.ones((sum(int(x.size) for x in leaves),), dtype=bool)
@@ -590,13 +663,13 @@ class CarbonBoxModel(zdx.Base):
 
     def edge_rates(self) -> jax.Array:
         """Directed inter-box transfer rates ``k_{src->dst}`` (``yr^-1``)."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.edge_rates(self.topology)
         raise NotImplementedError
 
     def rate_matrix_K(self) -> jax.Array:
         """Column-conserving inter-box transfer matrix ``K`` (``yr^-1``)."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.rate_matrix_K(self.topology)
         return _assemble_rate_matrix(
             self.n_boxes,
@@ -607,7 +680,7 @@ class CarbonBoxModel(zdx.Base):
 
     def sink_rates(self) -> jax.Array:
         """Non-negative open reservoir loss rates ``k_sink`` (``yr^-1``)."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.sink_rates(self.topology, self.decay_rate)
         return jnp.zeros((self.n_boxes,), dtype=jnp.float64)
 
@@ -622,24 +695,22 @@ class CarbonBoxModel(zdx.Base):
 
     def production_vector(self) -> jax.Array:
         """Normalized cosmic-ray ``14C`` production allocation ``b`` summing to 1."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.production_vector(self.topology)
         prod_weights = getattr(self, "prod_weights", None)
         if prod_weights is None:
             raise NotImplementedError
-        return _make_prod_vector(
-            self.n_boxes, self.topology.prod_box_indices, prod_weights
-        )
+        return _make_prod_vector(self.n_boxes, self.topology.prod_box_indices, prod_weights)
 
     def reservoir_masses(self) -> jax.Array:
         """Steady-state ``12C`` reservoir inventories ``M_0`` in ``GtC``."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.reservoir_masses(self.topology)
         raise NotImplementedError
 
     def relative_reservoir_masses(self) -> jax.Array:
         """Reservoir ``12C`` inventories normalized by global tropospheric mass ``sum_{j in T} M_{0,j}``."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.relative_reservoir_masses(self.topology)
         trop_idx = jnp.asarray(self.topology.trop_box_indices, dtype=jnp.int32)
         m_0 = self.reservoir_masses()
@@ -677,9 +748,7 @@ class CarbonBoxModel(zdx.Base):
         alpha_unit: ArrayLike = ALPHA_ATOMS_CM2_S_TO_KG_YR,
     ) -> jax.Array:
         """Equilibrium ``14C`` inventory ``y_ss = alpha_unit * q_std * (-A)^{-1} b`` (``kg``)."""
-        scale = jnp.asarray(alpha_unit, dtype=jnp.float64) * jnp.asarray(
-            q_std, dtype=jnp.float64
-        )
+        scale = jnp.asarray(alpha_unit, dtype=jnp.float64) * jnp.asarray(q_std, dtype=jnp.float64)
         rhs = scale * self.production_vector()
         return jnp.linalg.solve(-self.matrix_A(), rhs)
 
@@ -753,18 +822,26 @@ class CarbonBoxModel(zdx.Base):
         return CarbonBoxModel(self.topology, chart, decay_rate=self.decay_rate)
 
     def to_fixed(self) -> CarbonBoxModel:
-        """Materialize the current box state into a :class:`FixedChart` :class:`CarbonBoxModel`."""
-        masses, src = self.reservoir_masses(), np.asarray(self.topology.edges_src, dtype=np.int64)
-        pw = self.production_vector() if (pw := getattr(self, "prod_weights", None)) is None else pw
-        return CarbonBoxModel(
-            self.topology,
-            _chart_from_state(
-                self.topology,
-                (masses, self.edge_rates() * masses[src], pw, self.sink_rates()),
-                "fixed",
-            ),
-            decay_rate=self.decay_rate,
+        """Materialize the current box state into a :class:`FixedChart` :class:`CarbonBoxModel`.
+
+        Pure-JAX implementation without host NumPy conversion on array leaves, so
+        ``cbm.to_fixed()`` can be called safely inside ``jax.jit`` and ``eqx.filter_jit``.
+        """
+        masses = self.reservoir_masses()
+        src = np.asarray(self.topology.edges_src, dtype=np.int64)
+        edge_fluxes = (
+            jnp.zeros((0,), dtype=jnp.float64)
+            if self.topology.n_edges == 0
+            else self.edge_rates() * masses[src]
         )
+        chart = FixedChart(
+            self.topology,
+            masses,
+            edge_fluxes,
+            prod_weights=_extract_prod_weights(self),
+            sink_rates=self.sink_rates(),
+        )
+        return CarbonBoxModel(self.topology, chart, decay_rate=self.decay_rate)
 
     def to_balanced(
         self,
@@ -772,49 +849,40 @@ class CarbonBoxModel(zdx.Base):
         tie_matrix: ArrayLike | None = None,
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
     ) -> CarbonBoxModel:
-        """Project a closed CBM onto an equivalent :class:`BalancedChart` :class:`CarbonBoxModel`."""
-        if isinstance(self, SubspaceCBM) and tie_matrix is None and symmetric_edge_groups is None:
-            return CarbonBoxModel(
-                self.topology,
-                BalancedChart(
+        """Project a closed Kirchhoff-balanced CBM onto an equivalent :class:`BalancedChart` model."""
+        if tie_matrix is None and symmetric_edge_groups is None:
+            if isinstance(self.chart, BalancedChart):
+                return CarbonBoxModel(self.topology, self.chart, decay_rate=self.decay_rate)
+            if isinstance(self, SubspaceCBM):
+                chart = BalancedChart(
                     self.topology,
                     self.log_rates_free(),
                     self.base_log_total_mass,
                     prod_weights=self.prod_weights,
                     tie_matrix=self.tie_matrix_rows,
-                ),
-                decay_rate=self.decay_rate,
-            )
-        masses, src = self.reservoir_masses(), np.asarray(self.topology.edges_src, dtype=np.int64)
-        pw = self.production_vector() if (pw := getattr(self, "prod_weights", None)) is None else pw
-        if tie_matrix is None and symmetric_edge_groups is None:
-            return CarbonBoxModel(
-                self.topology,
-                _chart_from_state(
-                    self.topology,
-                    (masses, self.edge_rates() * masses[src], pw, self.sink_rates()),
-                    "balanced",
-                ),
-                decay_rate=self.decay_rate,
-            )
-        if np.any(np.asarray(self.sink_rates(), dtype=np.float64) > 0.0):
+                )
+                return CarbonBoxModel(self.topology, chart, decay_rate=self.decay_rate)
+
+        sinks = self.sink_rates()
+        if not isinstance(sinks, jax.core.Tracer) and np.any(
+            np.asarray(sinks, dtype=np.float64) > 0.0
+        ):
             raise ValueError("balanced chart does not allow positive sinks; use chart='open'.")
-        return CarbonBoxModel(
+        masses = self.reservoir_masses()
+        src = np.asarray(self.topology.edges_src, dtype=np.int64)
+        chart = BalancedChart.from_masses_and_fluxes(
             self.topology,
-            BalancedChart.from_masses_and_fluxes(
-                self.topology,
-                masses,
-                self.edge_rates() * masses[src],
-                prod_weights=pw,
-                tie_matrix=tie_matrix,
-                symmetric_edge_groups=symmetric_edge_groups,
-            ),
-            decay_rate=self.decay_rate,
+            masses,
+            self.edge_rates() * masses[src],
+            prod_weights=_extract_prod_weights(self),
+            tie_matrix=tie_matrix,
+            symmetric_edge_groups=symmetric_edge_groups,
         )
+        return CarbonBoxModel(self.topology, chart, decay_rate=self.decay_rate)
 
     def param_specs(self, prefix: str = "cbm", **kwargs: Any) -> tuple[Any, ...]:
         """Return default :class:`~ticktack.likelihood.ParamSpec` tuple for ``ParameterSpace``."""
-        if self.chart is not None:
+        if isinstance(self.chart, CBMChart):
             return self.chart.param_specs(prefix=prefix, **kwargs)
         if isinstance(self, SubspaceCBM) and self.n_modes > 0:
             from .likelihood import ParamSpec
@@ -831,7 +899,9 @@ class CarbonBoxModel(zdx.Base):
 
     def summary(self) -> str:
         """Format a plain-text reservoir summary table (mass, residence time, sink, steady-state d14C)."""
-        cname = type(self.chart).__name__ if self.chart is not None else type(self).__name__
+        cname = (
+            type(self.chart).__name__ if isinstance(self.chart, CBMChart) else type(self).__name__
+        )
         masses = np.asarray(self.reservoir_masses())
         taus = np.asarray(self.residence_times())
         sinks = np.asarray(self.sink_rates())
@@ -861,71 +931,206 @@ class CarbonBoxModel(zdx.Base):
         *,
         production: Mapping[Any, float] | Sequence[float] | None = None,
         sinks: Mapping[Any, float] | Sequence[float] | None = None,
+        troposphere: Any | Sequence[Any] | None = None,
         chart: Literal["fixed", "balanced", "reversible", "open"] = "fixed",
         decay_rate: float = DECAY_CAMBRIDGE,
     ) -> CarbonBoxModel:
-        """Construct a :class:`CarbonBoxModel` by reservoir name rather than 0-based indices."""
+        """Construct a :class:`CarbonBoxModel` by reservoir name rather than 0-based indices.
+
+        Parameters
+        ----------
+        masses : Mapping[key, float] | Sequence[tuple[key, float]]
+            Steady-state ``12C`` reservoir inventories ``M_0`` in ``GtC`` (strictly
+            positive, finite). Keys must be either all ``str`` reservoir names
+            (single-globe topology) or all ``(name, hemisphere)`` 2-tuples where
+            ``hemisphere`` is ``"north"`` or ``"south"``.
+        fluxes : Sequence[tuple[key, key, float]]
+            Directed gross steady-state ``12C`` inter-box fluxes
+            ``(src_key, dst_key, flux_gtc_yr)`` in ``GtC yr^-1`` (strictly positive,
+            finite; distinct from ``sinks``, which are first-order rates in ``yr^-1``).
+            For ``chart`` in ``{"balanced", "open", "reversible"}``, gross outflow must
+            match gross inflow at every reservoir within ``rtol=1e-6, atol=1e-9``;
+            ``"reversible"`` additionally requires ``F_{ij} == F_{ji}``.
+        production : Mapping[key, float] | Sequence[float], optional
+            Non-negative cosmic-ray ``14C`` production weights (dimensionless;
+            normalized internally to sum to ``1.0``), given either as a mapping by
+            reservoir key or as a sequence of length ``n_boxes``. When omitted,
+            equal weights are assigned across reservoirs matching ``"strat"`` and
+            the ``troposphere`` reservoir(s).
+        sinks : Mapping[key, float] | Sequence[float], optional
+            Non-negative first-order irreversible open-system loss rates ``k_sink``
+            in ``yr^-1`` (not gross fluxes in ``GtC yr^-1``), given either as a
+            mapping by reservoir key or as a sequence of length ``n_boxes``.
+            Defaults to zero across all reservoirs.
+        troposphere : key | Sequence[key], optional
+            Reservoir key (or sequence of keys) defining the global reference
+            tropospheric reservoir(s) ``T`` used to normalize ``R_ref`` and
+            ``Delta14C``. Defaults to all reservoirs whose name contains ``"trop"``
+            (case-insensitive); must be passed explicitly when no reservoir name
+            contains ``"trop"``.
+        chart : {"fixed", "balanced", "reversible", "open"}, optional
+            Coordinate chart class to instantiate (default ``"fixed"``).
+        decay_rate : float, optional
+            Radiocarbon decay constant ``lambda_14`` in ``yr^-1`` (``>= 0``, finite;
+            default ``DECAY_CAMBRIDGE``).
+
+        Returns
+        -------
+        CarbonBoxModel
+            Concrete :class:`CarbonBoxModel` pairing the constructed :class:`Topology`
+            and :class:`CBMChart`.
+        """
         items = list(masses.items()) if isinstance(masses, Mapping) else list(masses)
-        if not items or any(float(m) <= 0.0 for _, m in items):
-            raise ValueError("masses must be non-empty with strictly positive values.")
-        has_hemi, names, hemis, lookup = isinstance(items[0][0], tuple), [], [], {}
-        if not all(
-            (isinstance(rk, tuple) and len(rk) == 2 and isinstance(rk[0], str))
-            if has_hemi
-            else isinstance(rk, str)
-            for rk, _ in items
-        ):
-            raise ValueError(
-                "Reservoir keys must be either all str names or all (name: str, hemisphere) 2-tuples."
-            )
-        for idx, (rk, _) in enumerate(items):
-            ck = _box_norm_key(rk)
-            if ck in lookup:
-                raise ValueError(f"Duplicate reservoir key {rk!r}.")
-            lookup[ck] = lookup[rk] = idx
-            names.append(str(rk[0]) if has_hemi else str(rk))
-            hemis.append(_normalize_hemisphere(rk[1]) if has_hemi else "none")
-        m_arr = np.asarray([float(m) for _, m in items], dtype=np.float64)
-        if any(float(f) <= 0.0 for _, _, f in fluxes):
-            raise ValueError("All edge fluxes must be > 0.")
+        if not items:
+            raise ValueError("masses must be non-empty with finite strictly positive values.")
+        has_hemi, names, hemis, lookup = _parse_reservoir_items(items)
+        m_arr = np.asarray(
+            _require_finite_positive_1d([float(m) for _, m in items], len(names), "masses"),
+            dtype=np.float64,
+        )
+        flx_arr = np.asarray(
+            _require_finite_positive_1d([float(f) for _, _, f in fluxes], len(fluxes), "fluxes"),
+            dtype=np.float64,
+        )
         src_l = [_lookup_box(s_k, lookup) for s_k, _, _ in fluxes]
         dst_l = [_lookup_box(d_k, lookup) for _, d_k, _ in fluxes]
-        flx_l = [float(f) for _, _, f in fluxes]
+
+        trop_idx = _resolve_troposphere_indices(troposphere, names, has_hemi, lookup)
         p_arr = _resolve_named_vector(production, len(names), lookup)
         if p_arr is not None and (np.any(p_arr < 0.0) or float(np.sum(p_arr)) <= 0.0):
-            raise ValueError("production weights must be non-negative with positive sum.")
-        prod_idx = None if p_arr is None else tuple(int(i) for i in np.flatnonzero(p_arr > 0.0))
-        prod_w = None if p_arr is None or prod_idx is None else p_arr[list(prod_idx)]
+            raise ValueError(
+                "production weights must be finite, non-negative, and have positive sum."
+            )
+        prod_idx = (
+            tuple(i for i, bname in enumerate(names) if "strat" in bname.lower() or i in trop_idx)
+            if p_arr is None
+            else tuple(int(i) for i in np.flatnonzero(p_arr > 0.0))
+        )
+        prod_w = None if p_arr is None else p_arr[list(prod_idx)]
+
         s_vec = _resolve_named_vector(sinks, len(names), lookup)
         s_arr = np.zeros(len(names), dtype=np.float64) if s_vec is None else s_vec
         if np.any(s_arr < 0.0):
-            raise ValueError("sinks must be non-negative.")
+            raise ValueError("sinks must be finite and non-negative.")
+
         topo = Topology(
             names,
             src_l,
             dst_l,
             hemispheres=(tuple(hemis) if has_hemi else None),
             prod_box_indices=prod_idx,
+            trop_box_indices=trop_idx,
             check_scc=True,
         )
-        return cls(
-            topo,
-            _chart_from_state(topo, (m_arr, flx_l, prod_w, s_arr), chart),
-            decay_rate=decay_rate,
+        chart_obj = _chart_from_state(
+            topo, m_arr, flx_arr, chart, prod_weights=prod_w, sink_rates=s_arr
         )
+        return CarbonBoxModel(topo, chart_obj, decay_rate=decay_rate)
 
 
-def _chart_from_state(topo: Topology, data: tuple[Any, Any, Any, Any], chart: str) -> CBMChart:
-    m_arr, flx_l, prod_w, s_arr = data
-    has_sinks = bool(np.any(np.asarray(s_arr, dtype=np.float64) > 0.0))
+def _parse_reservoir_items(
+    items: Sequence[tuple[Any, Any]],
+) -> tuple[bool, list[str], list[str], dict[Any, int]]:
+    has_hemi = isinstance(items[0][0], tuple)
+    valid_keys = all(
+        (isinstance(rk, tuple) and len(rk) == 2 and isinstance(rk[0], str))
+        if has_hemi
+        else isinstance(rk, str)
+        for rk, _ in items
+    )
+    if not valid_keys:
+        raise ValueError(
+            "Reservoir keys must be either all str names or all (name: str, hemisphere) 2-tuples."
+        )
+    names: list[str] = []
+    hemis: list[str] = []
+    lookup: dict[Any, int] = {}
+    for idx, (rk, _) in enumerate(items):
+        ck = _box_norm_key(rk)
+        if ck in lookup:
+            raise ValueError(f"Duplicate reservoir key {rk!r}.")
+        lookup[ck] = lookup[rk] = idx
+        names.append(str(rk[0]) if has_hemi else str(rk))
+        hemis.append(_normalize_hemisphere(rk[1]) if has_hemi else "none")
+    return has_hemi, names, hemis, lookup
+
+
+def _resolve_troposphere_indices(
+    troposphere: Any | Sequence[Any] | None,
+    names: Sequence[str],
+    has_hemi: bool,
+    lookup: dict[Any, int],
+) -> tuple[int, ...]:
+    if troposphere is None:
+        trop_idx = tuple(i for i, bname in enumerate(names) if "trop" in bname.lower())
+        if not trop_idx:
+            raise ValueError(
+                "Could not infer tropospheric reservoir: no reservoir name contains 'trop'. "
+                "Pass troposphere=<reservoir_name> explicitly."
+            )
+        return trop_idx
+
+    is_single_hemi_key = (
+        has_hemi
+        and isinstance(troposphere, tuple)
+        and len(troposphere) == 2
+        and isinstance(troposphere[0], str)
+    )
+    raw_items = (
+        [troposphere]
+        if isinstance(troposphere, str)
+        or is_single_hemi_key
+        or not isinstance(troposphere, Sequence)
+        else list(troposphere)
+    )
+    resolved: list[int] = []
+    for item in raw_items:
+        if has_hemi and isinstance(item, str):
+            target = item.strip().lower()
+            matches = [i for i, bname in enumerate(names) if bname.strip().lower() == target]
+            if not matches:
+                raise KeyError(f"Unknown reservoir {item!r}.")
+            resolved.extend(matches)
+        else:
+            resolved.append(_lookup_box(item, lookup))
+    if not resolved or len(set(resolved)) != len(resolved):
+        raise ValueError(
+            f"troposphere must specify one or more unique valid reservoirs, got {troposphere!r}."
+        )
+    return tuple(resolved)
+
+
+def _chart_from_state(
+    topo: Topology,
+    masses: ArrayLike,
+    edge_fluxes: ArrayLike,
+    chart: str,
+    *,
+    prod_weights: Sequence[float] | ArrayLike | None = None,
+    sink_rates: ArrayLike | None = None,
+) -> CBMChart:
+    """Instantiate a :class:`CBMChart` of type ``chart`` from explicit physical state."""
     if chart == "fixed":
-        return FixedChart(topo, m_arr, flx_l, prod_weights=prod_w, sink_rates=s_arr)
+        return FixedChart(
+            topo, masses, edge_fluxes, prod_weights=prod_weights, sink_rates=sink_rates
+        )
+    has_sinks = sink_rates is not None and bool(
+        np.any(np.asarray(sink_rates, dtype=np.float64) > 0.0)
+    )
     if chart == "balanced" and not has_sinks:
-        return BalancedChart.from_masses_and_fluxes(topo, m_arr, flx_l, prod_weights=prod_w)
+        return BalancedChart.from_masses_and_fluxes(
+            topo, masses, edge_fluxes, prod_weights=prod_weights
+        )
     if chart == "reversible" and not has_sinks:
-        return ReversibleChart.from_masses_and_fluxes(topo, m_arr, flx_l, prod_weights=prod_w)
+        return ReversibleChart.from_masses_and_fluxes(
+            topo, masses, edge_fluxes, prod_weights=prod_weights
+        )
     if chart == "open":
-        return OpenChart.from_masses_and_fluxes(topo, m_arr, flx_l, s_arr, prod_weights=prod_w)
+        if sink_rates is None:
+            raise ValueError("'open' chart requires positive sink_rates.")
+        return OpenChart.from_masses_and_fluxes(
+            topo, masses, edge_fluxes, sink_rates, prod_weights=prod_weights
+        )
     if has_sinks and chart in ("balanced", "reversible"):
         raise ValueError(f"{chart!r} chart does not allow positive sinks; use chart='open'.")
     raise ValueError(
@@ -943,6 +1148,8 @@ def _resolve_prod_weights(
         m_p = len(topology.prod_box_indices)
         return (1.0 / m_p,) * m_p
     pw_arr = np.asarray(arg, dtype=np.float64)
+    if not np.all(np.isfinite(pw_arr)) or np.any(pw_arr < 0.0):
+        raise ValueError("prod_weights must be finite and non-negative.")
     if pw_arr.shape == (topology.n_boxes,):
         pw_arr = pw_arr[np.asarray(topology.prod_box_indices, dtype=np.int64)]
     if pw_arr.shape != (len(topology.prod_box_indices),):
@@ -967,7 +1174,36 @@ def _make_prod_vector(
 
 
 class FixedChart(CBMChart):
-    """Coordinate chart with directly specified reservoir masses, fluxes, and sink rates."""
+    """Coordinate chart with directly specified reservoir masses, fluxes, and sink rates.
+
+    Parameters
+    ----------
+    topology : Topology
+        Directed carbon-cycle reservoir graph metadata with ``n_boxes`` boxes and
+        ``n_edges`` positive-flux edges.
+    masses : ArrayLike
+        Steady-state ``12C`` reservoir inventories ``M_0`` in ``GtC``, shape ``(n_boxes,)``.
+    edge_fluxes : ArrayLike
+        Directed gross steady-state ``12C`` inter-box fluxes ``F_{src->dst}`` in
+        ``GtC yr^-1``, shape ``(n_edges,)``.
+    prod_weights : Sequence[float] | ArrayLike, optional
+        Non-negative cosmic-ray ``14C`` production weights (normalized internally to
+        sum to ``1.0``) of length ``len(topology.prod_box_indices)`` or ``n_boxes``.
+    sink_rates : ArrayLike, optional
+        First-order irreversible open-system loss rates ``k_sink`` in ``yr^-1``
+        (not gross fluxes in ``GtC yr^-1``), shape ``(n_boxes,)``. Defaults to zeros.
+
+    Attributes
+    ----------
+    masses : jax.Array
+        Reservoir ``12C`` inventories in ``GtC``, shape ``(n_boxes,)``.
+    edge_fluxes : jax.Array
+        Gross ``12C`` inter-box fluxes in ``GtC yr^-1``, shape ``(n_edges,)``.
+    sink_rates_arr : jax.Array
+        First-order open sink loss rates in ``yr^-1``, shape ``(n_boxes,)``.
+    prod_weights : tuple[float, ...]
+        Static normalized production weights across ``topology.prod_box_indices``.
+    """
 
     masses: jax.Array
     edge_fluxes: jax.Array
@@ -983,6 +1219,7 @@ class FixedChart(CBMChart):
         prod_weights: Sequence[float] | ArrayLike | None = None,
         sink_rates: ArrayLike | None = None,
     ):
+        _require_topology(topology)
         self.prod_weights = _resolve_prod_weights(topology, prod_weights)
         self.masses = jnp.asarray(masses, dtype=jnp.float64)
         self.edge_fluxes = jnp.asarray(edge_fluxes, dtype=jnp.float64)
@@ -990,7 +1227,10 @@ class FixedChart(CBMChart):
             self.sink_rates_arr = jnp.zeros((topology.n_boxes,), dtype=jnp.float64)
         else:
             self.sink_rates_arr = jnp.asarray(sink_rates, dtype=jnp.float64)
+        self._validate_topology(topology)
 
+    def _validate_topology(self, topology: Topology) -> None:
+        super()._validate_topology(topology)
         if self.masses.shape != (topology.n_boxes,):
             raise ValueError(
                 f"masses shape {self.masses.shape} does not match ({topology.n_boxes},)."
@@ -1091,6 +1331,48 @@ class FixedCBM(CarbonBoxModel):
         )
 
 
+def _require_finite_positive_1d(arr: ArrayLike, expected_len: int, name: str) -> jax.Array:
+    """Convert ``arr`` to a 1D ``float64`` JAX array and check concrete finite positivity."""
+    out = jnp.asarray(arr, dtype=jnp.float64)
+    if out.shape != (expected_len,):
+        raise ValueError(f"{name} must have shape ({expected_len},), got {out.shape}.")
+    if not isinstance(out, jax.core.Tracer):
+        np_arr = np.asarray(out, dtype=np.float64)
+        if not np.all(np.isfinite(np_arr)) or np.any(np_arr <= 0.0):
+            raise ValueError(f"{name} must be finite and strictly positive.")
+    return out
+
+
+def _prepare_masses_and_edge_fluxes(
+    topology: Topology,
+    masses: ArrayLike,
+    edge_fluxes: ArrayLike,
+) -> tuple[jax.Array, jax.Array]:
+    """Validate shapes and concrete positivity of ``(masses, edge_fluxes)``."""
+    _require_topology(topology)
+    m_arr = _require_finite_positive_1d(masses, topology.n_boxes, "masses")
+    f_raw = jnp.asarray(edge_fluxes, dtype=jnp.float64)
+    src = np.asarray(topology.edges_src, dtype=np.int64)
+    dst = np.asarray(topology.edges_dst, dtype=np.int64)
+    if f_raw.ndim != 2:
+        return m_arr, _require_finite_positive_1d(f_raw, topology.n_edges, "edge_fluxes")
+
+    if f_raw.shape != (topology.n_boxes, topology.n_boxes):
+        raise ValueError(
+            f"2D edge_fluxes must have shape ({topology.n_boxes}, {topology.n_boxes}), got {f_raw.shape}."
+        )
+    if not isinstance(f_raw, jax.core.Tracer):
+        f_mat = np.asarray(f_raw, dtype=np.float64)
+        if not np.all(np.isfinite(f_mat)) or np.any(f_mat < 0.0):
+            raise ValueError("2D edge_fluxes matrix must be finite and non-negative.")
+        edge_mask = np.zeros_like(f_mat, dtype=bool)
+        if topology.n_edges > 0:
+            edge_mask[src, dst] = True
+        if np.any(f_mat[~edge_mask] != 0.0):
+            raise ValueError("2D edge_fluxes matrix has non-zero entries outside topology edges.")
+    return m_arr, _require_finite_positive_1d(f_raw[src, dst], topology.n_edges, "edge_fluxes")
+
+
 def _invert_perron_chart(
     topology: Topology,
     masses: ArrayLike,
@@ -1098,14 +1380,26 @@ def _invert_perron_chart(
     tie_matrix: ArrayLike | None = None,
     symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Map balanced ``(masses, edge_fluxes)`` to ``(log_rates_free, log_total_mass)``."""
-    m_arr = jnp.asarray(masses, dtype=jnp.float64)
-    f_arr = jnp.asarray(edge_fluxes, dtype=jnp.float64)
+    """Map Kirchhoff-balanced ``(masses, edge_fluxes)`` to ``(log_rates_free, log_total_mass)``."""
+    m_arr, f_edges = _prepare_masses_and_edge_fluxes(topology, masses, edge_fluxes)
     src = np.asarray(topology.edges_src, dtype=np.int64)
-    if f_arr.ndim == 2:
-        dst = np.asarray(topology.edges_dst, dtype=np.int64)
-        f_arr = f_arr[src, dst]
-    log_k = jnp.log(f_arr / m_arr[src])
+    dst = np.asarray(topology.edges_dst, dtype=np.int64)
+
+    if not isinstance(f_edges, jax.core.Tracer):
+        f_np = np.asarray(f_edges, dtype=np.float64)
+        outflow = np.zeros((topology.n_boxes,), dtype=np.float64)
+        inflow = np.zeros((topology.n_boxes,), dtype=np.float64)
+        np.add.at(outflow, src, f_np)
+        np.add.at(inflow, dst, f_np)
+        if not np.allclose(outflow, inflow, rtol=1e-6, atol=1e-9):
+            max_imb = float(np.max(np.abs(outflow - inflow)))
+            raise ValueError(
+                f"edge_fluxes violate Kirchhoff steady-state flux balance "
+                f"(max |outflow - inflow| = {max_imb:.3e} GtC/yr); "
+                "use FixedChart for unbalanced fluxes."
+            )
+
+    log_k = jnp.log(f_edges / m_arr[src])
     log_m_tot = jnp.log(jnp.sum(m_arr))
     tie_rows = _build_tie_matrix(
         topology.n_edges,
@@ -1116,6 +1410,15 @@ def _invert_perron_chart(
         return log_k, log_m_tot
     M_tie = jnp.asarray(tie_rows, dtype=jnp.float64)
     theta_free, _, _, _ = jnp.linalg.lstsq(M_tie, log_k, rcond=None)
+    if not isinstance(log_k, jax.core.Tracer):
+        log_k_np = np.asarray(log_k, dtype=np.float64)
+        recon_np = np.asarray(M_tie @ theta_free, dtype=np.float64)
+        if not np.allclose(recon_np, log_k_np, rtol=1e-6, atol=1e-9):
+            max_err = float(np.max(np.abs(recon_np - log_k_np)))
+            raise ValueError(
+                f"Input (masses, edge_fluxes) are inconsistent with requested edge tying "
+                f"(max |M_tie @ theta_free - log_k| = {max_err:.3e})."
+            )
     return theta_free, log_m_tot
 
 
@@ -1136,9 +1439,7 @@ class _PerronCBM(CarbonBoxModel):
             symmetric_edge_groups=symmetric_edge_groups,
         )
         return (
-            self.topology.n_edges
-            if self.tie_matrix_rows is None
-            else len(self.tie_matrix_rows[0])
+            self.topology.n_edges if self.tie_matrix_rows is None else len(self.tie_matrix_rows[0])
         )
 
     def _free_log_rates(self) -> jax.Array:
@@ -1186,12 +1487,35 @@ class _PerronChart(CBMChart):
         tie_matrix: ArrayLike | None = None,
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
     ) -> int:
+        _require_topology(topology)
         topology.check_strongly_connected()
         self.prod_weights = _resolve_prod_weights(topology, prod_weights)
         self.tie_matrix_rows = _build_tie_matrix(
             topology.n_edges, tie_matrix=tie_matrix, symmetric_edge_groups=symmetric_edge_groups
         )
         return topology.n_edges if self.tie_matrix_rows is None else len(self.tie_matrix_rows[0])
+
+    def _validate_topology(self, topology: Topology) -> None:
+        super()._validate_topology(topology)
+        topology.check_strongly_connected()
+        if self.tie_matrix_rows is not None and len(self.tie_matrix_rows) != topology.n_edges:
+            raise ValueError(
+                f"tie_matrix row count ({len(self.tie_matrix_rows)}) does not match "
+                f"topology.n_edges ({topology.n_edges})."
+            )
+        expected_p = (
+            topology.n_edges
+            if self.tie_matrix_rows is None
+            else (len(self.tie_matrix_rows[0]) if self.tie_matrix_rows else 0)
+        )
+        if self.log_rates_free.shape != (expected_p,):  # type: ignore[attr-defined]
+            raise ValueError(
+                f"log_rates_free must have shape ({expected_p},), got {self.log_rates_free.shape}."  # type: ignore[attr-defined]
+            )
+        if self.log_total_mass.shape != ():  # type: ignore[attr-defined]
+            raise ValueError(
+                f"log_total_mass must have scalar shape (), got {self.log_total_mass.shape}."  # type: ignore[attr-defined]
+            )
 
     def edge_log_rates(self) -> jax.Array:
         lr = self.log_rates_free  # type: ignore[attr-defined]
@@ -1232,7 +1556,43 @@ class _PerronChart(CBMChart):
 
 
 class BalancedChart(_PerronChart):
-    """Unconstrained equilibrium flow-balanced Perron–Frobenius coordinate chart."""
+    """Unconstrained equilibrium flow-balanced Perron–Frobenius coordinate chart.
+
+    Maps unconstrained free log transfer rates ``log_rates_free`` via
+    ``ln k = M_tie @ log_rates_free`` to strictly positive donor-controlled rates
+    ``k_{src->dst} = exp(ln k)`` (``yr^-1``), solving for the unique positive
+    Perron–Frobenius stationary simplex vector ``K @ pi = 0`` so Kirchhoff ``12C``
+    mass balance ``sum_j F_{ij} == sum_j F_{ji}`` holds identically on any strongly
+    connected :class:`Topology`.
+
+    Parameters
+    ----------
+    topology : Topology
+        Strongly connected directed reservoir graph with ``n_edges`` edges.
+    log_rates_free : ArrayLike
+        Unconstrained free log transfer rates in ``ln(yr^-1)``, shape ``(p_free,)``
+        where ``p_free == n_edges`` when untied or ``tie_matrix.shape[1]`` when tied.
+    log_total_mass : ArrayLike
+        Log total ``12C`` inventory ``ln M_tot`` in ``ln(GtC)``, scalar shape ``()``.
+        Acts as a 1D global mass-scale gauge leaving ``matrix_A()``,
+        ``relative_reservoir_masses()``, and ``Delta14C`` invariant, and is excluded
+        from :meth:`active_parameter_mask` and :meth:`param_specs`.
+    prod_weights : Sequence[float] | ArrayLike, optional
+        Non-negative cosmic-ray ``14C`` production weights (normalized internally to
+        sum to ``1.0``) of length ``len(topology.prod_box_indices)`` or ``n_boxes``.
+    tie_matrix : ArrayLike, optional
+        Linear log-rate tying matrix ``M_tie`` of shape ``(n_edges, p_free)``.
+        Mutually exclusive with ``symmetric_edge_groups``.
+    symmetric_edge_groups : Sequence[Sequence[int]], optional
+        Groups of edge indices constrained to share equal transfer rates ``k_e``.
+
+    Attributes
+    ----------
+    log_rates_free : jax.Array
+        Free log transfer rates in ``ln(yr^-1)``, shape ``(p_free,)``.
+    log_total_mass : jax.Array
+        Scalar log total inventory ``ln M_tot`` in ``ln(GtC)``, shape ``()``.
+    """
 
     log_rates_free: jax.Array
     log_total_mass: jax.Array
@@ -1247,15 +1607,13 @@ class BalancedChart(_PerronChart):
         tie_matrix: ArrayLike | None = None,
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
     ):
-        expected_p = self._init_perron(topology, prod_weights, tie_matrix, symmetric_edge_groups)
+        self._init_perron(topology, prod_weights, tie_matrix, symmetric_edge_groups)
         self.log_rates_free = jnp.asarray(log_rates_free, dtype=jnp.float64)
         self.log_total_mass = jnp.asarray(log_total_mass, dtype=jnp.float64).reshape(())
-        if self.log_rates_free.shape != (expected_p,):
-            raise ValueError(
-                f"log_rates_free must have shape ({expected_p},), got {self.log_rates_free.shape}."
-            )
+        self._validate_topology(topology)
 
     def param_specs(self, prefix: str = "cbm", *, prior_sd: float | None = None) -> tuple[Any, ...]:
+        """Return :class:`~ticktack.likelihood.ParamSpec` for ``log_rates_free`` (excluding ``log_total_mass``)."""
         if self.log_rates_free.size == 0:
             return ()
         from .likelihood import ParamSpec
@@ -1280,6 +1638,26 @@ class BalancedChart(_PerronChart):
         tie_matrix: ArrayLike | None = None,
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
     ) -> BalancedChart:
+        """Construct a :class:`BalancedChart` from Kirchhoff-balanced ``(masses, edge_fluxes)``.
+
+        Parameters
+        ----------
+        topology : Topology
+            Strongly connected directed reservoir graph.
+        masses : ArrayLike
+            Steady-state ``12C`` inventories in ``GtC``, shape ``(n_boxes,)``.
+        edge_fluxes : ArrayLike
+            Gross steady-state ``12C`` fluxes in ``GtC yr^-1``, shape ``(n_edges,)``
+            or dense ``(n_boxes, n_boxes)``. Concrete inputs must satisfy Kirchhoff
+            flux balance ``outflow == inflow`` (``rtol=1e-6, atol=1e-9``) and, when
+            tying is supplied, ``M_tie @ theta_free == log_k`` (``rtol=1e-6, atol=1e-9``).
+        prod_weights : Sequence[float] | ArrayLike, optional
+            Cosmic-ray ``14C`` production weights.
+        tie_matrix : ArrayLike, optional
+            Optional ``(n_edges, p_free)`` log-rate tying matrix.
+        symmetric_edge_groups : Sequence[Sequence[int]], optional
+            Optional groups of equal-rate edge indices.
+        """
         theta_free, log_m_tot = _invert_perron_chart(
             topology, masses, edge_fluxes, tie_matrix, symmetric_edge_groups
         )
@@ -1437,9 +1815,7 @@ class SubspaceCBM(_PerronCBM):
         else:
             alpha_arr = jnp.asarray(alpha, dtype=jnp.float64)
             if alpha_arr.shape != (m_modes,):
-                raise ValueError(
-                    f"alpha must have shape ({m_modes},), got {alpha_arr.shape}."
-                )
+                raise ValueError(f"alpha must have shape ({m_modes},), got {alpha_arr.shape}.")
             self.alpha = alpha_arr
 
         self.base_log_rates_free = tuple(float(v) for v in base_arr)
@@ -1510,9 +1886,7 @@ class SubspaceCBM(_PerronCBM):
         max_modes = int(loadings.shape[1])
         m = int(n_modes)
         if not (1 <= m <= max_modes):
-            raise ValueError(
-                f"n_modes must satisfy 1 <= n_modes <= {max_modes}, got {m}."
-            )
+            raise ValueError(f"n_modes must satisfy 1 <= n_modes <= {max_modes}, got {m}.")
         return cls(
             topology=base_cbm.topology,
             base_log_rates_free=np.asarray(base_cbm.log_rates_free, dtype=np.float64),
@@ -1528,8 +1902,72 @@ class SubspaceCBM(_PerronCBM):
 FisherSubspaceCBM = SubspaceCBM
 
 
+def _symmetric_edge_pairs(topology: Topology) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Extract canonical ``(pair_forward_edge, pair_reverse_edge)`` indices on ``topology``."""
+    edge_lookup = {
+        (s, d): idx for idx, (s, d) in enumerate(zip(topology.edges_src, topology.edges_dst))
+    }
+    fwd_list: list[int] = []
+    rev_list: list[int] = []
+    visited: set[tuple[int, int]] = set()
+    for idx, (s, d) in enumerate(zip(topology.edges_src, topology.edges_dst)):
+        if (s, d) in visited:
+            continue
+        if (d, s) not in edge_lookup:
+            raise ValueError(
+                f"ReversibleCBM requires symmetric edge pairs; missing reverse edge ({d} -> {s})."
+            )
+        ridx = edge_lookup[(d, s)]
+        fwd_list.append(idx)
+        rev_list.append(ridx)
+        visited.add((s, d))
+        visited.add((d, s))
+    return tuple(fwd_list), tuple(rev_list)
+
+
 class ReversibleChart(CBMChart):
-    """Detailed-balance coordinate chart with symmetric undirected fluxes ``F_{ij} = F_{ji}``."""
+    """Detailed-balance coordinate chart with symmetric undirected fluxes ``F_{ij} = F_{ji}``.
+
+    Enforces exact detailed balance ``M_i k_{i->j} = M_j k_{j->i} = F_{ij}`` across
+    every undirected edge pair, so ``M^{-1/2} K M^{1/2}`` is symmetric negative
+    semidefinite and ``matrix_A()`` has strictly real negative eigenvalues for all
+    parameter values.
+
+    Because donor-controlled transfer rates satisfy ``k_{i->j} = F_{ij} / M_i``,
+    simultaneously shifting ``log_masses -> log_masses + c`` and
+    ``log_sym_fluxes -> log_sym_fluxes + c`` along the **1D global mass–flux scale
+    gauge** ``(1_{n_boxes}, 1_{n_pairs})`` scales all inventories and gross fluxes by
+    ``exp(c)`` while leaving ``edge_rates``, ``matrix_A()``,
+    ``relative_reservoir_masses()``, and ``Delta14C`` strictly invariant (zero Fisher
+    information). Pass ``include_masses=False`` to :meth:`param_specs` to freeze
+    ``log_masses`` and eliminate this 1D scale gauge, or regularize it with a finite
+    Gaussian prior ``prior_sd``.
+
+    Parameters
+    ----------
+    topology : Topology
+        Strongly connected symmetric reservoir graph where every directed edge
+        ``(i -> j)`` has a corresponding reverse edge ``(j -> i)``
+        (``n_edges == 2 * n_pairs``).
+    log_masses : ArrayLike
+        Log steady-state ``12C`` reservoir inventories ``ln M_i`` in ``ln(GtC)``,
+        shape ``(n_boxes,)``.
+    log_sym_fluxes : ArrayLike
+        Log symmetric gross ``12C`` exchange fluxes ``ln F_{ij}`` in
+        ``ln(GtC yr^-1)``, shape ``(n_pairs,)`` with ``n_pairs = n_edges // 2``.
+    prod_weights : Sequence[float] | ArrayLike, optional
+        Non-negative cosmic-ray ``14C`` production weights (normalized internally to
+        sum to ``1.0``) of length ``len(topology.prod_box_indices)`` or ``n_boxes``.
+
+    Attributes
+    ----------
+    log_masses : jax.Array
+        Log reservoir inventories in ``ln(GtC)``, shape ``(n_boxes,)``.
+    log_sym_fluxes : jax.Array
+        Log symmetric undirected fluxes in ``ln(GtC yr^-1)``, shape ``(n_pairs,)``.
+    pair_forward_edge, pair_reverse_edge : tuple[int, ...]
+        Static forward and reverse directed edge indices of length ``n_pairs``.
+    """
 
     is_detailed_balance: ClassVar[bool] = True
     log_masses: jax.Array
@@ -1546,44 +1984,33 @@ class ReversibleChart(CBMChart):
         *,
         prod_weights: Sequence[float] | ArrayLike | None = None,
     ):
+        _require_topology(topology)
         topology.check_strongly_connected()
         self.prod_weights = _resolve_prod_weights(topology, prod_weights)
-
-        edge_lookup = {
-            (s, d): idx
-            for idx, (s, d) in enumerate(zip(topology.edges_src, topology.edges_dst))
-        }
-        fwd_list: list[int] = []
-        rev_list: list[int] = []
-        visited: set[tuple[int, int]] = set()
-        for idx, (s, d) in enumerate(zip(topology.edges_src, topology.edges_dst)):
-            if (s, d) in visited:
-                continue
-            if (d, s) not in edge_lookup:
-                raise ValueError(
-                    f"ReversibleCBM requires symmetric edge pairs; missing reverse edge ({d} -> {s})."
-                )
-            ridx = edge_lookup[(d, s)]
-            fwd_list.append(idx)
-            rev_list.append(ridx)
-            visited.add((s, d))
-            visited.add((d, s))
-
-        self.pair_forward_edge = tuple(fwd_list)
-        self.pair_reverse_edge = tuple(rev_list)
-
+        self.pair_forward_edge, self.pair_reverse_edge = _symmetric_edge_pairs(topology)
         self.log_masses = jnp.asarray(log_masses, dtype=jnp.float64)
         self.log_sym_fluxes = jnp.asarray(log_sym_fluxes, dtype=jnp.float64)
+        self._validate_topology(topology)
+
+    def _validate_topology(self, topology: Topology) -> None:
+        super()._validate_topology(topology)
+        topology.check_strongly_connected()
+        fwd_expected, rev_expected = _symmetric_edge_pairs(topology)
+        if self.pair_forward_edge != fwd_expected or self.pair_reverse_edge != rev_expected:
+            raise ValueError(
+                "ReversibleChart edge-pair indices do not match topology (edges_src, edges_dst)."
+            )
         if self.log_masses.shape != (topology.n_boxes,):
             raise ValueError(
                 f"log_masses must have shape ({topology.n_boxes},), got {self.log_masses.shape}."
             )
-        if self.log_sym_fluxes.shape != (len(fwd_list),):
+        if self.log_sym_fluxes.shape != (len(fwd_expected),):
             raise ValueError(
-                f"log_sym_fluxes must have shape ({len(fwd_list)},), got {self.log_sym_fluxes.shape}."
+                f"log_sym_fluxes must have shape ({len(fwd_expected)},), got {self.log_sym_fluxes.shape}."
             )
 
     def reservoir_masses(self, topology: Topology) -> jax.Array:
+        del topology
         return jnp.exp(self.log_masses)
 
     def edge_fluxes(self) -> jax.Array:
@@ -1603,6 +2030,17 @@ class ReversibleChart(CBMChart):
     def param_specs(
         self, prefix: str = "cbm", *, prior_sd: float | None = None, include_masses: bool = True
     ) -> tuple[Any, ...]:
+        """Return :class:`~ticktack.likelihood.ParamSpec` entries for inference.
+
+        Notes
+        -----
+        When ``include_masses=True`` (default), both ``log_masses`` (shape ``(n_boxes,)``)
+        and ``log_sym_fluxes`` (shape ``(n_pairs,)``) are returned, which retains the
+        1D zero-Fisher global mass–flux scale direction ``(1_{n_boxes}, 1_{n_pairs})``
+        (``ln M_i -> ln M_i + c``, ``ln F_{ij} -> ln F_{ij} + c``), regularized only by
+        the Gaussian prior ``prior_sd``. Pass ``include_masses=False`` to hold
+        ``log_masses`` fixed and sample only the ``n_pairs`` gauge-free ``log_sym_fluxes``.
+        """
         from .likelihood import ParamSpec
 
         specs: list[Any] = []
@@ -1632,6 +2070,21 @@ class ReversibleChart(CBMChart):
         *,
         prod_weights: Sequence[float] | ArrayLike | None = None,
     ) -> ReversibleChart:
+        """Construct a :class:`ReversibleChart` from symmetric ``(masses, edge_fluxes)``.
+
+        Parameters
+        ----------
+        topology : Topology
+            Strongly connected symmetric reservoir graph.
+        masses : ArrayLike
+            Steady-state ``12C`` inventories in ``GtC``, shape ``(n_boxes,)``.
+        edge_fluxes : ArrayLike
+            Gross ``12C`` fluxes in ``GtC yr^-1``, shape ``(n_edges,)`` or dense
+            ``(n_boxes, n_boxes)``, satisfying ``F_{ij} == F_{ji}`` within
+            ``rtol=1e-6, atol=1e-9`` on concrete inputs.
+        prod_weights : Sequence[float] | ArrayLike, optional
+            Cosmic-ray ``14C`` production weights.
+        """
         return ReversibleCBM.from_masses_and_fluxes(
             topology, masses, edge_fluxes, prod_weights=prod_weights
         ).chart  # type: ignore[return-value]
@@ -1668,41 +2121,19 @@ class ReversibleCBM(CarbonBoxModel):
         prod_fractions: Sequence[float] | ArrayLike | None = None,
         decay_rate: float = DECAY_CAMBRIDGE,
     ) -> ReversibleCBM:
-        m_arr = jnp.asarray(masses, dtype=jnp.float64)
-        f_arr = jnp.asarray(edge_fluxes, dtype=jnp.float64)
-        if f_arr.ndim == 2:
-            src = np.asarray(topology.edges_src, dtype=np.int64)
-            dst = np.asarray(topology.edges_dst, dtype=np.int64)
-            f_arr = f_arr[src, dst]
+        m_arr, f_edges = _prepare_masses_and_edge_fluxes(topology, masses, edge_fluxes)
+        fwd_indices, rev_indices = _symmetric_edge_pairs(topology)
 
-        edge_lookup = {
-            (s, d): idx
-            for idx, (s, d) in enumerate(zip(topology.edges_src, topology.edges_dst))
-        }
-        fwd_indices: list[int] = []
-        rev_indices: list[int] = []
-        visited: set[tuple[int, int]] = set()
-        for idx, (s, d) in enumerate(zip(topology.edges_src, topology.edges_dst)):
-            if (s, d) in visited:
-                continue
-            if (d, s) not in edge_lookup:
-                raise ValueError(
-                    f"ReversibleCBM requires symmetric edge pairs; missing reverse edge ({d} -> {s})."
-                )
-            ridx = edge_lookup[(d, s)]
-            fwd_indices.append(idx)
-            rev_indices.append(ridx)
-            visited.add((s, d))
-            visited.add((d, s))
-
-        if not isinstance(f_arr, jax.core.Tracer) and fwd_indices:
-            f_np = np.asarray(f_arr, dtype=np.float64)
-            if not np.allclose(f_np[fwd_indices], f_np[rev_indices], rtol=1e-6, atol=1e-9):
+        if not isinstance(f_edges, jax.core.Tracer) and fwd_indices:
+            f_np = np.asarray(f_edges, dtype=np.float64)
+            if not np.allclose(
+                f_np[list(fwd_indices)], f_np[list(rev_indices)], rtol=1e-6, atol=1e-9
+            ):
                 raise ValueError(
                     "ReversibleChart requires equal forward and reverse fluxes F_{ij} == F_{ji}."
                 )
 
-        sym_f = f_arr[np.asarray(fwd_indices, dtype=np.int64)]
+        sym_f = f_edges[np.asarray(fwd_indices, dtype=np.int64)]
         return cls(
             topology=topology,
             log_masses=jnp.log(m_arr),
@@ -1714,7 +2145,49 @@ class ReversibleCBM(CarbonBoxModel):
 
 
 class OpenChart(_PerronChart):
-    """Perron–Frobenius coordinate chart augmented with open reservoir ``log_sink_rates``."""
+    """Perron–Frobenius coordinate chart augmented with open reservoir ``log_sink_rates``.
+
+    Combines conservative Perron–Frobenius inter-box ``12C`` circulation
+    (``log_rates_free`` and ``log_total_mass``) with explicit unconstrained log
+    first-order loss rates ``log_sink_rates`` on designated ``open_box_indices``
+    (such as truncated shallow-ocean models losing ``14C`` to an unmodelled deep
+    ocean).
+
+    Parameters
+    ----------
+    topology : Topology
+        Strongly connected directed reservoir graph with ``n_boxes`` boxes and
+        ``n_edges`` edges.
+    log_rates_free : ArrayLike
+        Free log inter-box transfer rates in ``ln(yr^-1)``, shape ``(p_free,)``.
+    log_total_mass : ArrayLike
+        Scalar log total ``12C`` inventory ``ln M_tot`` in ``ln(GtC)``, shape ``()``
+        (excluded from :meth:`active_parameter_mask` and :meth:`param_specs`).
+    log_sink_rates : ArrayLike
+        Log first-order open sink loss rates ``ln k_sink`` in ``ln(yr^-1)`` on
+        ``open_box_indices``, shape ``(len(open_box_indices),)``.
+    open_box_indices : Sequence[int]
+        Non-empty unique indices ``0 <= i < n_boxes`` of reservoirs carrying
+        positive open sink loss ``k_sink[i] = exp(log_sink_rates[m]) > 0``.
+    prod_weights : Sequence[float] | ArrayLike, optional
+        Non-negative cosmic-ray ``14C`` production weights (normalized internally to
+        sum to ``1.0``) of length ``len(topology.prod_box_indices)`` or ``n_boxes``.
+    tie_matrix : ArrayLike, optional
+        Optional ``(n_edges, p_free)`` log-rate tying matrix.
+    symmetric_edge_groups : Sequence[Sequence[int]], optional
+        Optional groups of equal-rate edge indices.
+
+    Attributes
+    ----------
+    log_rates_free : jax.Array
+        Free log inter-box transfer rates in ``ln(yr^-1)``, shape ``(p_free,)``.
+    log_total_mass : jax.Array
+        Scalar log total inventory ``ln M_tot`` in ``ln(GtC)``, shape ``()``.
+    log_sink_rates : jax.Array
+        Log first-order sink rates in ``ln(yr^-1)``, shape ``(len(open_box_indices),)``.
+    open_box_indices : tuple[int, ...]
+        Static open reservoir indices in ``[0, n_boxes)``.
+    """
 
     log_rates_free: jax.Array
     log_total_mass: jax.Array
@@ -1733,28 +2206,29 @@ class OpenChart(_PerronChart):
         tie_matrix: ArrayLike | None = None,
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
     ):
-        open_idx = tuple(int(i) for i in open_box_indices)
+        self.open_box_indices = tuple(int(i) for i in open_box_indices)
+        self._init_perron(topology, prod_weights, tie_matrix, symmetric_edge_groups)
+        self.log_rates_free = jnp.asarray(log_rates_free, dtype=jnp.float64)
+        self.log_total_mass = jnp.asarray(log_total_mass, dtype=jnp.float64).reshape(())
+        self.log_sink_rates = jnp.asarray(log_sink_rates, dtype=jnp.float64)
+        self._validate_topology(topology)
+
+    def _validate_topology(self, topology: Topology) -> None:
+        super()._validate_topology(topology)
+        open_idx = self.open_box_indices
         if not open_idx or any(i < 0 or i >= topology.n_boxes for i in open_idx):
             raise ValueError(
                 f"open_box_indices must be non-empty and within [0, {topology.n_boxes}), got {open_idx}."
             )
-        self.open_box_indices = open_idx
-
-        expected_p = self._init_perron(topology, prod_weights, tie_matrix, symmetric_edge_groups)
-        self.log_rates_free = jnp.asarray(log_rates_free, dtype=jnp.float64)
-        self.log_total_mass = jnp.asarray(log_total_mass, dtype=jnp.float64).reshape(())
-        self.log_sink_rates = jnp.asarray(log_sink_rates, dtype=jnp.float64)
-
-        if self.log_rates_free.shape != (expected_p,):
-            raise ValueError(
-                f"log_rates_free must have shape ({expected_p},), got {self.log_rates_free.shape}."
-            )
+        if len(set(open_idx)) != len(open_idx):
+            raise ValueError(f"open_box_indices must not contain duplicates, got {open_idx}.")
         if self.log_sink_rates.shape != (len(open_idx),):
             raise ValueError(
                 f"log_sink_rates must have shape ({len(open_idx)},), got {self.log_sink_rates.shape}."
             )
 
     def sink_rates(self, topology: Topology, decay_rate: float = DECAY_CAMBRIDGE) -> jax.Array:
+        del decay_rate
         return (
             jnp.zeros((topology.n_boxes,), dtype=jnp.float64)
             .at[np.asarray(self.open_box_indices, dtype=np.int64)]
@@ -1764,6 +2238,7 @@ class OpenChart(_PerronChart):
     def param_specs(
         self, prefix: str = "cbm", *, prior_sd: float | None = None, sink_sd: float | None = None
     ) -> tuple[Any, ...]:
+        """Return :class:`~ticktack.likelihood.ParamSpec` entries for ``log_rates_free`` and ``log_sink_rates``."""
         from .likelihood import ParamSpec
 
         specs: list[Any] = []
@@ -1800,6 +2275,31 @@ class OpenChart(_PerronChart):
         tie_matrix: ArrayLike | None = None,
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
     ) -> OpenChart:
+        """Construct an :class:`OpenChart` from balanced ``(masses, edge_fluxes)`` and ``sink_rates``.
+
+        Parameters
+        ----------
+        topology : Topology
+            Strongly connected directed reservoir graph.
+        masses : ArrayLike
+            Steady-state ``12C`` inventories in ``GtC``, shape ``(n_boxes,)``.
+        edge_fluxes : ArrayLike
+            Gross inter-box ``12C`` fluxes in ``GtC yr^-1``, shape ``(n_edges,)`` or
+            dense ``(n_boxes, n_boxes)``, satisfying Kirchhoff balance within
+            ``rtol=1e-6, atol=1e-9``.
+        sink_rates : ArrayLike
+            Per-box first-order irreversible loss rates ``k_sink`` in ``yr^-1``
+            (finite and ``>= 0`` on all boxes, strictly ``> 0`` on ``open_box_indices``),
+            shape ``(n_boxes,)``.
+        open_box_indices : Sequence[int], optional
+            Indices of open reservoirs. Defaults to ``np.flatnonzero(sink_rates > 0)``.
+        prod_weights : Sequence[float] | ArrayLike, optional
+            Cosmic-ray ``14C`` production weights.
+        tie_matrix : ArrayLike, optional
+            Optional ``(n_edges, p_free)`` log-rate tying matrix.
+        symmetric_edge_groups : Sequence[Sequence[int]], optional
+            Optional groups of equal-rate edge indices.
+        """
         return OpenCBM.from_masses_and_fluxes(
             topology,
             masses,
@@ -1860,20 +2360,40 @@ class OpenCBM(CarbonBoxModel):
         symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
         decay_rate: float = DECAY_CAMBRIDGE,
     ) -> OpenCBM:
-        s_arr = np.asarray(sink_rates, dtype=np.float64)
+        _require_topology(topology)
+        s_jax = jnp.asarray(sink_rates, dtype=jnp.float64)
+        if s_jax.shape != (topology.n_boxes,):
+            raise ValueError(
+                f"sink_rates must have shape ({topology.n_boxes},), got {s_jax.shape}."
+            )
+        is_traced = isinstance(s_jax, jax.core.Tracer)
+        s_np = None if is_traced else np.asarray(s_jax, dtype=np.float64)
+        if s_np is not None and (not np.all(np.isfinite(s_np)) or np.any(s_np < 0.0)):
+            raise ValueError("sink_rates must be finite and >= 0 across all boxes.")
+
         if open_box_indices is None:
-            open_idx = tuple(int(i) for i in np.flatnonzero(s_arr > 0.0))
+            if s_np is None:
+                raise ValueError(
+                    "open_box_indices must be specified explicitly when sink_rates is traced."
+                )
+            open_idx = tuple(int(i) for i in np.flatnonzero(s_np > 0.0))
         else:
             open_idx = tuple(int(i) for i in open_box_indices)
-        if not open_idx:
+
+        if not open_idx or any(i < 0 or i >= topology.n_boxes for i in open_idx):
             raise ValueError(
-                "OpenCBM requires at least one box with positive sink_rate or explicit open_box_indices."
+                "OpenCBM requires non-empty open_box_indices within "
+                f"[0, {topology.n_boxes}), got {open_idx}."
             )
+        if len(set(open_idx)) != len(open_idx):
+            raise ValueError(f"open_box_indices must not contain duplicates, got {open_idx}.")
+        if s_np is not None and np.any(s_np[list(open_idx)] <= 0.0):
+            raise ValueError("sink_rates must be strictly positive (> 0) on all open_box_indices.")
 
         theta_free, log_m_tot = _invert_perron_chart(
             topology, masses, edge_fluxes, tie_matrix, symmetric_edge_groups
         )
-        log_s = jnp.log(jnp.asarray(s_arr[list(open_idx)], dtype=jnp.float64))
+        log_s = jnp.log(s_jax[jnp.asarray(open_idx, dtype=np.int64)])
         return cls(
             topology=topology,
             log_rates_free=theta_free,
@@ -2026,9 +2546,7 @@ class EffectiveCBM(CarbonBoxModel):
             raise ValueError(f"eta_strat must lie strictly in (0, 1), got {eta_strat}.")
 
         n_sinks = k_int - 2
-        box_names = ("Stratosphere", "Troposphere") + tuple(
-            f"Sink_{j + 1}" for j in range(n_sinks)
-        )
+        box_names = ("Stratosphere", "Troposphere") + tuple(f"Sink_{j + 1}" for j in range(n_sinks))
         edges_src_list = [0, 1]
         edges_dst_list = [1, 0]
         for j in range(n_sinks):
@@ -2047,7 +2565,7 @@ class EffectiveCBM(CarbonBoxModel):
         self.K = k_int
         self.eta_strat = float(eta_strat)
         self.trop_mass = float(trop_mass)
-        self.decay_rate = float(decay_rate)
+        self.decay_rate = _require_decay_rate(decay_rate)
         self.target_r_ref = float(target_r_ref)
         self.q_std_cal = float(q_std)
         self.alpha_unit_cal = float(alpha_unit)
@@ -2057,22 +2575,18 @@ class EffectiveCBM(CarbonBoxModel):
         default_k10 = 45.0 / float(trop_mass)
 
         if log_k_strat_to_trop is None:
-            self.log_k_strat_to_trop = jnp.asarray(
-                math.log(default_k01), dtype=jnp.float64
-            )
+            self.log_k_strat_to_trop = jnp.asarray(math.log(default_k01), dtype=jnp.float64)
         else:
-            self.log_k_strat_to_trop = jnp.asarray(
-                log_k_strat_to_trop, dtype=jnp.float64
-            ).reshape(())
+            self.log_k_strat_to_trop = jnp.asarray(log_k_strat_to_trop, dtype=jnp.float64).reshape(
+                ()
+            )
 
         if log_k_trop_to_strat is None:
-            self.log_k_trop_to_strat = jnp.asarray(
-                math.log(default_k10), dtype=jnp.float64
-            )
+            self.log_k_trop_to_strat = jnp.asarray(math.log(default_k10), dtype=jnp.float64)
         else:
-            self.log_k_trop_to_strat = jnp.asarray(
-                log_k_trop_to_strat, dtype=jnp.float64
-            ).reshape(())
+            self.log_k_trop_to_strat = jnp.asarray(log_k_trop_to_strat, dtype=jnp.float64).reshape(
+                ()
+            )
 
         if n_sinks == 0:
             self.log_k_trop_to_sinks = jnp.zeros((0,), dtype=jnp.float64)
@@ -2083,13 +2597,9 @@ class EffectiveCBM(CarbonBoxModel):
                 weights = np.geomspace(1.0, 0.35, n_sinks)
                 weights = weights / np.sum(weights)
                 k_up_default = (180.0 * weights) / float(trop_mass)
-                self.log_k_trop_to_sinks = jnp.asarray(
-                    np.log(k_up_default), dtype=jnp.float64
-                )
+                self.log_k_trop_to_sinks = jnp.asarray(np.log(k_up_default), dtype=jnp.float64)
             else:
-                self.log_k_trop_to_sinks = jnp.asarray(
-                    log_k_trop_to_sinks, dtype=jnp.float64
-                )
+                self.log_k_trop_to_sinks = jnp.asarray(log_k_trop_to_sinks, dtype=jnp.float64)
 
             if sink_tau_params is None:
                 # Log-spaced residence times starting around ~8 yr with ratio ~5x per sink
@@ -2117,9 +2627,9 @@ class EffectiveCBM(CarbonBoxModel):
             self.explicit_deep_sink_rate = None
         else:
             self.calibrate_deep_sink = False
-            self.explicit_deep_sink_rate = jnp.asarray(
-                deep_sink_rate, dtype=jnp.float64
-            ).reshape(())
+            self.explicit_deep_sink_rate = jnp.asarray(deep_sink_rate, dtype=jnp.float64).reshape(
+                ()
+            )
 
     @property
     def n_parameters(self) -> int:

@@ -90,16 +90,55 @@ def test_cbm_chart_abstract_interface_and_flags() -> None:
     with pytest.raises(TypeError, match="CBMChart"):
         CarbonBoxModel(topo_sym, "not_a_chart")  # type: ignore[arg-type]
 
-    c_fix = CarbonBoxModel(topo_asym, FixedChart(topo_asym, [91.0, 520.0, 3400.0], [46.0, 38.0, 82.0, 74.0, 8.0], prod_weights=(0.69, 0.31)))
-    c_bal = CarbonBoxModel(topo_asym, BalancedChart(topo_asym, [-0.62, -2.55, -1.84, -3.72, -5.91], 8.31, prod_weights=(0.69, 0.31)))
-    c_rev = CarbonBoxModel(topo_sym, ReversibleChart(topo_sym, np.log([93.0, 515.0, 2950.0]), np.log([46.5, 92.0]), prod_weights=(0.71, 0.29)))
-    c_opn = CarbonBoxModel(topo_asym, OpenChart(topo_asym, [-0.62, -2.55, -1.84, -3.72, -5.91], 8.31, [-8.15], open_box_indices=(2,), prod_weights=(0.69, 0.31)))
+    c_fix = CarbonBoxModel(
+        topo_asym,
+        FixedChart(
+            topo_asym,
+            [91.0, 520.0, 3400.0],
+            [46.0, 38.0, 82.0, 74.0, 8.0],
+            prod_weights=(0.69, 0.31),
+        ),
+    )
+    c_bal = CarbonBoxModel(
+        topo_asym,
+        BalancedChart(
+            topo_asym, [-0.62, -2.55, -1.84, -3.72, -5.91], 8.31, prod_weights=(0.69, 0.31)
+        ),
+    )
+    c_rev = CarbonBoxModel(
+        topo_sym,
+        ReversibleChart(
+            topo_sym, np.log([93.0, 515.0, 2950.0]), np.log([46.5, 92.0]), prod_weights=(0.71, 0.29)
+        ),
+    )
+    c_opn = CarbonBoxModel(
+        topo_asym,
+        OpenChart(
+            topo_asym,
+            [-0.62, -2.55, -1.84, -3.72, -5.91],
+            8.31,
+            [-8.15],
+            open_box_indices=(2,),
+            prod_weights=(0.69, 0.31),
+        ),
+    )
     c_eff = EffectiveCBM(K=3)
-    c_sub = SubspaceCBM(topo_asym, [-0.62, -2.55, -1.84, -3.72, -5.91], np.ones((5, 2)) * 0.2, 8.31, prod_weights=(0.69, 0.31))
+    c_sub = SubspaceCBM(
+        topo_asym,
+        [-0.62, -2.55, -1.84, -3.72, -5.91],
+        np.ones((5, 2)) * 0.2,
+        8.31,
+        prod_weights=(0.69, 0.31),
+    )
 
     assert ReversibleChart.is_detailed_balance is True
     assert c_rev.is_detailed_balance is True
-    assert ReversibleCBM(topo_sym, np.log([93.0, 515.0, 2950.0]), np.log([46.5, 92.0])).is_detailed_balance is True
+    assert (
+        ReversibleCBM(
+            topo_sym, np.log([93.0, 515.0, 2950.0]), np.log([46.5, 92.0])
+        ).is_detailed_balance
+        is True
+    )
     assert c_eff.is_detailed_balance is True
     for m in (c_fix, c_bal, c_opn, c_sub):
         assert m.is_detailed_balance is False
@@ -113,7 +152,9 @@ def test_single_leaf_uniqueness_and_dual_zodiax_paths() -> None:
     """Verify zero duplicate leaves and identical 'cbm.<leaf>' vs 'cbm.chart.<leaf>' autodiff/updates."""
     topo_asym = _asym_3box_topo()
     topo_sym = _sym_3box_topo()
-    prod = SteadyProduction(1.83) + MiyakeSpike(t_start=774.58, duration=0.27, fluence=6.7, profile="boxcar")
+    prod = SteadyProduction(1.83) + MiyakeSpike(
+        t_start=774.58, duration=0.27, fluence=6.7, profile="boxcar"
+    )
     t_s = jnp.array([773.3, 774.3, 775.3, 777.3], dtype=jnp.float64)
     t_e = t_s + 0.45
     solver = ExactLinearSolver()
@@ -121,29 +162,81 @@ def test_single_leaf_uniqueness_and_dual_zodiax_paths() -> None:
 
     pairs = [
         (
-            CarbonBoxModel(topo_asym, FixedChart(topo_asym, [92.0, 535.0, 3150.0], [47.0, 39.0, 84.0, 76.0, 8.0], prod_weights=(0.68, 0.32), sink_rates=[0.0, 0.0, 1.5e-4])),
-            FixedCBM(topo_asym, [92.0, 535.0, 3150.0], [47.0, 39.0, 84.0, 76.0, 8.0], prod_weights=(0.68, 0.32), sink_rates=[0.0, 0.0, 1.5e-4]),
+            CarbonBoxModel(
+                topo_asym,
+                FixedChart(
+                    topo_asym,
+                    [92.0, 535.0, 3150.0],
+                    [47.0, 39.0, 84.0, 76.0, 8.0],
+                    prod_weights=(0.68, 0.32),
+                    sink_rates=[0.0, 0.0, 1.5e-4],
+                ),
+            ),
+            FixedCBM(
+                topo_asym,
+                [92.0, 535.0, 3150.0],
+                [47.0, 39.0, 84.0, 76.0, 8.0],
+                prod_weights=(0.68, 0.32),
+                sink_rates=[0.0, 0.0, 1.5e-4],
+            ),
             "masses",
             jnp.array([96.0, 548.0, 3220.0], dtype=jnp.float64),
             3,
         ),
         (
-            CarbonBoxModel(topo_asym, BalancedChart(topo_asym, [-0.61, -2.48, -1.87, -3.68, -5.77], 8.24, prod_weights=(0.68, 0.32))),
-            BalancedCBM(topo_asym, [-0.61, -2.48, -1.87, -3.68, -5.77], 8.24, prod_weights=(0.68, 0.32)),
+            CarbonBoxModel(
+                topo_asym,
+                BalancedChart(
+                    topo_asym, [-0.61, -2.48, -1.87, -3.68, -5.77], 8.24, prod_weights=(0.68, 0.32)
+                ),
+            ),
+            BalancedCBM(
+                topo_asym, [-0.61, -2.48, -1.87, -3.68, -5.77], 8.24, prod_weights=(0.68, 0.32)
+            ),
             "log_rates_free",
             jnp.array([-0.49, -2.31, -1.95, -3.52, -5.61], dtype=jnp.float64),
             2,
         ),
         (
-            CarbonBoxModel(topo_sym, ReversibleChart(topo_sym, np.log([91.0, 528.0, 2890.0]), np.log([45.5, 96.0]), prod_weights=(0.73, 0.27))),
-            ReversibleCBM(topo_sym, np.log([91.0, 528.0, 2890.0]), np.log([45.5, 96.0]), prod_weights=(0.73, 0.27)),
+            CarbonBoxModel(
+                topo_sym,
+                ReversibleChart(
+                    topo_sym,
+                    np.log([91.0, 528.0, 2890.0]),
+                    np.log([45.5, 96.0]),
+                    prod_weights=(0.73, 0.27),
+                ),
+            ),
+            ReversibleCBM(
+                topo_sym,
+                np.log([91.0, 528.0, 2890.0]),
+                np.log([45.5, 96.0]),
+                prod_weights=(0.73, 0.27),
+            ),
             "log_sym_fluxes",
             jnp.log(jnp.array([51.0, 88.5], dtype=jnp.float64)),
             2,
         ),
         (
-            CarbonBoxModel(topo_asym, OpenChart(topo_asym, [-0.61, -2.48, -1.87, -3.68, -5.77], 8.24, [-8.35], open_box_indices=(2,), prod_weights=(0.68, 0.32))),
-            OpenCBM(topo_asym, [-0.61, -2.48, -1.87, -3.68, -5.77], 8.24, [-8.35], open_box_indices=(2,), prod_weights=(0.68, 0.32)),
+            CarbonBoxModel(
+                topo_asym,
+                OpenChart(
+                    topo_asym,
+                    [-0.61, -2.48, -1.87, -3.68, -5.77],
+                    8.24,
+                    [-8.35],
+                    open_box_indices=(2,),
+                    prod_weights=(0.68, 0.32),
+                ),
+            ),
+            OpenCBM(
+                topo_asym,
+                [-0.61, -2.48, -1.87, -3.68, -5.77],
+                8.24,
+                [-8.35],
+                open_box_indices=(2,),
+                prod_weights=(0.68, 0.32),
+            ),
             "log_sink_rates",
             jnp.array([-7.65], dtype=jnp.float64),
             3,
@@ -161,13 +254,18 @@ def test_single_leaf_uniqueness_and_dual_zodiax_paths() -> None:
                 _ = cbm.nonexistent_attr_xyz
 
             rm = RadiocarbonModel(cbm, prod)
-            np.testing.assert_array_equal(rm.get(f"cbm.{leaf_name}"), rm.get(f"cbm.chart.{leaf_name}"))
+            np.testing.assert_array_equal(
+                rm.get(f"cbm.{leaf_name}"), rm.get(f"cbm.chart.{leaf_name}")
+            )
 
             rm_short = rm.set(f"cbm.{leaf_name}", new_val)
             rm_long = rm.set(f"cbm.chart.{leaf_name}", new_val)
             np.testing.assert_array_equal(rm_short.get(f"cbm.{leaf_name}"), new_val)
             np.testing.assert_array_equal(rm_short.cbm.matrix_A(), rm_long.cbm.matrix_A())
-            assert len(jax.tree_util.tree_leaves(eqx.filter(rm_short.cbm, eqx.is_inexact_array))) == expected_n_leaves
+            assert (
+                len(jax.tree_util.tree_leaves(eqx.filter(rm_short.cbm, eqx.is_inexact_array)))
+                == expected_n_leaves
+            )
 
             # Verify eqx.filter_grad matches central finite differences and forwards via __getattr__.
             def _loss(m: RadiocarbonModel) -> jax.Array:
@@ -188,8 +286,12 @@ def test_single_leaf_uniqueness_and_dual_zodiax_paths() -> None:
                 step = float(eps.reshape(-1)[idx])
                 p_vec[idx] += step
                 m_vec[idx] -= step
-                f_p = float(_loss(rm.set(f"cbm.{leaf_name}", jnp.asarray(p_vec.reshape(base_leaf.shape)))))
-                f_m = float(_loss(rm.set(f"cbm.{leaf_name}", jnp.asarray(m_vec.reshape(base_leaf.shape)))))
+                f_p = float(
+                    _loss(rm.set(f"cbm.{leaf_name}", jnp.asarray(p_vec.reshape(base_leaf.shape))))
+                )
+                f_m = float(
+                    _loss(rm.set(f"cbm.{leaf_name}", jnp.asarray(m_vec.reshape(base_leaf.shape))))
+                )
                 fd.reshape(-1)[idx] = (f_p - f_m) / (2.0 * step)
             np.testing.assert_allclose(g_short, fd, rtol=1e-5, atol=1e-6)
             assert np.linalg.norm(g_short) > 0.0
@@ -272,7 +374,9 @@ def test_load_preset_error_guards_and_random_kirchhoff_invariance() -> None:
 
     rng = np.random.default_rng(5401)
     b21 = load_preset("Brehm21", chart="balanced")
-    pert = b21.set("log_rates_free", b21.log_rates_free + 0.45 * rng.standard_normal(b21.log_rates_free.shape))
+    pert = b21.set(
+        "log_rates_free", b21.log_rates_free + 0.45 * rng.standard_normal(b21.log_rates_free.shape)
+    )
     assert float(jnp.max(jnp.abs(pert.kirchhoff_residual()))) < 1e-12
 
 
@@ -297,25 +401,38 @@ def test_active_parameter_mask_fisher_spectrum_and_subspace_compat() -> None:
         p = SteadyProduction(1.76) + psi["spike"]  # type: ignore[operator]
         return solver.predict_d14c(c, p, t_s, t_e, box_indices=1) + psi["offset"]  # type: ignore[operator]
 
-    spec_chart = cbm_fisher_spectrum(_fwd, cbm_bal_chart, sigma, psi_nuisance=psi0, prior_cbm_sd=0.37)
+    spec_chart = cbm_fisher_spectrum(
+        _fwd, cbm_bal_chart, sigma, psi_nuisance=psi0, prior_cbm_sd=0.37
+    )
     spec_kind = cbm_fisher_spectrum(_fwd, cbm_bal_kind, sigma, psi_nuisance=psi0, prior_cbm_sd=0.37)
     np.testing.assert_array_equal(np.asarray(spec_chart.active_mask), expected_bal_mask)
-    np.testing.assert_allclose(spec_chart.eigenvalues, spec_kind.eigenvalues, rtol=1e-13, atol=1e-14)
+    np.testing.assert_allclose(
+        spec_chart.eigenvalues, spec_kind.eigenvalues, rtol=1e-13, atol=1e-14
+    )
     np.testing.assert_allclose(spec_chart.d_eff, spec_kind.d_eff, rtol=1e-13, atol=1e-14)
 
-    spec_open = cbm_fisher_spectrum(_fwd, cbm_open_chart, sigma, psi_nuisance=psi0, prior_cbm_sd=0.37)
+    spec_open = cbm_fisher_spectrum(
+        _fwd, cbm_open_chart, sigma, psi_nuisance=psi0, prior_cbm_sd=0.37
+    )
     np.testing.assert_array_equal(np.asarray(spec_open.active_mask), expected_open_mask)
 
     # Confirm test sensitivity: disabling gauge exclusion adds the exact zero-Fisher log_total_mass mode.
     spec_unmasked = cbm_fisher_spectrum(
-        _fwd, cbm_bal_chart, sigma, psi_nuisance=psi0, prior_cbm_sd=jnp.full((25,), 0.37), exclude_total_mass=False
+        _fwd,
+        cbm_bal_chart,
+        sigma,
+        psi_nuisance=psi0,
+        prior_cbm_sd=jnp.full((25,), 0.37),
+        exclude_total_mass=False,
     )
     assert int(jnp.sum(spec_unmasked.active_mask)) == 25
     assert float(spec_unmasked.eigenvalues[-1]) < 1e-24
 
     sub = SubspaceCBM.from_fisher(cbm_bal_chart, spec_chart, n_modes=3)
     assert sub.n_modes == 3
-    np.testing.assert_allclose(sub.steady_state_d14c(), cbm_bal_chart.steady_state_d14c(), rtol=1e-13, atol=1e-13)
+    np.testing.assert_allclose(
+        sub.steady_state_d14c(), cbm_bal_chart.steady_state_d14c(), rtol=1e-13, atol=1e-13
+    )
     with pytest.raises(TypeError, match="BalancedCBM"):
         SubspaceCBM.from_fisher(load_preset("Guttler15", chart="fixed"), spec_chart, n_modes=2)  # type: ignore[arg-type]
 
@@ -340,7 +457,9 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
     assert isinstance(cbm_bal.chart, BalancedChart)
     assert float(jnp.max(jnp.abs(cbm_bal.kirchhoff_residual()))) < 1e-12
     np.testing.assert_allclose(cbm_bal.reservoir_masses(), [94.0, 525.0, 3600.0], rtol=1e-13)
-    np.testing.assert_allclose(cbm_bal.residence_times(), [94.0 / 47.0, 525.0 / 123.0, 3600.0 / 84.0], rtol=1e-13)
+    np.testing.assert_allclose(
+        cbm_bal.residence_times(), [94.0 / 47.0, 525.0 / 123.0, 3600.0 / 84.0], rtol=1e-13
+    )
 
     cbm_open = CarbonBoxModel.from_boxes(
         masses=masses_asym,
@@ -361,7 +480,9 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
     cbm_bal2 = cbm_fix.to_balanced()
     assert isinstance(cbm_bal2.chart, BalancedChart)
     np.testing.assert_allclose(cbm_bal2.matrix_A(), cbm_bal.matrix_A(), rtol=1e-13, atol=1e-15)
-    np.testing.assert_allclose(cbm_fix.with_chart(cbm_bal.chart).matrix_A(), cbm_bal.matrix_A(), rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(
+        cbm_fix.with_chart(cbm_bal.chart).matrix_A(), cbm_bal.matrix_A(), rtol=0.0, atol=0.0
+    )
 
     # Symmetric reversible custom model + asymmetric flux rejection
     cbm_rev = CarbonBoxModel.from_boxes(
@@ -415,11 +536,17 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
             return jnp.array([90.0, 510.0, 38000.0], dtype=jnp.float64)
 
         def edge_rates(self, topology: Topology) -> jax.Array:
-            return jnp.array([45.0 / 90.0, 45.0 / 510.0, 60.0 / 510.0, 60.0 / 38000.0], dtype=jnp.float64)
+            return jnp.array(
+                [45.0 / 90.0, 45.0 / 510.0, 60.0 / 510.0, 60.0 / 38000.0], dtype=jnp.float64
+            )
 
     custom_cbm = CarbonBoxModel(_sym_3box_topo(), _ArrayPWChart())
-    np.testing.assert_allclose(custom_cbm.to_fixed().production_vector(), [0.72, 0.28, 0.0], rtol=1e-14)
-    np.testing.assert_allclose(custom_cbm.to_balanced().production_vector(), [0.72, 0.28, 0.0], rtol=1e-14)
+    np.testing.assert_allclose(
+        custom_cbm.to_fixed().production_vector(), [0.72, 0.28, 0.0], rtol=1e-14
+    )
+    np.testing.assert_allclose(
+        custom_cbm.to_balanced().production_vector(), [0.72, 0.28, 0.0], rtol=1e-14
+    )
 
     # Hemispheric custom model via (name, hemisphere) keys + summary()
     cbm_hemi = CarbonBoxModel.from_boxes(
@@ -453,7 +580,12 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
         cbm_bal.param_specs(prior_sd=0.0)
     with pytest.raises(ValueError, match="prior_sd"):
         cbm_bal.param_specs(prior_sd=float("inf"))
-    sub_default = SubspaceCBM(_asym_3box_topo(), cbm_bal.log_rates_free, np.ones((5, 2)) * 0.1, float(cbm_bal.log_total_mass))
+    sub_default = SubspaceCBM(
+        _asym_3box_topo(),
+        cbm_bal.log_rates_free,
+        np.ones((5, 2)) * 0.1,
+        float(cbm_bal.log_total_mass),
+    )
     assert sub_default.param_specs()[0].prior_sd == pytest.approx(1.0)
 
     for cbm_case, kwargs, expected_cbm_dim in [
@@ -472,5 +604,373 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
 
         # Compare unconstrained log-prior against independent analytical normal log-density
         z = (np.asarray(u_step) - np.asarray(ps.prior_means)) / np.asarray(ps.prior_sds)
-        expected_lp = float(np.sum(-0.5 * z**2 - np.log(np.asarray(ps.prior_sds)) - 0.5 * math.log(2.0 * math.pi)))
-        assert float(ps.log_prior_unconstrained(u_step)) == pytest.approx(expected_lp, rel=1e-14, abs=1e-14)
+        expected_lp = float(
+            np.sum(-0.5 * z**2 - np.log(np.asarray(ps.prior_sds)) - 0.5 * math.log(2.0 * math.pi))
+        )
+        assert float(ps.log_prior_unconstrained(u_step)) == pytest.approx(
+            expected_lp, rel=1e-14, abs=1e-14
+        )
+
+
+def test_perron_kirchhoff_tying_and_open_sink_validation() -> None:
+    """Threads 1 & 2: reject imbalanced fluxes, inconsistent tying, and invalid sink_rates."""
+    topo_asym = _asym_3box_topo()
+    masses = [94.0, 525.0, 3600.0]
+    balanced_fluxes = [47.0, 39.0, 84.0, 76.0, 8.0]
+    imbalanced_fluxes = [47.0, 35.0, 84.0, 76.0, 8.0]  # box 0 outflow 47 != inflow 43
+
+    # Kirchhoff imbalance rejected across BalancedChart, OpenChart, from_boxes, and to_balanced
+    with pytest.raises(ValueError, match="Kirchhoff"):
+        BalancedChart.from_masses_and_fluxes(topo_asym, masses, imbalanced_fluxes)
+    with pytest.raises(ValueError, match="Kirchhoff"):
+        OpenChart.from_masses_and_fluxes(topo_asym, masses, imbalanced_fluxes, [0.0, 0.0, 2e-4])
+    with pytest.raises(ValueError, match="Kirchhoff"):
+        CarbonBoxModel.from_boxes(
+            masses={"Stratosphere": 90.0, "Troposphere": 510.0},
+            fluxes=[("Stratosphere", "Troposphere", 45.0), ("Troposphere", "Stratosphere", 41.0)],
+            chart="balanced",
+        )
+    unbal_fixed = FixedCBM(topo_asym, masses, imbalanced_fluxes)
+    with pytest.raises(ValueError, match="Kirchhoff"):
+        unbal_fixed.to_balanced()
+
+    # Non-positive or non-finite masses/fluxes and off-topology 2D matrix entries rejected
+    for bad_m in ([0.0, 525.0, 3600.0], [-5.0, 525.0, 3600.0], [float("nan"), 525.0, 3600.0]):
+        with pytest.raises(ValueError, match="masses"):
+            BalancedChart.from_masses_and_fluxes(topo_asym, bad_m, balanced_fluxes)
+    for bad_f in ([0.0, 39.0, 84.0, 76.0, 8.0], [float("inf"), 39.0, 84.0, 76.0, 8.0]):
+        with pytest.raises(ValueError, match="edge_fluxes"):
+            BalancedChart.from_masses_and_fluxes(topo_asym, masses, bad_f)
+    bad_mat = np.zeros((3, 3), dtype=np.float64)
+    for s, d, f in zip(topo_asym.edges_src, topo_asym.edges_dst, balanced_fluxes):
+        bad_mat[s, d] = f
+    bad_mat[0, 2] = 1.5  # edge (0 -> 2) is not in topo_asym
+    with pytest.raises(ValueError, match="outside topology"):
+        BalancedChart.from_masses_and_fluxes(topo_asym, masses, bad_mat)
+
+    # Inconsistent edge tying rejected; consistent edge tying accepted
+    with pytest.raises(ValueError, match="tying"):
+        BalancedChart.from_masses_and_fluxes(
+            topo_asym, masses, balanced_fluxes, symmetric_edge_groups=[[0, 1]]
+        )
+    topo_sym = _sym_3box_topo()
+    tied_ok = BalancedChart.from_masses_and_fluxes(
+        topo_sym, [120.0, 120.0, 2400.0], [48.0, 48.0, 60.0, 60.0], symmetric_edge_groups=[[0, 1]]
+    )
+    assert tied_ok.log_rates_free.shape == (3,)
+
+    # OpenChart / OpenCBM sink_rates validation across ALL boxes and open_box_indices
+    for bad_sinks in (
+        [-1e-5, 0.0, 2.5e-4],  # negative on closed box
+        [0.0, float("nan"), 2.5e-4],
+        [0.0, float("inf"), 2.5e-4],
+        [0.0, 2.5e-4],  # wrong shape
+    ):
+        with pytest.raises(ValueError, match="sink_rates"):
+            OpenChart.from_masses_and_fluxes(topo_asym, masses, balanced_fluxes, bad_sinks)
+    with pytest.raises(ValueError, match="strictly positive"):
+        OpenChart.from_masses_and_fluxes(
+            topo_asym, masses, balanced_fluxes, [0.0, 0.0, 2.5e-4], open_box_indices=(1, 2)
+        )
+    with pytest.raises(ValueError, match="duplicates"):
+        OpenChart.from_masses_and_fluxes(
+            topo_asym, masses, balanced_fluxes, [0.0, 0.0, 2.5e-4], open_box_indices=(2, 2)
+        )
+
+
+def test_topology_chart_compatibility_and_decay_rate_validation() -> None:
+    """Thread 3: validate Topology, decay_rate, and chart._validate_topology in __init__/with_chart."""
+    topo_sym = _sym_3box_topo()
+    topo_asym = _asym_3box_topo()
+    fix_3 = FixedChart(topo_sym, [90.0, 510.0, 3200.0], [45.0, 45.0, 60.0, 60.0])
+    bal_5 = BalancedChart(topo_asym, [-0.6, -2.5, -1.9, -3.7, -5.8], 8.3)
+    rev_2 = ReversibleChart(topo_sym, np.log([90.0, 510.0, 3200.0]), np.log([45.0, 60.0]))
+    opn_3 = OpenChart(topo_asym, [-0.6, -2.5, -1.9, -3.7, -5.8], 8.3, [-8.1], open_box_indices=(2,))
+
+    with pytest.raises(TypeError, match="Topology"):
+        CarbonBoxModel("not_a_topology", fix_3)  # type: ignore[arg-type]
+    for bad_decay in (-1e-4, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="decay_rate"):
+            CarbonBoxModel(topo_sym, fix_3, decay_rate=bad_decay)
+    assert CarbonBoxModel(topo_sym, fix_3, decay_rate=0.0).decay_rate == 0.0
+
+    # Box-count, edge-count, and prod_box_indices mismatches rejected in CarbonBoxModel / with_chart
+    topo_4box = Topology(
+        box_names=("Stratosphere", "Troposphere", "Surface", "Deep"),
+        edges_src=(0, 1, 1, 2, 2, 3),
+        edges_dst=(1, 0, 2, 1, 3, 2),
+    )
+    cbm_4 = CarbonBoxModel(
+        topo_4box,
+        FixedChart(topo_4box, [90.0, 510.0, 900.0, 35000.0], [45.0, 45.0, 60.0, 60.0, 40.0, 40.0]),
+    )
+    for bad_chart in (fix_3, bal_5, rev_2, opn_3):
+        with pytest.raises(ValueError):
+            cbm_4.with_chart(bad_chart)
+
+    # Edge-count mismatch (4-edge topo_sym vs 5-edge bal_5) and prod_weights length mismatch
+    with pytest.raises(ValueError, match="log_rates_free"):
+        CarbonBoxModel(topo_sym, bal_5)
+    topo_1prod = Topology(
+        box_names=("Stratosphere", "Troposphere", "Ocean"),
+        edges_src=(0, 1, 1, 2),
+        edges_dst=(1, 0, 2, 1),
+        prod_box_indices=(1,),
+        trop_box_indices=(1,),
+    )
+    with pytest.raises(ValueError, match="prod_weights"):
+        CarbonBoxModel(topo_1prod, fix_3)
+
+    # Reducible 3-box, 4-edge topology rejected by Perron/Reversible charts via with_chart
+    topo_reducible = Topology(
+        box_names=("Stratosphere", "Troposphere", "Sink"),
+        edges_src=(0, 1, 0, 1),
+        edges_dst=(1, 0, 2, 2),
+        check_scc=False,
+    )
+    with pytest.raises(ValueError, match="strongly connected"):
+        CarbonBoxModel(topo_reducible, rev_2)
+
+    # Non-reversible strongly connected 3-box, 4-edge topology rejected by ReversibleChart
+    topo_nonrev_4e = Topology(
+        box_names=("Stratosphere", "Troposphere", "Ocean"),
+        edges_src=(0, 1, 2, 0),
+        edges_dst=(1, 2, 0, 2),
+    )
+    with pytest.raises(ValueError, match="symmetric edge pairs"):
+        CarbonBoxModel(topo_nonrev_4e, rev_2)
+
+    # Reordered symmetric 3-box, 4-edge topology with mismatched pair indices rejected
+    topo_reordered_4e = Topology(
+        box_names=("Stratosphere", "Troposphere", "Ocean"),
+        edges_src=(0, 1, 1, 2),
+        edges_dst=(1, 2, 0, 1),
+    )
+    with pytest.raises(ValueError, match="edge-pair indices"):
+        CarbonBoxModel(topo_reordered_4e, rev_2)
+
+
+def test_to_fixed_jit_to_balanced_tying_overflow_and_chart_from_state() -> None:
+    """Threads 4 & 5: jit-safe to_fixed(), unpacked _chart_from_state, and tie/overflow-safe to_balanced()."""
+    from ticktack.cbm import _chart_from_state
+
+    topo_asym = _asym_3box_topo()
+    topo_sym = _sym_3box_topo()
+
+    # Direct verification of unpacked _chart_from_state signature
+    c_f = _chart_from_state(
+        topo_asym, [94.0, 525.0, 3600.0], [47.0, 39.0, 84.0, 76.0, 8.0], "fixed"
+    )
+    assert isinstance(c_f, FixedChart)
+    c_b = _chart_from_state(
+        topo_asym, [94.0, 525.0, 3600.0], [47.0, 39.0, 84.0, 76.0, 8.0], "balanced"
+    )
+    assert isinstance(c_b, BalancedChart)
+
+    # Verify to_fixed() under both eqx.filter_jit and jax.jit + autodiff across all CBM types
+    models: list[CarbonBoxModel] = [
+        load_preset("Guttler15", chart="fixed"),
+        load_preset("Guttler15", chart="balanced"),
+        load_preset("Miyake17", chart="open"),
+        CarbonBoxModel(
+            topo_sym, ReversibleChart(topo_sym, np.log([92.0, 520.0, 3100.0]), np.log([46.0, 62.0]))
+        ),
+        EffectiveCBM(K=3),
+        SubspaceCBM(topo_asym, [-0.6, -2.5, -1.9, -3.7, -5.8], np.ones((5, 2)) * 0.15, 8.3),
+    ]
+    jit_to_fixed = eqx.filter_jit(lambda m: m.to_fixed())
+    for m in models:
+        m_fix = jit_to_fixed(m)
+        assert type(m_fix) is CarbonBoxModel and isinstance(m_fix.chart, FixedChart)
+        np.testing.assert_allclose(m_fix.matrix_A(), m.matrix_A(), rtol=1e-13, atol=1e-15)
+        np.testing.assert_allclose(
+            m_fix.steady_state_d14c(), m.steady_state_d14c(), rtol=1e-12, atol=1e-10
+        )
+
+    # Raw jax.jit and eqx.filter_grad through to_fixed() on OpenChart & EffectiveCBM
+    opn = load_preset("Miyake17", chart="open")
+    raw_jit_d14c = jax.jit(lambda m: m.to_fixed().steady_state_d14c())(opn)
+    np.testing.assert_allclose(raw_jit_d14c, opn.steady_state_d14c(), rtol=1e-12, atol=1e-12)
+    eff = EffectiveCBM(K=3)
+    g_via_fix = eqx.filter_grad(lambda m: jnp.sum(m.to_fixed().steady_state_d14c() ** 2))(eff)
+    g_direct = eqx.filter_grad(lambda m: jnp.sum(m.steady_state_d14c() ** 2))(eff)
+    np.testing.assert_allclose(
+        g_via_fix.log_k_trop_to_sinks, g_direct.log_k_trop_to_sinks, rtol=1e-12
+    )
+    assert float(jnp.linalg.norm(g_via_fix.log_k_trop_to_sinks)) > 0.0
+
+    # Thread 5: to_balanced() preserves tie_matrix_rows and avoids exp(800.0) overflow
+    for b21_tied in (
+        load_preset("Brehm21", chart="balanced", tie_symmetric_edges=True),
+        load_preset("Brehm21", kind="balanced", tie_symmetric_edges=True),
+    ):
+        assert b21_tied.log_rates_free.shape == (39,)
+        assert b21_tied.tie_matrix_rows is not None
+        b21_hi = b21_tied.set("log_total_mass", jnp.asarray(800.0, dtype=jnp.float64))
+        proj = b21_hi.to_balanced()
+        assert type(proj) is CarbonBoxModel and isinstance(proj.chart, BalancedChart)
+        assert proj.tie_matrix_rows == b21_tied.tie_matrix_rows
+        assert proj.log_rates_free.shape == (39,)
+        assert float(proj.log_total_mass) == 800.0
+        assert np.all(np.isfinite(np.asarray(proj.steady_state_d14c())))
+        np.testing.assert_array_equal(proj.steady_state_d14c(), b21_tied.steady_state_d14c())
+
+    # Single collapsed fallback in to_balanced() with explicit symmetric_edge_groups
+    sym_fix = FixedCBM(topo_sym, [120.0, 120.0, 2400.0], [48.0, 48.0, 60.0, 60.0])
+    sym_bal_tied = sym_fix.to_balanced(symmetric_edge_groups=[[0, 1]])
+    assert sym_bal_tied.log_rates_free.shape == (3,)
+
+
+def test_from_boxes_subclasses_finiteness_troposphere_and_duplicate_keys() -> None:
+    """Threads 6, 7 & 8: subclass from_boxes, NaN/inf guards, troposphere=..., and duplicate keys."""
+    masses_ok = {"Stratosphere": 94.0, "Troposphere": 525.0, "DeepOcean": 3600.0}
+    fluxes_ok = [
+        ("Stratosphere", "Troposphere", 47.0),
+        ("Troposphere", "Stratosphere", 39.0),
+        ("Troposphere", "DeepOcean", 84.0),
+        ("DeepOcean", "Troposphere", 76.0),
+        ("DeepOcean", "Stratosphere", 8.0),
+    ]
+
+    # Thread 6: calling from_boxes on *CBM subclasses returns concrete CarbonBoxModel without TypeError
+    for sub_cls, chart_arg in [
+        (FixedCBM, "fixed"),
+        (BalancedCBM, "balanced"),
+        (OpenCBM, "open"),
+    ]:
+        kw = {"sinks": {"DeepOcean": 2e-4}} if chart_arg == "open" else {}
+        built = sub_cls.from_boxes(masses_ok, fluxes_ok, chart=chart_arg, **kw)  # type: ignore[arg-type]
+        assert type(built) is CarbonBoxModel
+    rev_sub = ReversibleCBM.from_boxes(
+        {"Stratosphere": 90.0, "Troposphere": 510.0},
+        [("Stratosphere", "Troposphere", 45.0), ("Troposphere", "Stratosphere", 45.0)],
+        chart="reversible",
+    )
+    assert type(rev_sub) is CarbonBoxModel and isinstance(rev_sub.chart, ReversibleChart)
+
+    # Thread 6: NaN / inf rejected in masses, fluxes, production, sinks, and decay_rate
+    for nonfinite in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            CarbonBoxModel.from_boxes(
+                {"Troposphere": nonfinite, "Stratosphere": 90.0}, fluxes_ok[:2]
+            )
+        with pytest.raises(ValueError):
+            CarbonBoxModel.from_boxes(
+                {"Stratosphere": 90.0, "Troposphere": 510.0},
+                [("Stratosphere", "Troposphere", nonfinite), ("Troposphere", "Stratosphere", 45.0)],
+            )
+        with pytest.raises(ValueError):
+            CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, production={"Troposphere": nonfinite})
+        with pytest.raises(ValueError):
+            CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, production=[0.7, nonfinite, 0.3])
+        with pytest.raises(ValueError):
+            CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, sinks={"DeepOcean": nonfinite})
+        with pytest.raises(ValueError):
+            CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, decay_rate=nonfinite)
+
+    # Thread 7: custom reservoir names without "trop" require troposphere=... and succeed when given
+    custom_masses = {"UpperAir": 90.0, "Atmosphere": 510.0, "Abyss": 36000.0}
+    custom_fluxes = [
+        ("UpperAir", "Atmosphere", 45.0),
+        ("Atmosphere", "UpperAir", 45.0),
+        ("Atmosphere", "Abyss", 60.0),
+        ("Abyss", "Atmosphere", 60.0),
+    ]
+    with pytest.raises(ValueError, match="troposphere"):
+        CarbonBoxModel.from_boxes(custom_masses, custom_fluxes, chart="balanced")
+
+    cbm_atm = CarbonBoxModel.from_boxes(
+        custom_masses, custom_fluxes, troposphere="Atmosphere", chart="balanced"
+    )
+    assert cbm_atm.topology.trop_box_indices == (1,)
+    assert float(cbm_atm.steady_state_d14c()[1]) == pytest.approx(0.0, abs=1e-12)
+
+    # Hemispheric custom names with troposphere="Atmosphere"
+    cbm_hemi_atm = CarbonBoxModel.from_boxes(
+        masses={("Atmosphere", "south"): 255.0, ("Atmosphere", "north"): 255.0},
+        fluxes=[
+            (("Atmosphere", "south"), ("Atmosphere", "north"), 65.0),
+            (("Atmosphere", "north"), ("Atmosphere", "south"), 65.0),
+        ],
+        troposphere="Atmosphere",
+        chart="balanced",
+    )
+    assert cbm_hemi_atm.topology.trop_box_indices == (0, 1)
+
+    # Thread 8: duplicate normalized reservoir keys rejected in named vectors
+    with pytest.raises(ValueError, match="Duplicate"):
+        CarbonBoxModel.from_boxes(
+            masses_ok, fluxes_ok, production={"Troposphere": 0.3, "troposphere": 0.7}
+        )
+    with pytest.raises(ValueError, match="Duplicate"):
+        CarbonBoxModel.from_boxes(
+            masses_ok, fluxes_ok, sinks={"DeepOcean": 1e-4, " DeepOcean ": 2e-4}
+        )
+    with pytest.raises(ValueError, match="Duplicate"):
+        CarbonBoxModel.from_boxes(
+            masses={("Troposphere", "south"): 250.0, ("Troposphere", "north"): 250.0},
+            fluxes=[
+                (("Troposphere", "south"), ("Troposphere", "north"), 70.0),
+                (("Troposphere", "north"), ("Troposphere", "south"), 70.0),
+            ],
+            production={("Troposphere", "north"): 0.4, ("Troposphere", "nh"): 0.6},
+        )
+
+
+def test_reversible_scale_gauge_docstrings_and_getattr_leafwrapper_guard() -> None:
+    """Threads 7, 9 & 10: unit/gauge docstrings, ReversibleChart 1D gauge, and _LeafWrapper(None) guard."""
+    for obj in (
+        CarbonBoxModel.from_boxes,
+        CBMChart,
+        FixedChart,
+        BalancedChart,
+        ReversibleChart,
+        OpenChart,
+    ):
+        doc = obj.__doc__ or ""
+        assert "Parameters" in doc or "Attributes" in doc
+        assert "yr^-1" in doc and "GtC" in doc
+    assert "scale" in (ReversibleChart.__doc__ or "")
+    assert "include_masses=False" in (ReversibleChart.param_specs.__doc__ or "")
+
+    # Thread 9: verify exact 1D global scale gauge (1_n, 1_m) invariance on ReversibleChart
+    topo_sym = _sym_3box_topo()
+    rev0 = CarbonBoxModel(
+        topo_sym,
+        ReversibleChart(
+            topo_sym, np.log([91.0, 523.0, 3150.0]), np.log([46.5, 63.0]), prod_weights=(0.71, 0.29)
+        ),
+    )
+    shift = 1.73
+    rev_scaled = rev0.set("log_masses", rev0.log_masses + shift).set(
+        "log_sym_fluxes", rev0.log_sym_fluxes + shift
+    )
+    np.testing.assert_allclose(rev_scaled.edge_rates(), rev0.edge_rates(), rtol=1e-14, atol=1e-15)
+    np.testing.assert_allclose(rev_scaled.matrix_A(), rev0.matrix_A(), rtol=1e-14, atol=1e-15)
+    np.testing.assert_allclose(
+        rev_scaled.relative_reservoir_masses(),
+        rev0.relative_reservoir_masses(),
+        rtol=1e-14,
+        atol=1e-15,
+    )
+    np.testing.assert_allclose(
+        rev_scaled.steady_state_d14c(), rev0.steady_state_d14c(), rtol=1e-12, atol=1e-12
+    )
+
+    # Thread 10: _LeafWrapper(None) inside eqx.tree_at / zodiax .set() on chartless subclasses
+    eff = EffectiveCBM(K=3)
+    sub = SubspaceCBM(_asym_3box_topo(), [-0.6, -2.5, -1.9, -3.7, -5.8], np.ones((5, 2)) * 0.2, 8.3)
+    eff2 = eff.set("log_k_strat_to_trop", jnp.asarray(-0.55, dtype=jnp.float64))
+    sub2 = sub.set("alpha", jnp.array([0.15, -0.25], dtype=jnp.float64))
+    assert float(eff2.log_k_strat_to_trop) == pytest.approx(-0.55)
+    np.testing.assert_allclose(sub2.alpha, [0.15, -0.25])
+
+    # Prove sensitivity: Equinox _LeafWrapper has a '.leaf' attribute; without isinstance(chart, CBMChart),
+    # accessing m.leaf inside eqx.tree_at's where callable leaked _LeafWrapper(None).leaf instead of AttributeError.
+    for chartless, target_fn, repl in [
+        (eff, lambda m: m.log_k_strat_to_trop, jnp.asarray(-0.5)),
+        (sub, lambda m: m.alpha, jnp.zeros((2,))),
+    ]:
+        assert eqx.tree_at(target_fn, chartless, repl) is not None
+        with pytest.raises(AttributeError, match="leaf"):
+            eqx.tree_at(lambda m: m.leaf, chartless, repl)
