@@ -16,6 +16,7 @@
     "src/ticktack/cbm.py",
     "src/ticktack/fields.py",
     "src/ticktack/fisher.py",
+    "src/ticktack/kalman.py",
     "src/ticktack/likelihood.py",
     "src/ticktack/linear.py",
     "src/ticktack/solvers.py"

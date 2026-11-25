@@ -16,7 +16,7 @@ Adapts the linear marginalization primitives of ``virgil._linear`` to
    kernels, and smooth ``sinh``-log Gauss--Legendre spectral quadrature for
    non-quasiseparable kernels such as ``ExpSquared``.
 3. **Canonical data- and prior-orthogonal Wiener SVD modes**
-   ([`canonical_pod_modes`][ticktack.linear.canonical_pod_modes]) and an
+   ([`canonical_pod_modes`][ticktack.kalman.canonical_pod_modes]) and an
    **exact continuous-time Kalman filter + RTS smoother**
    ([`kalman_gp_marginal`][ticktack.linear.kalman_gp_marginal]) for uniform
    step grids with point or seasonal-window integral observations.
@@ -37,19 +37,21 @@ import zodiax as zdx
 from tinygp.kernels import quasisep as tgq
 from tinygp.solvers.quasisep.block import Block
 
-from .kalman import ArrowProblem, CanonicalPODResult, arrow_at, arrow_problem, canonical_pod_modes
+# Temporary compatibility re-exports until Wave 6 surface cleanup (Decision 5.3).
+from .kalman import (  # noqa: F401
+    ArrowProblem,
+    CanonicalPODResult,
+    arrow_at,
+    arrow_problem,
+    canonical_pod_modes,
+)
 from .solvers import _modal_decomposition, _scalar_psi1
 
 __all__ = [
-    "ArrowProblem",
-    "CanonicalPODResult",
     "CausalGPProjection",
     "KalmanGPResult",
     "LinearMarginal",
     "SolinSarkkaBasis",
-    "arrow_at",
-    "arrow_problem",
-    "canonical_pod_modes",
     "harmonic_solar_design",
     "hierarchical_offset_design",
     "kalman_gp_marginal",
@@ -61,7 +63,6 @@ __all__ = [
     "whiten_blocks",
     "whiten_cholesky",
     "whiten_qr",
-    "whiten_rank_one",
 ]
 
 

@@ -17,15 +17,50 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsl
+import numpy as onp
 
 if TYPE_CHECKING:
     from .linear import CausalGPProjection
 
-__all__ = ["ArrowProblem", "CanonicalPODResult", "arrow_at", "arrow_problem", "canonical_pod_modes"]
+__all__ = [
+    "ArrowProblem",
+    "CanonicalPODResult",
+    "arrow_at",
+    "arrow_problem",
+    "canonical_pod_modes",
+]
 
 
 class ArrowProblem(NamedTuple):
-    """Block-arrow ``Ũ`` reduced to Gram sums for fast noise-scale evaluation."""
+    """Pre-reduced Gram sums of a block-arrow design ``Ũ = [U_local, S]``.
+
+    Models marginal covariance ``s² I_N + Ũ Ũᵀ`` where ``U_local`` acts on ``B``
+    disjoint observation blocks of up to ``R`` rows with ``M`` local modes per
+    block and ``S`` spans all ``N`` observations with ``K`` shared modes.
+
+    Attributes
+    ----------
+    x : jax.Array
+        Noise-standardized data vector of shape ``(N,)`` (dimensionless).
+    rows : jax.Array
+        Integer row-index array of shape ``(B, R)`` after normalizing every
+        inactive padding index (``< 0`` or ``>= N``) to the sentinel ``N``.
+    local : jax.Array
+        Masked block-local design tensor of shape ``(B, R, M)`` (dimensionless),
+        with zeros on every inactive padded slot.
+    spanning : jax.Array
+        Shared spanning design matrix ``S`` of shape ``(N, K)`` (dimensionless).
+    gram_bb : jax.Array
+        Per-block local Gram matrices ``U_bᵀ U_b`` of shape ``(B, M, M)``.
+    gram_bs : jax.Array
+        Per-block local–spanning cross-Gram matrices ``U_bᵀ S_b`` of shape
+        ``(B, M, K)``.
+    gram_out : jax.Array
+        Spanning Gram matrix ``S_outᵀ S_out`` of shape ``(K, K)`` summed over
+        all rows not belonging to any block.
+    proj_b : jax.Array
+        Per-block data projections ``U_bᵀ x_b`` of shape ``(B, M)``.
+    """
 
     x: jax.Array
     rows: jax.Array
@@ -43,22 +78,64 @@ def arrow_problem(
     local: Any,
     spanning: Any | None = None,
 ) -> ArrowProblem:
-    """Build Gram sums of ``s² I + Ũ Ũᵀ`` for [`arrow_at`][ticktack.kalman.arrow_at]."""
+    """Pre-reduce a block-arrow design ``Ũ = [U_local, S]`` for [`arrow_at`][ticktack.kalman.arrow_at].
+
+    Parameters
+    ----------
+    x : array-like
+        Noise-standardized residual vector of shape ``(N,)`` (dimensionless).
+    rows : array-like of int
+        Block membership indices of shape ``(B, R)``. Active entries must satisfy
+        ``0 <= rows < N`` and be pairwise disjoint across all blocks. Entries
+        outside ``[0, N)`` (such as ``-1`` or ``N``) are treated as inactive
+        padding and normalized to sentinel ``N``.
+    local : array-like
+        Per-block local design factors of shape ``(B, R, M)`` (dimensionless).
+        Slots corresponding to inactive indices in ``rows`` are zeroed.
+    spanning : array-like, optional
+        Shared design matrix ``S`` of shape ``(N, K)`` (dimensionless). When
+        omitted, an empty ``(N, 0)`` matrix is used.
+
+    Returns
+    -------
+    ArrowProblem
+        Pre-reduced Gram sums and normalized indices ready for repeated
+        evaluations of [`arrow_at`][ticktack.kalman.arrow_at].
+
+    Raises
+    ------
+    ValueError
+        If ``rows`` is concrete (not JAX-traced) and contains duplicate active
+        indices in ``[0, N)``.
+    """
+    from .linear import _concrete
+
     x = jnp.asarray(x, dtype=jnp.float64)
     local = jnp.asarray(local, dtype=jnp.float64)
     rows = jnp.asarray(rows)
+    n_obs = x.shape[0]
     if spanning is None:
-        spanning = jnp.zeros((x.shape[0], 0), dtype=x.dtype)
+        spanning = jnp.zeros((n_obs, 0), dtype=x.dtype)
     else:
         spanning = jnp.asarray(spanning, dtype=jnp.float64)
-    local = jnp.where((rows < x.shape[0])[..., None], local, 0.0)
+    valid = (rows >= 0) & (rows < n_obs)
+    safe_rows = jnp.where(valid, rows, n_obs)
+    c_rows = _concrete(rows)
+    if c_rows is not None:
+        active = c_rows[(c_rows >= 0) & (c_rows < n_obs)]
+        if active.size != onp.unique(active).size:
+            raise ValueError(
+                "arrow_problem requires disjoint active row indices across blocks; "
+                "duplicate active indices found in rows."
+            )
+    local = jnp.where(valid[..., None], local, 0.0)
     hi = jax.lax.Precision.HIGHEST
-    x_b = x.at[rows].get(mode="fill", fill_value=0.0)
-    s_b = spanning.at[rows].get(mode="fill", fill_value=0.0)
-    outside = jnp.ones(x.shape[0], dtype=x.dtype).at[rows].set(0.0, mode="drop")
+    x_b = x.at[safe_rows].get(mode="fill", fill_value=0.0)
+    s_b = spanning.at[safe_rows].get(mode="fill", fill_value=0.0)
+    outside = jnp.ones(n_obs, dtype=x.dtype).at[safe_rows].set(0.0, mode="drop")
     return ArrowProblem(
         x,
-        rows,
+        safe_rows,
         local,
         spanning,
         jnp.einsum("brm,brn->bmn", local, local, precision=hi),
@@ -77,8 +154,40 @@ def arrow_at(
     scale2: Any,
     trace: bool = False,
 ) -> tuple[jax.Array, ...]:
-    """Evaluate marginal ``(chi2, norm, r2[, tr])`` at variance scale ``s² = scale2``."""
+    """Evaluate block-arrow Gaussian marginal quantities at variance scale ``s²``.
+
+    Solves the ``P × P`` (``P = B M + K``) regularized normal equations
+    ``(s² I_P + Ũᵀ Ũ) ŷ = Ũᵀ x`` via the block-arrow Schur complement plus one
+    residual-space iterative refinement step.
+
+    Parameters
+    ----------
+    problem : ArrowProblem
+        Pre-reduced block-arrow problem returned by
+        [`arrow_problem`][ticktack.kalman.arrow_problem].
+    scale2 : float or jax.Array
+        Strictly positive scalar variance scale ``s² > 0`` (dimensionless);
+        cast to ``float64`` at entry.
+    trace : bool, default False
+        If ``True``, also return the parameter-space inverse trace ``tr``.
+
+    Returns
+    -------
+    chi2 : jax.Array
+        Scalar marginal quadratic form ``xᵀ (s² I_N + Ũ Ũᵀ)⁻¹ x``.
+    norm : jax.Array
+        Scalar half log-determinant ratio
+        ``½ ln det(I_N + s⁻² Ũ Ũᵀ) = ½ (ln det(s² I_N + Ũ Ũᵀ) - N ln s²)``,
+        with the ``½ N ln s²`` noise-scale term already subtracted.
+    r2 : jax.Array
+        Scalar squared residual norm ``‖x - Ũ ŷ‖²`` at the ridge solution ``ŷ``.
+    tr : jax.Array, optional
+        Returned only when ``trace=True``: scalar parameter-space trace
+        ``tr((s² I_P + Ũᵀ Ũ)⁻¹)`` of size ``P × P`` (not the ``N × N``
+        data-space covariance trace).
+    """
     p = problem
+    scale2 = jnp.asarray(scale2, dtype=jnp.float64)
     hi = jax.lax.Precision.HIGHEST
     n_block, n_mode = p.gram_bb.shape[:2]
     n_span = p.gram_out.shape[0]
@@ -139,7 +248,56 @@ def arrow_at(
 
 
 class CanonicalPODResult(NamedTuple):
-    """Simultaneously data-orthogonal and prior-orthonormal Wiener GP modes."""
+    """Simultaneously data-orthogonal and prior-orthonormal Wiener GP modes.
+
+    Let ``N_d`` be the number of observations, ``r`` the number of spectral GP
+    modes, ``m_sing = min(N_d, r)`` the number of observable singular modes,
+    and ``N_eval`` the number of evaluation epochs ``t_eval``.
+
+    Attributes
+    ----------
+    singular_values : jax.Array
+        Descending observable singular values ``s_k`` of shape ``(m_sing,)``
+        (dimensionless) satisfying
+        ``G̃ = data_modes @ diag(singular_values) @ prior_rotation[:, :m_sing].T``.
+    wiener_weights : jax.Array
+        Wiener shrinkage factors of shape ``(r,)`` (dimensionless):
+        ``s_k² / (1 + s_k²)`` for observable modes ``k < m_sing``, and ``0.0``
+        for unobservable prior nullspace modes ``k >= m_sing`` when ``N_d < r``.
+    data_modes : jax.Array
+        Orthonormal left singular vectors ``U_data`` of shape ``(N_d, m_sing)``
+        in whitened data space (``U_dataᵀ U_data = I_{m_sing}``).
+    prior_rotation : jax.Array
+        Orthogonal rotation matrix ``V_prior = [V_thin, V_null]`` of shape
+        ``(r, r)`` in standardized prior-mode space (``V_priorᵀ V_prior = I_r``).
+        When ``N_d < r``, the trailing ``r - m_sing`` nullspace columns are
+        completed under ``jax.lax.stop_gradient`` via complete QR.
+    production_modes : jax.Array
+        Canonical production basis ``Φ_eval V_prior`` of shape ``(N_eval, r)``
+        in production-anomaly units (matching ``project_causal_gp``).
+    coeff_mean : jax.Array
+        Posterior mean of canonical prior-unit coefficients of shape ``(r,)``
+        (dimensionless): ``(s_k / (1 + s_k²)) u_kᵀ r̃`` for ``k < m_sing``,
+        and ``0.0`` for ``k >= m_sing``.
+    coeff_var : jax.Array
+        Posterior variance of canonical prior-unit coefficients of shape ``(r,)``
+        (dimensionless): ``1 / (1 + s_k²)`` for ``k < m_sing``, and ``1.0``
+        (unshrunk prior variance) for ``k >= m_sing``.
+    posterior_mean : jax.Array
+        Posterior mean production anomaly ``E[δq(t_eval) | d]`` of shape
+        ``(N_eval,)`` in production-anomaly units.
+    posterior_sd : jax.Array
+        Pointwise posterior standard deviation ``sqrt(Var[δq(t_eval) | d])`` of
+        shape ``(N_eval,)`` in production-anomaly units, computed from
+        ``(singular_values, V_thin)`` and the two-pass orthogonal complement
+        ``Φ_⊥`` as a non-negative sum of squares.
+    d_eff : jax.Array
+        Scalar effective degrees of freedom ``Σ_{k=1}^{m_sing} s_k² / (1 + s_k²)``
+        (dimensionless).
+    info_nats : jax.Array
+        Scalar Shannon information gain ``½ Σ_{k=1}^{m_sing} ln(1 + s_k²)`` in
+        nats.
+    """
 
     singular_values: jax.Array
     wiener_weights: jax.Array
@@ -154,6 +312,68 @@ class CanonicalPODResult(NamedTuple):
     info_nats: jax.Array
 
 
+def _wiener_pod_svd(
+    g_tilde: jax.Array,
+    r_tilde: jax.Array,
+    phi_eval: jax.Array,
+) -> CanonicalPODResult:
+    """Compute thin-SVD Wiener POD shrinkage, DGKS variance, and nullspace basis."""
+    r_modes = g_tilde.shape[1]
+    u_data, s_vals, vt_thin = jnp.linalg.svd(g_tilde, full_matrices=False)
+    v_thin = vt_thin.T
+    m_sing = s_vals.shape[0]
+    proj_thin = u_data.T @ r_tilde
+
+    s_sq = s_vals**2
+    inv_one_plus_s2 = 1.0 / (1.0 + s_sq)
+    wiener_thin = s_sq * inv_one_plus_s2
+    coeff_mean_thin = s_vals * inv_one_plus_s2 * proj_thin
+    coeff_var_thin = inv_one_plus_s2
+
+    phi_rot_thin = phi_eval @ v_thin
+    phi_perp = phi_eval - phi_rot_thin @ vt_thin
+    phi_perp = phi_perp - (phi_perp @ v_thin) @ vt_thin
+
+    post_mean = phi_rot_thin @ coeff_mean_thin
+    post_var = jnp.sum((phi_rot_thin**2) * coeff_var_thin[None, :], axis=1) + jnp.sum(
+        phi_perp**2, axis=1
+    )
+    post_sd = jnp.sqrt(jnp.maximum(post_var, 0.0))
+    d_eff = jnp.sum(wiener_thin)
+    info_nats = 0.5 * jnp.sum(jnp.log1p(s_sq))
+
+    if m_sing < r_modes:
+        q_full, _ = jnp.linalg.qr(jax.lax.stop_gradient(v_thin), mode="complete")
+        v_prior = jnp.concatenate([v_thin, q_full[:, m_sing:]], axis=1)
+        n_null = r_modes - m_sing
+        zeros_null = jnp.zeros((n_null,), dtype=jnp.float64)
+        wiener = jnp.concatenate([wiener_thin, zeros_null])
+        coeff_mean = jnp.concatenate([coeff_mean_thin, zeros_null])
+        coeff_var = jnp.concatenate(
+            [coeff_var_thin, jnp.ones((n_null,), dtype=jnp.float64)]
+        )
+    else:
+        v_prior = v_thin
+        wiener = wiener_thin
+        coeff_mean = coeff_mean_thin
+        coeff_var = coeff_var_thin
+
+    prod_modes = phi_eval @ v_prior
+    return CanonicalPODResult(
+        singular_values=s_vals,
+        wiener_weights=wiener,
+        data_modes=u_data,
+        prior_rotation=v_prior,
+        production_modes=prod_modes,
+        coeff_mean=coeff_mean,
+        coeff_var=coeff_var,
+        posterior_mean=post_mean,
+        posterior_sd=post_sd,
+        d_eff=d_eff,
+        info_nats=info_nats,
+    )
+
+
 def canonical_pod_modes(
     projection: CausalGPProjection,
     t_eval: Any,
@@ -165,27 +385,72 @@ def canonical_pod_modes(
 ) -> CanonicalPODResult:
     """Extract canonical Wiener-shrunk production modes via thin SVD.
 
-    Takes the SVD of the (nuisance- and initial-state-whitened) GP operator
-    ``D̃⁻¹/² W_causal Ψ_r Λ¹/² = U_data diag(s) V_priorᵀ`` so each canonical
-    coefficient ``c̃_k`` has decoupled 1D posterior
+    Applies a single augmented-QR whitening pass against initial-state and
+    optional linear nuisance covariance, then takes the unpadded thin SVD
+    ``G̃ = U_data diag(s) V_thinᵀ`` of the whitened GP operator
+    ``G̃ = D̃⁻¹/² W_causal Ψ_r Λ¹/²`` so observable canonical coefficients
+    ``c̃_k`` have decoupled 1D posteriors
     ``N(s_k / (1 + s_k²) u_kᵀ r̃, 1 / (1 + s_k²))``, matching
     [`CausalGPProjection.posterior_production`][ticktack.linear.CausalGPProjection.posterior_production]
-    to machine precision.
+    to ``rtol=1e-10`` (verified in ``test_dec51a_pod_arrow.py``).
+
+    Parameters
+    ----------
+    projection : CausalGPProjection
+        Causal GP projection built with ``kernel=...`` (so ``spectral_weights``
+        is populated) for ``N_d`` observations and ``r`` spectral modes.
+    t_eval : array-like
+        1D evaluation timestamps of shape ``(N_eval,)`` in years within
+        ``[projection.a, projection.b_bound]``.
+    resid : array-like
+        Observation residuals ``d - m_0`` of shape ``(N_d,)`` in data units
+        (typically ``‰`` for Δ¹⁴C).
+    sigma : float or array-like
+        Strictly positive finite measurement standard deviations (scalar or 1D
+        array of shape ``(N_d,)``, same units as ``resid``).
+    nuisance_whitened_design : array-like, optional
+        Prior-scaled linear nuisance design ``X_nuis L_nuis`` of shape
+        ``(N_d, K_nuis)`` in data units (before division by ``sigma``).
+    include_initial_cov : bool, default True
+        If ``True`` and ``projection.anchor_cov_root`` is present, include the
+        propagated pre-history stationary state covariance in the nuisance
+        whitening pass.
+
+    Returns
+    -------
+    CanonicalPODResult
+        Canonical SVD modes, Wiener weights, posterior production summary on
+        ``t_eval``, effective degrees of freedom, and information gain.
+
+    Raises
+    ------
+    ValueError
+        If ``projection.spectral_weights`` is ``None``, ``sigma`` is not a
+        strictly positive finite scalar/1D array, or
+        ``nuisance_whitened_design`` is not 2D with ``N_d`` rows.
     """
-    from .linear import solin_sarkka_basis, whiten_cholesky
+    from .linear import _concrete, solin_sarkka_basis, whiten_qr
 
     if projection.spectral_weights is None:
-        raise ValueError("projection must be constructed with kernel=... for canonical_pod_modes.")
+        raise ValueError(
+            "projection must be constructed with kernel=... for canonical_pod_modes."
+        )
 
     n_obs, r_modes = projection.causal_basis_design.shape
     resid_arr = jnp.asarray(resid, dtype=jnp.float64).reshape(n_obs)
-    sd = jnp.broadcast_to(jnp.asarray(sigma, dtype=jnp.float64), (n_obs,))
+    sd_raw = jnp.asarray(sigma, dtype=jnp.float64)
+    if sd_raw.ndim > 1:
+        raise ValueError(
+            f"sigma must be a scalar or 1D array of length {n_obs}; got shape {sd_raw.shape}."
+        )
+    sd = jnp.broadcast_to(sd_raw, (n_obs,))
+    c_sd = _concrete(sd)
+    if c_sd is not None and not onp.all(onp.isfinite(c_sd) & (c_sd > 0.0)):
+        raise ValueError("sigma must be finite and strictly positive.")
 
-    gp_prior_design = projection.causal_basis_design * jnp.sqrt(
-        projection.spectral_weights
-    )[None, :]
-    g_raw = gp_prior_design / sd[:, None]  # (N_d, r)
-    r_raw = resid_arr / sd  # (N_d,)
+    spec_root = jnp.sqrt(projection.spectral_weights)
+    g_raw = (projection.causal_basis_design * spec_root[None, :]) / sd[:, None]
+    r_raw = resid_arr / sd
 
     nuis_parts = []
     if include_initial_cov and projection.anchor_cov_root is not None:
@@ -193,59 +458,21 @@ def canonical_pod_modes(
             (projection.hom_design_anchor @ projection.anchor_cov_root) / sd[:, None]
         )
     if nuisance_whitened_design is not None:
-        nuis_parts.append(
-            jnp.asarray(nuisance_whitened_design, dtype=jnp.float64) / sd[:, None]
-        )
+        nuis_arr = jnp.asarray(nuisance_whitened_design, dtype=jnp.float64)
+        if nuis_arr.ndim != 2 or nuis_arr.shape[0] != n_obs:
+            raise ValueError(
+                f"nuisance_whitened_design must have shape ({n_obs}, k); got {nuis_arr.shape}."
+            )
+        nuis_parts.append(nuis_arr / sd[:, None])
 
     if nuis_parts:
         u_nuis = jnp.concatenate(nuis_parts, axis=1)
-        r_tilde, _ = whiten_cholesky(r_raw, u_nuis)
-        g_tilde = jax.vmap(lambda col: whiten_cholesky(col, u_nuis)[0], in_axes=1, out_axes=1)(
-            g_raw
-        )
+        combined = jnp.concatenate([r_raw[:, None], g_raw], axis=1)
+        whitened, _ = whiten_qr(combined, u_nuis)
+        r_tilde, g_tilde = whitened[:, 0], whitened[:, 1:]
     else:
-        r_tilde = r_raw
-        g_tilde = g_raw
-
-    m_sing = min(n_obs, r_modes)
-    if n_obs < r_modes:
-        g_svd_in = jnp.concatenate(
-            [g_tilde, jnp.zeros((r_modes - n_obs, r_modes), dtype=jnp.float64)],
-            axis=0,
-        )
-    else:
-        g_svd_in = g_tilde
-    u_svd, s_full, vt_prior = jnp.linalg.svd(g_svd_in, full_matrices=False)
-    v_prior = vt_prior.T  # (r, r)
-    s_vals = s_full[:m_sing]
-    u_data = u_svd[:n_obs, :m_sing]
-    proj_full = u_svd[:n_obs, :].T @ r_tilde  # (r,)
-
-    wiener = s_full**2 / (1.0 + s_full**2)
-    coeff_mean = (s_full / (1.0 + s_full**2)) * proj_full
-    coeff_var = 1.0 / (1.0 + s_full**2)
+        r_tilde, g_tilde = r_raw, g_raw
 
     basis_eval = solin_sarkka_basis(t_eval, projection.a, projection.b_bound, r_modes)
-    prod_modes = (
-        basis_eval.psi * jnp.sqrt(projection.spectral_weights)[None, :]
-    ) @ v_prior  # (N_eval, r)
-    post_mean = prod_modes @ coeff_mean
-    post_var = jnp.sum((prod_modes**2) * coeff_var[None, :], axis=1)
-    post_sd = jnp.sqrt(jnp.maximum(post_var, 0.0))
-
-    d_eff = jnp.sum(wiener)
-    info_nats = 0.5 * jnp.sum(jnp.log1p(s_full**2))
-
-    return CanonicalPODResult(
-        singular_values=s_vals,
-        wiener_weights=wiener,
-        data_modes=u_data[:, :m_sing],
-        prior_rotation=v_prior,
-        production_modes=prod_modes,
-        coeff_mean=coeff_mean,
-        coeff_var=coeff_var,
-        posterior_mean=post_mean,
-        posterior_sd=post_sd,
-        d_eff=d_eff,
-        info_nats=info_nats,
-    )
+    phi_eval = basis_eval.psi * spec_root[None, :]
+    return _wiener_pod_svd(g_tilde, r_tilde, phi_eval)
