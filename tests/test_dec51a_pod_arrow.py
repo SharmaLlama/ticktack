@@ -140,15 +140,18 @@ def test_kalman_exports_and_compatibility_aliases():
     assert tt_kalman.__all__ == [
         "ArrowProblem",
         "CanonicalPODResult",
+        "KalmanGPResult",
         "arrow_at",
         "arrow_problem",
         "canonical_pod_modes",
+        "kalman_gp_marginal",
     ]
     for name in tt_kalman.__all__:
         obj = getattr(tt_kalman, name)
         assert name not in tt_linear.__all__
         assert getattr(tt_linear, name) is obj
-        assert getattr(ticktack, name) is obj
+        if name != "KalmanGPResult":
+            assert getattr(ticktack, name) is obj
 
     assert "whiten_rank_one" not in tt_linear.__all__
     assert tt_linear.whiten_rank_one is _whiten_rank_one
