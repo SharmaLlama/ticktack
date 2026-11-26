@@ -812,7 +812,7 @@ class TestNUTSAndSVI:
         map_res = tt.fit_map(loggp_model, synthetic_dataset, ps, cfg, method="BFGS", max_steps=120)
         assert float(map_res.log_posterior) > lp_init
         t_eval = jnp.linspace(768.0, 782.0, 120)
-        q_map = map_res.fitted_model.production(t_eval, q_std=loggp_model.q_std)
+        q_map = map_res.model.production(t_eval, q_std=loggp_model.q_std)
         assert jnp.all(q_map > 0.0), f"LogGP MAP Q(t) had non-positive values: min={float(q_map.min())}"
 
         # (b) AutoMVN SVI
@@ -1211,10 +1211,10 @@ def test_subspace_cbm_map_and_nuts_end_to_end():
     res_map = tt.fit_map(m_sub, ds, ps_sub, cfg, method="BFGS", max_steps=60)
     assert res_map.converged
     assert res_map.theta_map["cbm.alpha"].shape == (2,)
-    assert float(jnp.max(jnp.abs(res_map.fitted_model.cbm.kirchhoff_residual()))) < 1e-10
+    assert float(jnp.max(jnp.abs(res_map.model.cbm.kirchhoff_residual()))) < 1e-10
 
     idata = tt.sample_nuts(
-        res_map.fitted_model,
+        res_map.model,
         ds,
         ps_sub,
         cfg,

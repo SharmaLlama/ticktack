@@ -92,22 +92,90 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _BIJECTOR_TYPES = Literal["identity", "exp", "softplus", "sigmoid"]
+_VALID_BIJECTORS = ("identity", "exp", "softplus", "sigmoid")
+_PARAMSPEC_SET_FIELDS = frozenset({"path", "bijector", "prior_mean", "prior_sd", "low", "high"})
+_LMCFG_SET_FIELDS = frozenset({
+    "offset_mode", "global_prior_mean", "global_prior_sd", "lab_prior_sd",
+    "solar_prior_sd", "trend_prior_sd", "marginalize_solar", "marginalize_trend",
+    "marginalize_gp", "marginalize_field", "n_gp_modes", "include_gp_initial_cov",
+    "include_field_initial_cov", "whiten_method", "dct_operator",
+})
 
 
-class ParamSpec(eqx.Module):
+def _concrete_f64_array(
+    value: ArrayLike,
+    name: str,
+    *,
+    owner: str = "ParamSpec",
+) -> np.ndarray:
+    """Convert ``value`` to a concrete ``float64`` NumPy array, rejecting JAX tracers."""
+    c = _concrete(value)
+    if c is None:
+        raise ValueError(f"{owner}: {name} must be a concrete (non-traced) value.")
+    try:
+        return np.asarray(c, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{owner}: {name} must be numeric; got {value!r}.") from exc
+
+
+def _concrete_scalar_f64(value: Any, name: str, *, owner: str = "ParamSpec") -> float:
+    """Convert scalar ``value`` to a concrete Python ``float``, rejecting non-scalars/tracers."""
+    arr = _concrete_f64_array(value, name, owner=owner)
+    if arr.ndim != 0:
+        raise ValueError(
+            f"{owner}: {name} must be a scalar float; got shape {arr.shape}."
+        )
+    return float(arr)
+
+
+def _parse_flat_zdx_updates(
+    parameters: Any,
+    values: Any,
+    updates: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Normalize top-level ``zdx.Base.set`` inputs; return ``None`` for nested leaf paths."""
+    if updates:
+        if parameters is not None or values is not None:
+            raise TypeError(
+                "set() received mixed input styles; pass (parameters, values), "
+                "a mapping, or keyword arguments."
+            )
+        items = list(updates.items())
+    elif isinstance(parameters, dict):
+        if values is not None:
+            raise TypeError("set() received both a mapping and values.")
+        items = list(parameters.items())
+    elif isinstance(parameters, str):
+        items = [(parameters, values)]
+    elif isinstance(parameters, (list, tuple)) and all(
+        isinstance(p, str) for p in parameters
+    ):
+        if not isinstance(values, (list, tuple)) or len(values) != len(parameters):
+            return None
+        items = list(zip(parameters, values))
+    else:
+        return None
+    if any(not isinstance(k, str) or "." in k for k, _ in items):
+        return None
+    return dict(items)
+
+
+class ParamSpec(zdx.Base):
     """Specification for a parameter leaf (scalar or array) with a smooth bijector.
 
     Maps elementwise between unconstrained real values ``u`` and constrained
     physical values ``theta`` via a differentiable bijection:
 
-    * ``"identity"``: ``theta = u`` (unbounded reals).
-    * ``"exp"``: ``theta = exp(u)`` (strictly positive quantities).
+    * ``"identity"``: ``theta = u`` (unbounded reals; see :meth:`normal`).
+    * ``"exp"``: ``theta = exp(u)`` (strictly positive quantities; see :meth:`lognormal`).
     * ``"softplus"``: ``theta = log(1 + exp(u)) + 1e-6`` (soft positive).
-    * ``"sigmoid"``: ``theta = low + (high - low) * sigmoid(u)`` (bounded).
+    * ``"sigmoid"``: ``theta = low + (high - low) * sigmoid(u)`` (bounded; see :meth:`bounded`).
 
-    The Gaussian prior ``N(prior_mean, prior_sd^2)`` is specified directly in
+    The Gaussian prior ``N(prior_mean, prior_sd^2)`` is specified in
     unconstrained ``u`` space so that ``int exp(log_prior_unconstrained(u)) du = 1``
-    identically (essential for calibrated SMC evidence estimation).
+    identically (essential for calibrated SMC evidence estimation). Prefer the
+    physical-unit constructors :meth:`normal`, :meth:`lognormal`, and
+    :meth:`bounded` over manual unconstrained ``prior_mean`` offsets.
     """
 
     path: str = eqx.field(static=True)
@@ -128,16 +196,31 @@ class ParamSpec(eqx.Module):
         low: float = 0.0,
         high: float = 1.0,
     ) -> None:
-        if bijector not in ("identity", "exp", "softplus", "sigmoid"):
+        owner = f"ParamSpec({path!r})"
+        if bijector not in _VALID_BIJECTORS:
             raise ValueError(
-                f"bijector must be 'identity', 'exp', 'softplus', or 'sigmoid'; got {bijector!r}."
+                f"{owner}: bijector must be one of {_VALID_BIJECTORS}; got {bijector!r}."
             )
-        if bijector == "sigmoid" and not (float(high) > float(low)):
+        low_f = _concrete_scalar_f64(low, "low", owner=owner)
+        high_f = _concrete_scalar_f64(high, "high", owner=owner)
+        if not (math.isfinite(low_f) and math.isfinite(high_f)):
             raise ValueError(
-                f"sigmoid bijector requires high > low; got low={low}, high={high}."
+                f"{owner}: low and high must be finite; got low={low!r}, high={high!r}."
             )
-        pm_np = np.asarray(prior_mean, dtype=np.float64)
-        ps_np = np.maximum(np.asarray(prior_sd, dtype=np.float64), 1e-30)
+        if bijector == "sigmoid" and not (high_f > low_f):
+            raise ValueError(
+                f"{owner}: sigmoid bijector requires low < high; got low={low!r}, high={high!r}."
+            )
+        pm_np = _concrete_f64_array(prior_mean, "prior_mean", owner=owner)
+        ps_np = _concrete_f64_array(prior_sd, "prior_sd", owner=owner)
+        if not np.all(np.isfinite(pm_np)):
+            raise ValueError(
+                f"{owner}: prior_mean must be finite; got {prior_mean!r}."
+            )
+        if not np.all(np.isfinite(ps_np)) or np.any(ps_np <= 0.0):
+            raise ValueError(
+                f"{owner}: prior_sd must be finite and strictly positive (> 0); got {prior_sd!r}."
+            )
         b_shape = np.broadcast_shapes(pm_np.shape, ps_np.shape)
         pm_b = np.broadcast_to(pm_np, b_shape)
         ps_b = np.broadcast_to(ps_np, b_shape)
@@ -147,8 +230,231 @@ class ParamSpec(eqx.Module):
         self._prior_shape = tuple(int(s) for s in b_shape)
         self._prior_mean_tuple = tuple(float(x) for x in pm_b.reshape(-1))
         self._prior_sd_tuple = tuple(float(x) for x in ps_b.reshape(-1))
-        self.low = float(low)
-        self.high = float(high)
+        self.low = low_f
+        self.high = high_f
+
+    @classmethod
+    def normal(
+        cls,
+        path: str,
+        mean: ArrayLike = 0.0,
+        sd: ArrayLike = 1.0,
+    ) -> ParamSpec:
+        """Construct a Gaussian prior directly in physical units (identity bijector).
+
+        Places ``theta = u ~ N(mean, sd^2)`` on an unbounded scalar or array
+        model leaf so ``spec.constrain(spec.prior_mean) == mean`` with zero
+        Jacobian distortion.
+
+        Parameters
+        ----------
+        path : str
+            ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.t_start"``).
+        mean : ArrayLike, default 0.0
+            Physical prior mean (scalar or array broadcastable to the target leaf),
+            in the leaf's native physical units (e.g. calendar years ``yr`` for
+            ``t_start``).
+        sd : ArrayLike, default 1.0
+            Physical ``1 sigma`` prior standard deviation (finite and ``> 0``),
+            in the same units as ``mean``.
+
+        Returns
+        -------
+        ParamSpec
+            Specification with ``bijector="identity"``, ``prior_mean=mean``, and
+            ``prior_sd=sd``.
+
+        Examples
+        --------
+        >>> spec = ParamSpec.normal("production.spike.t_start", mean=774.5, sd=0.5)
+        >>> float(spec.constrain(spec.prior_mean))
+        774.5
+        """
+        owner = f"ParamSpec.normal({path!r})"
+        mean_np = _concrete_f64_array(mean, "mean", owner=owner)
+        sd_np = _concrete_f64_array(sd, "sd", owner=owner)
+        if not np.all(np.isfinite(mean_np)):
+            raise ValueError(f"{owner}: mean must be finite; got {mean!r}.")
+        if not np.all(np.isfinite(sd_np)) or np.any(sd_np <= 0.0):
+            raise ValueError(
+                f"{owner}: sd must be finite and strictly positive (> 0); got {sd!r}."
+            )
+        return cls(path, bijector="identity", prior_mean=mean_np, prior_sd=sd_np)
+
+    @classmethod
+    def lognormal(
+        cls,
+        path: str,
+        median: ArrayLike,
+        sigma_log: ArrayLike,
+    ) -> ParamSpec:
+        """Construct a strictly positive log-normal prior from its physical median.
+
+        Places ``u = ln(theta) ~ N(ln(median), sigma_log^2)`` under the
+        exponential bijector ``theta = exp(u)``, so the induced physical prior
+        has exact median ``median`` (``spec.constrain(spec.prior_mean) == median``)
+        and multiplicative ``1 sigma`` central 68% interval
+        ``[median * exp(-sigma_log), median * exp(+sigma_log)]``. Supports both
+        scalar and ND array leaves.
+
+        Parameters
+        ----------
+        path : str
+            ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.fluence"``).
+        median : ArrayLike
+            Strictly positive physical prior median (``> 0``), in the leaf's
+            physical units (e.g. ``atoms cm^-2 s^-1 yr`` or ``q_0 yr`` for
+            ``MiyakeSpike.fluence``).
+        sigma_log : ArrayLike
+            Log-space standard deviation ``sigma_log > 0`` (dimensionless natural-log
+            units; e.g. ``0.5`` gives a factor ``exp(0.5) ~ 1.65`` ``1 sigma`` spread).
+
+        Returns
+        -------
+        ParamSpec
+            Specification with ``bijector="exp"``, ``prior_mean=ln(median)``, and
+            ``prior_sd=sigma_log``.
+
+        Examples
+        --------
+        >>> spec = ParamSpec.lognormal("production.spike.fluence", median=6.5, sigma_log=0.5)
+        >>> round(float(spec.constrain(spec.prior_mean)), 12)
+        6.5
+        """
+        owner = f"ParamSpec.lognormal({path!r})"
+        med_np = _concrete_f64_array(median, "median", owner=owner)
+        sig_np = _concrete_f64_array(sigma_log, "sigma_log", owner=owner)
+        if not np.all(np.isfinite(med_np)) or np.any(med_np <= 0.0):
+            raise ValueError(
+                f"{owner}: median must be finite and strictly positive (> 0); got {median!r}."
+            )
+        if not np.all(np.isfinite(sig_np)) or np.any(sig_np <= 0.0):
+            raise ValueError(
+                f"{owner}: sigma_log must be finite and strictly positive (> 0); "
+                f"got {sigma_log!r}."
+            )
+        return cls(
+            path,
+            bijector="exp",
+            prior_mean=np.log(med_np),
+            prior_sd=sig_np,
+        )
+
+    @classmethod
+    def bounded(
+        cls,
+        path: str,
+        low: float,
+        high: float,
+        *,
+        median: ArrayLike | None = None,
+        logit_sd: ArrayLike = 1.5,
+    ) -> ParamSpec:
+        """Construct a logit-normal prior on ``(low, high)`` in physical units.
+
+        Maps ``u ~ N(u_0, logit_sd^2)`` through ``theta = low + (high - low) * sigmoid(u)``.
+        When ``median`` is omitted, ``u_0 = 0`` centres the prior median at the
+        interval midpoint ``0.5 * (low + high)``. When ``median`` is supplied,
+        ``u_0 = logit((median - low) / (high - low))`` is evaluated in
+        cancellation-free ``float64`` arithmetic so
+        ``spec.constrain(spec.prior_mean) == median`` to machine precision across
+        both narrow and wide intervals.
+
+        Parameters
+        ----------
+        path : str
+            ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.duration"``).
+        low, high : float
+            Finite lower and upper physical bounds satisfying ``low < high``
+            (e.g. ``0.01`` and ``2.0`` in ``yr`` for a sharp Miyake spike duration).
+        median : ArrayLike, optional
+            Optional physical prior median strictly inside ``(low, high)``
+            (scalar or array). Defaults to ``None`` (midpoint ``0.5 * (low + high)``).
+        logit_sd : ArrayLike, default 1.5
+            Unconstrained logit-space standard deviation (``> 0``; ``~1.2-1.5``
+            places broad, weakly informative mass across the interior while
+            preventing boundary pile-up).
+
+        Returns
+        -------
+        ParamSpec
+            Specification with ``bijector="sigmoid"``, bounds ``(low, high)``,
+            exact logit ``prior_mean``, and ``prior_sd=logit_sd``.
+
+        Examples
+        --------
+        >>> spec = ParamSpec.bounded("production.spike.duration", 0.01, 2.0, median=0.08)
+        >>> round(float(spec.constrain(spec.prior_mean)), 12)
+        0.08
+        """
+        owner = f"ParamSpec.bounded({path!r})"
+        low_f = _concrete_scalar_f64(low, "low", owner=owner)
+        high_f = _concrete_scalar_f64(high, "high", owner=owner)
+        if not (math.isfinite(low_f) and math.isfinite(high_f)) or not (high_f > low_f):
+            raise ValueError(
+                f"{owner}: requires finite low < high; got low={low!r}, high={high!r}."
+            )
+        lsd_np = _concrete_f64_array(logit_sd, "logit_sd", owner=owner)
+        if not np.all(np.isfinite(lsd_np)) or np.any(lsd_np <= 0.0):
+            raise ValueError(
+                f"{owner}: logit_sd must be finite and strictly positive (> 0); "
+                f"got {logit_sd!r}."
+            )
+        if median is None:
+            pm: ArrayLike = 0.0
+        else:
+            med_np = _concrete_f64_array(median, "median", owner=owner)
+            if not np.all(np.isfinite(med_np)) or not np.all(
+                (med_np > low_f) & (med_np < high_f)
+            ):
+                raise ValueError(
+                    f"{owner}: median={median!r} must be finite and lie strictly "
+                    f"inside (low, high)=({low_f}, {high_f})."
+                )
+            d_lo = med_np - low_f
+            d_hi = high_f - med_np
+            near_mid = np.abs(d_lo - d_hi) <= 0.5 * d_hi
+            numer = (2.0 * med_np - (low_f + high_f)) if (low_f * high_f < 0.0) else (d_lo - d_hi)
+            safe_rel = np.where(near_mid, numer / d_hi, 0.0)
+            pm = np.where(near_mid, np.log1p(safe_rel), np.log(d_lo) - np.log(d_hi))
+        return cls(
+            path,
+            bijector="sigmoid",
+            prior_mean=pm,
+            prior_sd=lsd_np,
+            low=low_f,
+            high=high_f,
+        )
+
+    def set(
+        self,
+        parameters: Any = None,
+        values: Any = None,
+        /,
+        **updates: Any,
+    ) -> ParamSpec:
+        """Return a validated copy of ``self`` with updated specification field(s)."""
+        flat = _parse_flat_zdx_updates(parameters, values, updates)
+        if flat is None:
+            return super().set(parameters, values, **updates)
+        unknown = set(flat) - _PARAMSPEC_SET_FIELDS
+        if unknown:
+            bad = sorted(unknown)[0]
+            raise AttributeError(f"ParamSpec has no settable attribute {bad!r}.")
+        pm_cur = np.asarray(self._prior_mean_tuple, dtype=np.float64).reshape(
+            self._prior_shape
+        )
+        ps_cur = np.asarray(self._prior_sd_tuple, dtype=np.float64).reshape(
+            self._prior_shape
+        )
+        return type(self)(
+            path=flat.get("path", self.path),
+            bijector=flat.get("bijector", self.bijector),
+            prior_mean=flat.get("prior_mean", pm_cur),
+            prior_sd=flat.get("prior_sd", ps_cur),
+            low=flat.get("low", self.low),
+            high=flat.get("high", self.high),
+        )
 
     @property
     def prior_mean(self) -> float | jax.Array:
@@ -200,8 +506,10 @@ class ParamSpec(eqx.Module):
         if self.bijector == "sigmoid":
             lo = jnp.asarray(self.low, dtype=jnp.float64)
             hi = jnp.asarray(self.high, dtype=jnp.float64)
-            p = jnp.clip((t_arr - lo) / (hi - lo), 1e-12, 1.0 - 1e-12)
-            return jnp.log(p) - jnp.log1p(-p)
+            span = hi - lo
+            p_lo = jnp.clip((t_arr - lo) / span, 1e-12, 1.0 - 1e-12)
+            p_hi = jnp.clip((hi - t_arr) / span, 1e-12, 1.0 - 1e-12)
+            return jnp.log(p_lo) - jnp.log(p_hi)
         return t_arr
 
     def log_abs_det_jacobian(self, u: ArrayLike) -> jax.Array:
@@ -411,7 +719,7 @@ class ParameterSpace(zdx.Base):
 # ---------------------------------------------------------------------------
 
 
-class LinearMarginalConfig(eqx.Module):
+class LinearMarginalConfig(zdx.Base):
     """Configuration for analytical Gaussian marginalization of linear parameters."""
 
     offset_mode: str = eqx.field(static=True)
@@ -482,6 +790,27 @@ class LinearMarginalConfig(eqx.Module):
         self.include_field_initial_cov = bool(include_field_initial_cov)
         self.whiten_method = str(whiten_method)
         self.dct_operator = dct_operator
+
+    def set(
+        self,
+        parameters: Any = None,
+        values: Any = None,
+        /,
+        **updates: Any,
+    ) -> LinearMarginalConfig:
+        """Return a validated copy of ``self`` with updated config or ``dct_operator`` field(s)."""
+        flat = _parse_flat_zdx_updates(parameters, values, updates)
+        if flat is None:
+            return super().set(parameters, values, **updates)
+        unknown = set(flat) - _LMCFG_SET_FIELDS
+        if unknown:
+            bad = sorted(unknown)[0]
+            raise AttributeError(
+                f"LinearMarginalConfig has no settable attribute {bad!r}."
+            )
+        kwargs = {name: getattr(self, name) for name in _LMCFG_SET_FIELDS}
+        kwargs.update(flat)
+        return type(self)(**kwargs)
 
 
 # ---------------------------------------------------------------------------
