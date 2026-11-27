@@ -951,7 +951,7 @@ class CarbonBoxModel(zdx.Base):
                 return ()
             from .likelihood import ParamSpec
 
-            return (ParamSpec(f"{prefix}.alpha", "identity", self.alpha, sd),)
+            return (ParamSpec(f"{prefix}.alpha", "identity", 0.0, sd),)
         leaves = jax.tree_util.tree_leaves(eqx.filter(self, eqx.is_inexact_array))
         if any(int(x.size) > 0 for x in leaves):
             raise NotImplementedError(f"{type(self).__name__} must implement param_specs().")

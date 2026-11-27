@@ -580,13 +580,31 @@ def test_from_boxes_conversions_residence_times_summary_and_param_specs() -> Non
         cbm_bal.param_specs(prior_sd=0.0)
     with pytest.raises(ValueError, match="prior_sd"):
         cbm_bal.param_specs(prior_sd=float("inf"))
-    sub_default = SubspaceCBM(
+    sub_nonzero = SubspaceCBM(
         _asym_3box_topo(),
         cbm_bal.log_rates_free,
         np.ones((5, 2)) * 0.1,
         float(cbm_bal.log_total_mass),
+        alpha=np.array([0.8, -0.6], dtype=np.float64),
     )
-    assert sub_default.param_specs()[0].prior_sd == pytest.approx(1.0)
+    sub_spec = sub_nonzero.param_specs()[0]
+    assert sub_spec.prior_sd == pytest.approx(1.0)
+    assert float(np.asarray(sub_spec.prior_mean)) == pytest.approx(0.0, abs=0.0)
+    rm_sub = RadiocarbonModel(sub_nonzero, SteadyProduction(1.76) + spike)
+    ps_sub = ParameterSpace(rm_sub, list(sub_nonzero.param_specs(prior_sd=1.25)))
+    u_sub = ps_sub.unconstrain(rm_sub)
+    np.testing.assert_allclose(u_sub, [0.8, -0.6], rtol=1e-14)
+    np.testing.assert_allclose(ps_sub.prior_means, [0.0, 0.0], atol=0.0)
+    expected_sub_lp = float(
+        np.sum(
+            -0.5 * (np.array([0.8, -0.6]) / 1.25) ** 2
+            - math.log(1.25)
+            - 0.5 * math.log(2.0 * math.pi)
+        )
+    )
+    assert float(ps_sub.log_prior_unconstrained(u_sub)) == pytest.approx(
+        expected_sub_lp, rel=1e-14, abs=1e-14
+    )
 
     for cbm_case, kwargs, expected_cbm_dim in [
         (cbm_bal, {"prior_sd": 0.37}, 5),
