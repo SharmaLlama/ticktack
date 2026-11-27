@@ -708,8 +708,9 @@ class _JosephUpdateResult(NamedTuple):
         Updated state mean of shape ``(d_state,)``.
     cov : jax.Array
         Updated state covariance of shape ``(d_state, d_state)``.
-    delta_ll : jax.Array
-        Scalar log-likelihood increment in nats (``0.0`` when inactive).
+    delta_log_norm : jax.Array
+        Scalar Gaussian log-normalizer increment ``-½ ln(2π s)`` in nats
+        (``0.0`` when inactive).
     std_innov : jax.Array
         Standardized scalar innovation ``v / sqrt(s)`` (``0.0`` when inactive).
     std_extra_row : jax.Array
@@ -726,7 +727,7 @@ class _JosephUpdateResult(NamedTuple):
 
     mean: jax.Array
     cov: jax.Array
-    delta_ll: jax.Array
+    delta_log_norm: jax.Array
     std_innov: jax.Array
     std_extra_row: jax.Array
     m_extra: jax.Array
@@ -739,8 +740,8 @@ class _KalmanForwardPass(NamedTuple):
 
     Attributes
     ----------
-    total_ll : jax.Array
-        Unmarginalized GP + CBM innovation log-likelihood in nats.
+    log_norm : jax.Array
+        Accumulated Gaussian log-normalizer ``Σ_j -½ ln(2π s_j)`` in nats.
     m_filt_all : jax.Array
         Filtered state means ``m_{k|k}`` of shape ``(N_grid, d_state)``.
     p_filt_all : jax.Array
@@ -762,7 +763,7 @@ class _KalmanForwardPass(NamedTuple):
         Per-slot inverse innovation SDs of shape ``(N_grid, max_simul)``.
     """
 
-    total_ll: jax.Array
+    log_norm: jax.Array
     m_filt_all: jax.Array
     p_filt_all: jax.Array
     mx_filt_all: jax.Array
@@ -804,6 +805,24 @@ class _KalmanMarginalizedNuisance(NamedTuple):
     sin_adj_all: jax.Array
 
 
+def _validate_cbm_system(
+    A: ArrayLike,
+    b: ArrayLike,
+    alpha_unit: ArrayLike,
+) -> tuple[jax.Array, jax.Array, int]:
+    """Validate CBM rate matrix ``A`` and branching vector ``b`` at entry."""
+    a_mat = jnp.asarray(A, dtype=jnp.float64)
+    if a_mat.ndim != 2 or a_mat.shape[0] != a_mat.shape[1] or a_mat.shape[0] < 1:
+        raise ValueError(
+            f"A must be a non-empty 2D square matrix (n_boxes, n_boxes); got shape {a_mat.shape}."
+        )
+    n_boxes = a_mat.shape[0]
+    b_arr = jnp.asarray(b, dtype=jnp.float64)
+    if b_arr.ndim != 1 or b_arr.shape[0] != n_boxes:
+        raise ValueError(f"b must be a 1D array of length {n_boxes}; got shape {b_arr.shape}.")
+    return a_mat, jnp.asarray(alpha_unit, dtype=jnp.float64) * b_arr, n_boxes
+
+
 def _normalize_concrete_windows(
     t_starts: ArrayLike,
     t_ends: ArrayLike | None,
@@ -829,12 +848,35 @@ def _normalize_concrete_windows(
             f"got {starts.shape} and {ends.shape}."
         )
     n_obs, m_sub = starts.shape
+    if n_obs < 1:
+        raise ValueError("At least one observation window is required.")
+    if m_sub < 1:
+        raise ValueError("Observation windows must have at least 1 sub-window column (m_sub >= 1).")
+    if not (np.all(np.isfinite(starts)) and np.all(np.isfinite(ends))):
+        raise ValueError("Observation window timestamps (t_starts, t_ends) must be finite.")
+    if np.any(ends < starts):
+        raise ValueError("Seasonal windows require t_ends >= t_starts.")
+
     if sub_weights is None:
         weights = np.full((n_obs, m_sub), 1.0 / m_sub, dtype=np.float64)
     else:
-        w_raw = np.broadcast_to(np.asarray(c_w, dtype=np.float64), (n_obs, m_sub))
+        w_arr = np.asarray(c_w, dtype=np.float64)
+        if not np.all(np.isfinite(w_arr)):
+            raise ValueError("sub_weights must contain finite values.")
+        if np.any(w_arr < 0.0):
+            raise ValueError("sub_weights must be non-negative.")
+        try:
+            w_raw = np.broadcast_to(w_arr, (n_obs, m_sub))
+        except ValueError as exc:
+            raise ValueError(
+                f"sub_weights of shape {w_arr.shape} cannot broadcast to ({n_obs}, {m_sub})."
+            ) from exc
         w_sum = np.sum(w_raw, axis=-1, keepdims=True)
-        weights = w_raw / np.where(w_sum > 0.0, w_sum, 1.0)
+        if np.any(w_sum <= 0.0):
+            raise ValueError(
+                "Each observation row in sub_weights must have strictly positive total weight."
+            )
+        weights = w_raw / w_sum
     return starts, ends, weights
 
 
@@ -843,6 +885,8 @@ def _resolve_kalman_time_grid(
     c_starts: np.ndarray,
     c_ends: np.ndarray,
     dt: float | None,
+    *,
+    c_weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """Build or validate a concrete uniform step grid ``(t_grid_np, step_dt)``."""
     if c_starts.size == 0:
@@ -862,8 +906,13 @@ def _resolve_kalman_time_grid(
             step_dt = float(c_dt)
         if not math.isfinite(step_dt) or step_dt <= 0.0:
             raise ValueError(f"dt must be finite and strictly positive; got {dt}.")
-        t_min = float(np.min(c_starts))
-        t_max = float(np.max(c_ends))
+        if c_weights is not None:
+            active = c_weights > 0.0
+            t_min = float(np.min(c_starts[active]))
+            t_max = float(np.max(c_ends[active]))
+        else:
+            t_min = float(np.min(c_starts))
+            t_max = float(np.max(c_ends))
         n_steps = max(round((t_max - t_min) / step_dt), 1)
         t_grid_np = t_min + step_dt * np.arange(n_steps + 1, dtype=np.float64)
         return t_grid_np, step_dt
@@ -876,11 +925,11 @@ def _resolve_kalman_time_grid(
         raise ValueError("t_grid must contain finite values.")
     if t_grid_np.size < 2:
         raise ValueError("t_grid must contain at least 2 points.")
-    diffs = np.diff(t_grid_np)
-    step_dt = float(diffs[0])
+    step_dt = float((t_grid_np[-1] - t_grid_np[0]) / (t_grid_np.size - 1))
     if step_dt <= 0.0:
         raise ValueError(f"t_grid must be strictly increasing (step_dt > 0); got {step_dt}.")
-    if not np.allclose(diffs, step_dt, rtol=0.0, atol=1e-9):
+    expected_grid = t_grid_np[0] + step_dt * np.arange(t_grid_np.size, dtype=np.float64)
+    if not np.allclose(t_grid_np, expected_grid, rtol=0.0, atol=1e-9):
         raise ValueError("t_grid must be uniformly spaced.")
     return t_grid_np, step_dt
 
@@ -890,10 +939,11 @@ def _assign_kalman_tracks(
     starts_np: np.ndarray,
     ends_np: np.ndarray,
     weights_np: np.ndarray,
+    step_dt: float | None = None,
 ) -> _TrackAssignment:
-    """Map sub-windows to ``t_grid_np`` indices and greedily colour interval tracks."""
+    """Map active sub-windows to ``t_grid_np`` indices and greedily colour interval tracks."""
     n_grid = t_grid_np.shape[0]
-    dt = float(t_grid_np[1] - t_grid_np[0])
+    dt = float((t_grid_np[-1] - t_grid_np[0]) / (n_grid - 1)) if step_dt is None else float(step_dt)
     t0 = float(t_grid_np[0])
     n_obs, m_sub = starts_np.shape
 
@@ -915,11 +965,14 @@ def _assign_kalman_tracks(
         s_lo = n_grid
         e_hi = 0
         for m in range(m_sub):
+            w_m = float(weights_np[i, m])
+            if w_m == 0.0:
+                continue
             ks = _to_idx(float(starts_np[i, m]))
             ke = _to_idx(float(ends_np[i, m]))
             s_lo = min(s_lo, ks)
             e_hi = max(e_hi, ke)
-            pairs.append((ks, ke, float(weights_np[i, m])))
+            pairs.append((ks, ke, w_m))
         obs_s_min[i] = s_lo
         obs_e_max[i] = e_hi
         sub_bounds.append(pairs)
@@ -955,14 +1008,16 @@ def _build_seasonal_kalman_schedule(
     ends_np: np.ndarray,
     weights_np: np.ndarray,
     c_obs: ArrayLike,
+    step_dt: float | None = None,
+    *,
     d_gp: int = 0,
 ) -> _KalmanSchedule:
     """Assemble accumulator weights and per-node observation design tensors."""
     c_obs_jax = jnp.asarray(c_obs, dtype=jnp.float64)
-    tracks = _assign_kalman_tracks(t_grid_np, starts_np, ends_np, weights_np)
     n_grid = t_grid_np.shape[0]
     n_steps = n_grid - 1
-    dt = float(t_grid_np[1] - t_grid_np[0])
+    dt = float((t_grid_np[-1] - t_grid_np[0]) / n_steps) if step_dt is None else float(step_dt)
+    tracks = _assign_kalman_tracks(t_grid_np, starts_np, ends_np, weights_np, step_dt=dt)
     n_obs, n_boxes = c_obs_jax.shape
     n_tracks = tracks.n_tracks
 
@@ -1209,7 +1264,7 @@ def _joseph_scalar_update(
     new_cov = i_kh @ cov @ i_kh.T + r_var * jnp.outer(k_gain, k_gain)
     new_cov = 0.5 * (new_cov + new_cov.T)
 
-    delta_ll = -0.5 * (math.log(2.0 * math.pi) + jnp.log(safe_s) + (innov**2) / safe_s)
+    delta_log_norm = -0.5 * (math.log(2.0 * math.pi) + jnp.log(safe_s))
     std_innov = jnp.where(active, innov * inv_sqrt_s, 0.0)
 
     h_row_nuis = extra_cols[0]
@@ -1221,7 +1276,7 @@ def _joseph_scalar_update(
     return _JosephUpdateResult(
         mean=jnp.where(active, new_mean, mean),
         cov=jnp.where(active, new_cov, cov),
-        delta_ll=jnp.where(active, delta_ll, 0.0),
+        delta_log_norm=jnp.where(active, delta_log_norm, 0.0),
         std_innov=std_innov,
         std_extra_row=std_extra_row,
         m_extra=jnp.where(active, new_m_extra, m_extra),
@@ -1288,7 +1343,7 @@ def _node_measurement_updates(
         extra_pack = jnp.concatenate([nuis_u_raw[idx_i][None, :], m_extra], axis=0)
         upd = _joseph_scalar_update(mean, cov, h_i, y_i, r_i, act_i, extra_pack)
         mean, cov, m_extra = upd.mean, upd.cov, upd.m_extra
-        ll_node = ll_node + upd.delta_ll
+        ll_node = ll_node + upd.delta_log_norm
         std_innovs.append(upd.std_innov)
         std_extras.append(upd.std_extra_row)
         k_gains.append(upd.k_gain)
@@ -1353,12 +1408,12 @@ def _run_kalman_forward_pass(
             (m_f, p_f, mx_f, phi_k, s_in, s_ex, kg, isqs),
         )
 
-    (_, _, _, total_ll), scan_out = jax.lax.scan(
+    (_, _, _, log_norm), scan_out = jax.lax.scan(
         _forward_step, (m0, p0, mx0, ll0), jnp.arange(n_steps, dtype=jnp.int32)
     )
     m_seq, p_seq, mx_seq, phi_seq, sin_seq, sex_seq, kg_seq, isqs_seq = scan_out
     return _KalmanForwardPass(
-        total_ll=total_ll,
+        log_norm=log_norm,
         m_filt_all=jnp.concatenate([m0[None, :], m_seq], axis=0),
         p_filt_all=jnp.concatenate([p0[None, :, :], p_seq], axis=0),
         mx_filt_all=jnp.concatenate([mx0[None, :, :], mx_seq], axis=0),
@@ -1370,14 +1425,41 @@ def _run_kalman_forward_pass(
     )
 
 
+def _qr_whiten_and_posterior(
+    x: jax.Array,
+    u_mat: jax.Array,
+) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    """Factor ``[U; I_p] = Q R`` once to return ``(quad, ½ ln det, ω̂, Σ_{ω|d})``."""
+    p_cols = u_mat.shape[1]
+    eye = jnp.eye(p_cols, dtype=jnp.float64)
+    aug = jnp.concatenate([u_mat, eye], axis=0)
+    q_aug, r_upper = jnp.linalg.qr(aug, mode="reduced")
+    n_rows = u_mat.shape[0]
+    q_top = q_aug[:n_rows]
+    q_bot = q_aug[n_rows:]
+    half_logdet = jnp.sum(jnp.log(jnp.abs(jnp.diag(r_upper))))
+
+    omega0 = jsl.solve_triangular(r_upper, q_top.T @ x, lower=False)
+    r_top = x - u_mat @ omega0
+    d_omega = jsl.solve_triangular(r_upper, q_top.T @ r_top - q_bot.T @ omega0, lower=False)
+    omega = omega0 + d_omega
+    r_final = x - u_mat @ omega
+    quad = jnp.dot(r_final, r_final) + jnp.dot(omega, omega)
+
+    r_inv = jsl.solve_triangular(r_upper, eye, lower=False)
+    cov_raw = r_inv @ r_inv.T
+    return quad, half_logdet, omega, 0.5 * (cov_raw + cov_raw.T)
+
+
 def _marginalize_kalman_nuisance(
     fwd: _KalmanForwardPass,
     nuis: _KalmanNuisanceSpec,
 ) -> _KalmanMarginalizedNuisance:
-    """Marginalize linear nuisance columns analytically via a single Cholesky whitening call."""
+    """Marginalize linear nuisance columns analytically via a single thin-QR pass."""
+    all_sin = fwd.sin_all.reshape(-1)
     if nuis.p_nuis == 0:
         return _KalmanMarginalizedNuisance(
-            loglike=fwd.total_ll,
+            loglike=fwd.log_norm - 0.5 * jnp.dot(all_sin, all_sin),
             nuisance_mean=None,
             nuisance_cov=None,
             cov_omega_nuis=jnp.zeros((0, 0), dtype=jnp.float64),
@@ -1385,16 +1467,11 @@ def _marginalize_kalman_nuisance(
             sin_adj_all=fwd.sin_all,
         )
 
-    all_sin = fwd.sin_all.reshape(-1)
     all_sex = fwd.sex_all.reshape(-1, nuis.p_nuis)
-    u_whitened, half_logdet_nuis = whiten_cholesky(all_sin, all_sex)
-    omega_nuis, cov_omega_nuis = posterior(all_sin, all_sex)
-    total_ll = (
-        fwd.total_ll
-        + 0.5 * jnp.dot(all_sin, all_sin)
-        - 0.5 * jnp.dot(u_whitened, u_whitened)
-        - half_logdet_nuis
+    quad_nuis, half_logdet_nuis, omega_nuis, cov_omega_nuis = _qr_whiten_and_posterior(
+        all_sin, all_sex
     )
+    total_ll = fwd.log_norm - 0.5 * quad_nuis - half_logdet_nuis
     nuis_mean = nuis.prior_mean + nuis.prior_root @ omega_nuis
     raw_cov = nuis.prior_root @ cov_omega_nuis @ nuis.prior_root.T
     nuis_cov = 0.5 * (raw_cov + raw_cov.T)
@@ -1487,7 +1564,7 @@ def _run_kalman_rts_smoother(
     return m_smooth, p_smooth
 
 
-# shape-exempt(carbon): public state-space GP entry point exposing explicit grid, window, observation, and nuisance keyword options
+# shape-exempt(carbon): existing public API moved from linear.py preserving 20-parameter signature until Decision 5.3 surface cleanup
 def kalman_gp_marginal(
     A: ArrayLike,
     b: ArrayLike,
@@ -1566,7 +1643,7 @@ def kalman_gp_marginal(
         ``obs_matrix`` is ``None``.
     obs_scale : float or array-like, default 1.0
         Linear conversion factor from box ``¹⁴C`` inventory ``δy_c`` to data
-        units (``‰``), scalar, ``(n_boxes,)``, or ``(N_d,)``.
+        units (``‰``), scalar or 1D array of shape ``(N_d,)``.
     obs_matrix : array-like, optional
         Explicit observation matrix ``C_obs`` of shape ``(N_d, n_boxes)``
         overriding ``box_indices`` and ``obs_scale``.
@@ -1608,19 +1685,18 @@ def kalman_gp_marginal(
         )
     f_gp, q_sde, _, h_gp = sde
 
-    a_mat = jnp.asarray(A, dtype=jnp.float64)
-    n_boxes = a_mat.shape[0]
-    b_eff = alpha_unit * jnp.asarray(b, dtype=jnp.float64).reshape(n_boxes)
-
+    a_mat, b_eff, n_boxes = _validate_cbm_system(A, b, alpha_unit)
     c_starts, c_ends, c_weights = _normalize_concrete_windows(t_starts, t_ends, sub_weights)
     n_obs = c_starts.shape[0]
     resid_arr, sd_arr = _validate_resid_and_sigma(resid, sigma, n_obs)
     c_obs = _build_obs_matrix(
         n_obs, n_boxes, box_indices=box_indices, obs_scale=obs_scale, obs_matrix=obs_matrix
     )
-    t_grid_np, step_dt = _resolve_kalman_time_grid(t_grid, c_starts, c_ends, dt)
+    t_grid_np, step_dt = _resolve_kalman_time_grid(
+        t_grid, c_starts, c_ends, dt, c_weights=c_weights
+    )
     schedule = _build_seasonal_kalman_schedule(
-        t_grid_np, c_starts, c_ends, c_weights, c_obs, d_gp=f_gp.shape[0]
+        t_grid_np, c_starts, c_ends, c_weights, c_obs, step_dt, d_gp=f_gp.shape[0]
     )
     nuis = _prepare_kalman_nuisance(
         resid_arr,
@@ -1666,9 +1742,7 @@ def kalman_gp_marginal(
 from .linear import (
     _build_obs_matrix,
     _try_extract_sde,
-    posterior,
     solin_sarkka_basis,
     stationary_cbm_gp_cov,
-    whiten_cholesky,
     whiten_qr,
 )

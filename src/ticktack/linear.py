@@ -471,12 +471,26 @@ def _build_obs_matrix(
                 f"obs_matrix must have shape ({n_obs}, {n_boxes}); got {c_mat.shape}."
             )
         return c_mat
-    idx = jnp.broadcast_to(jnp.asarray(box_indices, dtype=jnp.int32), (n_obs,))
+    idx_raw = jnp.asarray(box_indices)
+    if idx_raw.ndim > 1 or not jnp.issubdtype(idx_raw.dtype, jnp.integer):
+        raise ValueError(
+            f"box_indices must be an integer scalar or 1D array of length {n_obs}; "
+            f"got shape {idx_raw.shape} and dtype {idx_raw.dtype}."
+        )
+    if idx_raw.ndim == 1 and idx_raw.shape[0] != n_obs:
+        raise ValueError(
+            f"box_indices must have length {n_obs}; got shape {idx_raw.shape}."
+        )
+    idx = jnp.broadcast_to(idx_raw.astype(jnp.int32), (n_obs,))
+    c_idx = _concrete(idx)
+    if c_idx is not None and onp.any((c_idx < 0) | (c_idx >= n_boxes)):
+        raise ValueError(f"box_indices entries must lie in [0, {n_boxes}); got {c_idx}.")
     scale_arr = jnp.asarray(obs_scale, dtype=jnp.float64)
-    if scale_arr.ndim == 1 and scale_arr.shape[0] == n_boxes and n_boxes != n_obs:
-        row_scale = scale_arr[idx]
-    else:
-        row_scale = jnp.broadcast_to(scale_arr, (n_obs,))
+    if scale_arr.ndim > 1 or (scale_arr.ndim == 1 and scale_arr.shape[0] != n_obs):
+        raise ValueError(
+            f"obs_scale must be a scalar or 1D array of length {n_obs}; got shape {scale_arr.shape}."
+        )
+    row_scale = jnp.broadcast_to(scale_arr, (n_obs,))
     return jax.nn.one_hot(idx, n_boxes, dtype=jnp.float64) * row_scale[:, None]
 
 
