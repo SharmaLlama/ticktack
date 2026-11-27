@@ -33,7 +33,7 @@ for graph topology and structural metadata:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import math
 from typing import Any, ClassVar, Literal
 
@@ -578,13 +578,69 @@ def _resolve_named_vector(
     return arr
 
 
-def _extract_prod_weights(cbm: CarbonBoxModel) -> Sequence[float] | jax.Array:
+class _ChartFlagDescriptor:
+    """Non-data descriptor delegating a boolean flag to ``chart`` without blocking subclass fields."""
+
+    def __init__(self, attr: str, fallback: Callable[[CarbonBoxModel], bool]) -> None:
+        self._attr = attr
+        self._fallback = fallback
+
+    def __get__(self, obj: CarbonBoxModel | None, objtype: type | None = None) -> Any:
+        if obj is None:
+            return self
+        chart = obj.__dict__.get("chart")
+        if isinstance(chart, CBMChart):
+            return bool(getattr(chart, self._attr))
+        return bool(self._fallback(obj))
+
+
+def _extract_prod_weights(cbm: CarbonBoxModel) -> tuple[float, ...] | jax.Array:
+    """Return reservoir-index-ordered production weights of length ``cbm.n_boxes``."""
     pw = getattr(cbm, "prod_weights", None)
-    if pw is not None:
-        return pw
+    if pw is not None and not isinstance(pw, jax.core.Tracer):
+        pw_arr = np.asarray(pw, dtype=np.float64)
+        if pw_arr.shape == (len(cbm.topology.prod_box_indices),):
+            out = [0.0] * cbm.n_boxes
+            for idx, val in zip(cbm.topology.prod_box_indices, pw_arr):
+                out[int(idx)] = float(val)
+            return tuple(out)
+        return tuple(float(v) for v in pw_arr)
     if isinstance(cbm, EffectiveCBM):
-        return (cbm.eta_strat, 1.0 - cbm.eta_strat)
+        out = [0.0] * cbm.n_boxes
+        out[0] = float(cbm.eta_strat)
+        out[1] = float(1.0 - cbm.eta_strat)
+        return tuple(out)
     return cbm.production_vector()
+
+
+def _structurally_balanced_chart(cbm: CarbonBoxModel) -> BalancedChart | None:
+    """Return an equivalent :class:`BalancedChart` directly for closed Kirchhoff-balanced models."""
+    if isinstance(cbm.chart, BalancedChart):
+        return cbm.chart
+    if isinstance(cbm, SubspaceCBM):
+        return BalancedChart(
+            cbm.topology,
+            cbm.log_rates_free(),
+            cbm.base_log_total_mass,
+            prod_weights=_extract_prod_weights(cbm),
+            tie_matrix=cbm.tie_matrix_rows,
+        )
+    if isinstance(cbm.chart, ReversibleChart):
+        src = np.asarray(cbm.topology.edges_src, dtype=np.int64)
+        log_f = (
+            jnp.zeros((cbm.topology.n_edges,), dtype=jnp.float64)
+            .at[np.asarray(cbm.chart.pair_forward_edge, dtype=np.int64)]
+            .set(cbm.chart.log_sym_fluxes)
+            .at[np.asarray(cbm.chart.pair_reverse_edge, dtype=np.int64)]
+            .set(cbm.chart.log_sym_fluxes)
+        )
+        return BalancedChart(
+            cbm.topology,
+            log_f - cbm.chart.log_masses[src],
+            jax.scipy.special.logsumexp(cbm.chart.log_masses),
+            prod_weights=_extract_prod_weights(cbm),
+        )
+    return None
 
 
 class CarbonBoxModel(zdx.Base):
@@ -643,21 +699,12 @@ class CarbonBoxModel(zdx.Base):
     def n_boxes(self) -> int:
         return self.topology.n_boxes
 
-    @property
-    def is_detailed_balance(self) -> bool:
-        return (
-            bool(self.chart.is_detailed_balance)
-            if isinstance(self.chart, CBMChart)
-            else isinstance(self, EffectiveCBM)
-        )
-
-    @property
-    def is_subspace(self) -> bool:
-        return (
-            bool(self.chart.is_subspace)
-            if isinstance(self.chart, CBMChart)
-            else isinstance(self, SubspaceCBM)
-        )
+    is_detailed_balance: ClassVar[Any] = _ChartFlagDescriptor(
+        "is_detailed_balance", lambda obj: isinstance(obj, EffectiveCBM)
+    )
+    is_subspace: ClassVar[Any] = _ChartFlagDescriptor(
+        "is_subspace", lambda obj: isinstance(obj, SubspaceCBM)
+    )
 
     def active_parameter_mask(self) -> np.ndarray:
         """Boolean mask over flattened inexact JAX leaves excluding gauge coordinates."""
@@ -861,26 +908,21 @@ class CarbonBoxModel(zdx.Base):
     ) -> CarbonBoxModel:
         """Project a closed Kirchhoff-balanced CBM onto an equivalent :class:`BalancedChart` model."""
         if tie_matrix is None and symmetric_edge_groups is None:
-            if isinstance(self.chart, BalancedChart):
-                return CarbonBoxModel(self.topology, self.chart, decay_rate=self.decay_rate)
-            if isinstance(self, SubspaceCBM):
-                chart = BalancedChart(
-                    self.topology,
-                    self.log_rates_free(),
-                    self.base_log_total_mass,
-                    prod_weights=self.prod_weights,
-                    tie_matrix=self.tie_matrix_rows,
-                )
-                return CarbonBoxModel(self.topology, chart, decay_rate=self.decay_rate)
+            fast_chart = _structurally_balanced_chart(self)
+            if fast_chart is not None:
+                return CarbonBoxModel(self.topology, fast_chart, decay_rate=self.decay_rate)
 
         if isinstance(self.chart, OpenChart) or (
             isinstance(self, EffectiveCBM) and self.calibrate_deep_sink
         ):
             raise ValueError("balanced chart does not allow positive sinks; use chart='open'.")
         sinks = self.sink_rates()
-        if not isinstance(sinks, jax.core.Tracer) and np.any(
-            np.asarray(sinks, dtype=np.float64) > 0.0
-        ):
+        if isinstance(sinks, jax.core.Tracer):
+            raise ValueError(
+                "to_balanced() cannot verify zero sink_rates on traced arrays under jax.jit; "
+                "call to_balanced() eagerly outside jit."
+            )
+        if np.any(np.asarray(sinks, dtype=np.float64) > 0.0):
             raise ValueError("balanced chart does not allow positive sinks; use chart='open'.")
         masses = self.reservoir_masses()
         src = np.asarray(self.topology.edges_src, dtype=np.int64)
@@ -1136,25 +1178,26 @@ def _chart_from_state(
         return FixedChart(
             topo, masses, edge_fluxes, prod_weights=prod_weights, sink_rates=sink_rates
         )
-    has_sinks = sink_rates is not None and bool(
-        np.any(np.asarray(sink_rates, dtype=np.float64) > 0.0)
+    s_jax = (
+        None
+        if sink_rates is None
+        else _require_finite_nonneg_1d(sink_rates, topo.n_boxes, "sink_rates")
     )
-    if chart == "balanced" and not has_sinks:
-        return BalancedChart.from_masses_and_fluxes(
-            topo, masses, edge_fluxes, prod_weights=prod_weights
-        )
-    if chart == "reversible" and not has_sinks:
-        return ReversibleChart.from_masses_and_fluxes(
-            topo, masses, edge_fluxes, prod_weights=prod_weights
-        )
+    has_sinks = s_jax is not None and bool(np.any(np.asarray(s_jax, dtype=np.float64) > 0.0))
     if chart == "open":
-        if sink_rates is None:
-            raise ValueError("'open' chart requires positive sink_rates.")
+        if not has_sinks:
+            raise ValueError(
+                "'open' chart requires at least one positive sink rate (pass sinks=...)."
+            )
+        assert s_jax is not None
         return OpenChart.from_masses_and_fluxes(
-            topo, masses, edge_fluxes, sink_rates, prod_weights=prod_weights
+            topo, masses, edge_fluxes, s_jax, prod_weights=prod_weights
         )
-    if has_sinks and chart in ("balanced", "reversible"):
-        raise ValueError(f"{chart!r} chart does not allow positive sinks; use chart='open'.")
+    if chart in ("balanced", "reversible"):
+        if has_sinks:
+            raise ValueError(f"{chart!r} chart does not allow positive sinks; use chart='open'.")
+        cls = BalancedChart if chart == "balanced" else ReversibleChart
+        return cls.from_masses_and_fluxes(topo, masses, edge_fluxes, prod_weights=prod_weights)
     raise ValueError(
         f"Unknown chart={chart!r}; expected 'fixed', 'balanced', 'reversible', or 'open'."
     )
@@ -1405,24 +1448,29 @@ def _invert_perron_chart(
     tie_matrix: ArrayLike | None = None,
     symmetric_edge_groups: Sequence[Sequence[int]] | None = None,
 ) -> tuple[jax.Array, jax.Array]:
-    """Map Kirchhoff-balanced ``(masses, edge_fluxes)`` to ``(log_rates_free, log_total_mass)``."""
+    """Map concrete Kirchhoff-balanced ``(masses, edge_fluxes)`` to ``(log_rates_free, log_total_mass)``."""
     m_arr, f_edges = _prepare_masses_and_edge_fluxes(topology, masses, edge_fluxes)
+    if isinstance(m_arr, jax.core.Tracer) or isinstance(f_edges, jax.core.Tracer):
+        raise ValueError(
+            "from_masses_and_fluxes() / to_balanced() requires concrete (masses, edge_fluxes) "
+            "to verify Kirchhoff balance and edge tying; construct BalancedChart / OpenChart "
+            "directly from unconstrained log_rates_free under jax.jit."
+        )
     src = np.asarray(topology.edges_src, dtype=np.int64)
     dst = np.asarray(topology.edges_dst, dtype=np.int64)
 
-    if not isinstance(f_edges, jax.core.Tracer):
-        f_np = np.asarray(f_edges, dtype=np.float64)
-        outflow = np.zeros((topology.n_boxes,), dtype=np.float64)
-        inflow = np.zeros((topology.n_boxes,), dtype=np.float64)
-        np.add.at(outflow, src, f_np)
-        np.add.at(inflow, dst, f_np)
-        if not np.allclose(outflow, inflow, rtol=1e-6, atol=1e-9):
-            max_imb = float(np.max(np.abs(outflow - inflow)))
-            raise ValueError(
-                f"edge_fluxes violate Kirchhoff steady-state flux balance "
-                f"(max |outflow - inflow| = {max_imb:.3e} GtC/yr); "
-                "use FixedChart for unbalanced fluxes."
-            )
+    f_np = np.asarray(f_edges, dtype=np.float64)
+    outflow = np.zeros((topology.n_boxes,), dtype=np.float64)
+    inflow = np.zeros((topology.n_boxes,), dtype=np.float64)
+    np.add.at(outflow, src, f_np)
+    np.add.at(inflow, dst, f_np)
+    if not np.allclose(outflow, inflow, rtol=1e-6, atol=1e-9):
+        max_imb = float(np.max(np.abs(outflow - inflow)))
+        raise ValueError(
+            f"edge_fluxes violate Kirchhoff steady-state flux balance "
+            f"(max |outflow - inflow| = {max_imb:.3e} GtC/yr); "
+            "use FixedChart for unbalanced fluxes."
+        )
 
     log_k = jnp.log(f_edges / m_arr[src])
     log_m_tot = jnp.log(jnp.sum(m_arr))
@@ -1435,15 +1483,14 @@ def _invert_perron_chart(
         return log_k, log_m_tot
     M_tie = jnp.asarray(tie_rows, dtype=jnp.float64)
     theta_free, _, _, _ = jnp.linalg.lstsq(M_tie, log_k, rcond=None)
-    if not isinstance(log_k, jax.core.Tracer):
-        log_k_np = np.asarray(log_k, dtype=np.float64)
-        recon_np = np.asarray(M_tie @ theta_free, dtype=np.float64)
-        if not np.allclose(recon_np, log_k_np, rtol=1e-6, atol=1e-9):
-            max_err = float(np.max(np.abs(recon_np - log_k_np)))
-            raise ValueError(
-                f"Input (masses, edge_fluxes) are inconsistent with requested edge tying "
-                f"(max |M_tie @ theta_free - log_k| = {max_err:.3e})."
-            )
+    log_k_np = np.asarray(log_k, dtype=np.float64)
+    recon_np = np.asarray(M_tie @ theta_free, dtype=np.float64)
+    if not np.allclose(recon_np, log_k_np, rtol=1e-6, atol=1e-9):
+        max_err = float(np.max(np.abs(recon_np - log_k_np)))
+        raise ValueError(
+            f"Input (masses, edge_fluxes) are inconsistent with requested edge tying "
+            f"(max |M_tie @ theta_free - log_k| = {max_err:.3e})."
+        )
     return theta_free, log_m_tot
 
 
@@ -1871,7 +1918,7 @@ class SubspaceCBM(_PerronCBM):
             topology=self.topology,
             log_rates_free=self.log_rates_free(),
             log_total_mass=self.base_log_total_mass,
-            prod_weights=self.prod_weights,
+            prod_weights=_extract_prod_weights(self),
             tie_matrix=self.tie_matrix_rows,
             decay_rate=self.decay_rate,
         )
@@ -1921,7 +1968,7 @@ class SubspaceCBM(_PerronCBM):
             basis=loadings[:p_free, :m],
             base_log_total_mass=float(base_cbm.log_total_mass),
             alpha=jnp.zeros((m,), dtype=jnp.float64),
-            prod_weights=base_cbm.prod_weights,
+            prod_weights=_extract_prod_weights(base_cbm),
             tie_matrix=base_cbm.tie_matrix_rows,
             decay_rate=base_cbm.decay_rate,
         )
@@ -2152,7 +2199,12 @@ class ReversibleCBM(CarbonBoxModel):
         m_arr, f_edges = _prepare_masses_and_edge_fluxes(topology, masses, edge_fluxes)
         fwd_indices, rev_indices = _symmetric_edge_pairs(topology)
 
-        if not isinstance(f_edges, jax.core.Tracer) and fwd_indices:
+        if isinstance(m_arr, jax.core.Tracer) or isinstance(f_edges, jax.core.Tracer):
+            raise ValueError(
+                "ReversibleChart.from_masses_and_fluxes() requires concrete (masses, edge_fluxes) "
+                "to verify symmetric fluxes F_{ij} == F_{ji}."
+            )
+        if fwd_indices:
             f_np = np.asarray(f_edges, dtype=np.float64)
             if not np.allclose(
                 f_np[list(fwd_indices)], f_np[list(rev_indices)], rtol=1e-6, atol=1e-9

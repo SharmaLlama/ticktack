@@ -1047,3 +1047,123 @@ def test_effective_param_specs_jit_open_sink_guards_and_fixed_validation() -> No
             FixedChart(topo_asym, masses, fluxes, sink_rates=bad_s)
     # Zero edge_fluxes / sink_rates remain valid on FixedChart
     assert FixedChart(topo_asym, masses, [0.0, 39.0, 84.0, 76.0, 8.0], sink_rates=[0.0, 0.0, 0.0]) is not None
+
+
+def test_flag_descriptors_jit_to_balanced_guards_non_identity_prod_and_open_from_boxes() -> None:
+    """Verify non-data flag descriptors, jit to_balanced/inversion guards, permuted prod_box_indices, and open from_boxes."""
+
+    # 1. Thread PRRT_kwDOFwVIdc68J9m6: static eqx.field subclasses can set is_detailed_balance / is_subspace
+    class _StaticFlagCBM(CarbonBoxModel):
+        log_masses: jax.Array
+        is_detailed_balance: bool = eqx.field(static=True)
+        is_subspace: bool = eqx.field(static=True)
+
+        def __init__(self, *, is_detailed_balance: bool, is_subspace: bool = False) -> None:
+            self.topology = _sym_3box_topo()
+            self.decay_rate = 1.2e-4
+            self.log_masses = jnp.log(jnp.array([90.0, 510.0, 3200.0], dtype=jnp.float64))
+            self.is_detailed_balance = bool(is_detailed_balance)
+            self.is_subspace = bool(is_subspace)
+
+        def reservoir_masses(self) -> jax.Array:
+            return jnp.exp(self.log_masses)
+
+    m_true = _StaticFlagCBM(is_detailed_balance=True, is_subspace=True)
+    m_false = _StaticFlagCBM(is_detailed_balance=False, is_subspace=False)
+    assert m_true.is_detailed_balance is True and m_true.is_subspace is True
+    assert m_false.is_detailed_balance is False and m_false.is_subspace is False
+    # Round-trip through Equinox PyTree flatten/unflatten and filter_jit
+    m_rt = eqx.filter_jit(lambda m: m)(m_true)
+    assert m_rt.is_detailed_balance is True and m_rt.is_subspace is True
+
+    class _OptOutRev(ReversibleCBM):
+        @property
+        def is_detailed_balance(self) -> bool:
+            return False
+
+    opt_out = _OptOutRev(_sym_3box_topo(), np.log([90.0, 510.0, 3200.0]), np.log([45.0, 60.0]))
+    assert opt_out.is_detailed_balance is False
+
+    # 2. Thread PRRT_kwDOFwVIdc68J9nC: no silent sink drop, Kirchhoff bypass, or tying bypass under jit
+    topo_asym = _asym_3box_topo()
+    for traced_open in (
+        load_preset("Miyake17", chart="fixed"),
+        EffectiveCBM(K=3, deep_sink_rate=0.015),
+        FixedCBM(topo_asym, [94.0, 525.0, 3600.0], [47.0, 35.0, 84.0, 76.0, 8.0]),
+    ):
+        with pytest.raises(ValueError, match="traced|positive sinks|concrete"):
+            eqx.filter_jit(lambda m: m.to_balanced())(traced_open)
+        with pytest.raises(ValueError, match="traced|positive sinks|concrete"):
+            jax.jit(lambda m: m.to_balanced().matrix_A())(traced_open)
+
+    with pytest.raises(ValueError, match="concrete"):
+        jax.jit(
+            lambda flx: BalancedChart.from_masses_and_fluxes(
+                topo_asym, [94.0, 525.0, 3600.0], flx, symmetric_edge_groups=[[0, 1]]
+            )
+        )(jnp.array([47.0, 39.0, 84.0, 76.0, 8.0], dtype=jnp.float64))
+
+    # Structurally closed ReversibleChart / BalancedChart / SubspaceCBM remain jit-safe for untied to_balanced()
+    rev_base = CarbonBoxModel(
+        _sym_3box_topo(),
+        ReversibleChart(_sym_3box_topo(), np.log([90.0, 510.0, 3200.0]), np.log([45.0, 60.0])),
+    )
+    rev_hi = CarbonBoxModel(
+        _sym_3box_topo(),
+        ReversibleChart(
+            _sym_3box_topo(), np.log([90.0, 510.0, 3200.0]) + 790.0, np.log([45.0, 60.0]) + 790.0
+        ),
+    )
+    rev_to_bal = eqx.filter_jit(lambda m: m.to_balanced())(rev_hi)
+    assert isinstance(rev_to_bal.chart, BalancedChart)
+    np.testing.assert_allclose(rev_to_bal.matrix_A(), rev_base.matrix_A(), rtol=1e-13, atol=1e-15)
+    assert np.all(np.isfinite(np.asarray(rev_to_bal.steady_state_d14c())))
+
+    # 3. Thread PRRT_kwDOFwVIdc68J9nN: non-identity prod_box_indices with len == n_boxes is idempotent
+    topo_perm = Topology(
+        ("Troposphere", "Stratosphere"),
+        edges_src=(0, 1),
+        edges_dst=(1, 0),
+        prod_box_indices=(1, 0),
+        trop_box_indices=(0,),
+    )
+    expected_b = np.array([0.27, 0.73], dtype=np.float64)
+    perm_models: list[CarbonBoxModel] = [
+        CarbonBoxModel(
+            topo_perm, FixedChart(topo_perm, [510.0, 90.0], [45.0, 45.0], prod_weights=(0.27, 0.73))
+        ),
+        CarbonBoxModel(
+            topo_perm, BalancedChart(topo_perm, [-2.4, -0.7], 6.4, prod_weights=(0.27, 0.73))
+        ),
+        CarbonBoxModel(
+            topo_perm,
+            ReversibleChart(
+                topo_perm, np.log([510.0, 90.0]), np.log([45.0]), prod_weights=(0.27, 0.73)
+            ),
+        ),
+        SubspaceCBM(
+            topo_perm, [-2.4, -0.7], np.array([[0.1], [0.2]]), 6.4, prod_weights=(0.27, 0.73)
+        ),
+    ]
+    for pm in perm_models:
+        assert pm.prod_weights == pytest.approx((0.73, 0.27))
+        np.testing.assert_allclose(pm.production_vector(), expected_b, rtol=1e-14)
+        np.testing.assert_allclose(pm.to_fixed().production_vector(), expected_b, rtol=1e-14)
+        np.testing.assert_allclose(pm.to_balanced().production_vector(), expected_b, rtol=1e-14)
+    np.testing.assert_allclose(
+        perm_models[-1].to_balanced_cbm().production_vector(), expected_b, rtol=1e-14
+    )  # type: ignore[union-attr]
+
+    # 4. Thread PRRT_kwDOFwVIdc68J9nS: from_boxes(..., chart="open") without positive sinks names sinks
+    masses_ok = {"Stratosphere": 94.0, "Troposphere": 525.0, "DeepOcean": 3600.0}
+    fluxes_ok = [
+        ("Stratosphere", "Troposphere", 47.0),
+        ("Troposphere", "Stratosphere", 39.0),
+        ("Troposphere", "DeepOcean", 84.0),
+        ("DeepOcean", "Troposphere", 76.0),
+        ("DeepOcean", "Stratosphere", 8.0),
+    ]
+    with pytest.raises(ValueError, match="sinks"):
+        CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, chart="open")
+    with pytest.raises(ValueError, match="sinks"):
+        CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, sinks={"DeepOcean": 0.0}, chart="open")
