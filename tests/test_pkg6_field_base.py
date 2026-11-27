@@ -378,12 +378,40 @@ def test_operator_geometry_and_template_validation_on_methods() -> None:
     with pytest.raises(TypeError, match="DCTResponseOperator"):
         gf.excess(lin_op)  # type: ignore[arg-type]
 
-    # Traced template under jax.jit stays zero-overhead and does not raise
+    # Traced template under jax.jit propagates dynamic values & gradients accurately
     @jax.jit
     def _jit_excess(t_arr: jax.Array) -> jax.Array:
         return GaussianField(z, op.t_start, op.t_end, template=t_arr).excess(op_tmpl)
 
+    @jax.jit
+    def _jit_draws(t_arr: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+        return GaussianField(z, op.t_start, op.t_end, template=t_arr)._evaluate_draws(
+            op_tmpl, z_draws
+        )
+
     np.testing.assert_allclose(_jit_excess(tmpl), gf_tmpl.excess(op_tmpl), rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(
+        _jit_excess(2.3 * tmpl), 2.3 * gf_tmpl.excess(op_tmpl), rtol=1e-14, atol=1e-14
+    )
+    dq_jit, _, exc_jit = _jit_draws(2.3 * tmpl)
+    np.testing.assert_allclose(exc_jit, dq_jit @ op_tmpl.w_grid.T, rtol=1e-14, atol=1e-14)
+    np.testing.assert_allclose(
+        exc_jit, 2.3 * gf_tmpl._evaluate_draws(op_tmpl, z_draws)[2], rtol=1e-14, atol=1e-14
+    )
+
+    # Traced template paired with un-templated operator still raises ValueError inside @jax.jit
+    @jax.jit
+    def _jit_from_op_bad(t_arr: jax.Array) -> jax.Array:
+        return GaussianField.from_operator(op, template=t_arr).latent
+
+    @jax.jit
+    def _jit_excess_bad(t_arr: jax.Array) -> jax.Array:
+        return GaussianField(z, op.t_start, op.t_end, template=t_arr).excess(op)
+
+    with pytest.raises(ValueError, match="template_digest"):
+        _jit_from_op_bad(tmpl)
+    with pytest.raises(ValueError, match="template_digest"):
+        _jit_excess_bad(tmpl)
 
 
 # =============================================================================
@@ -545,12 +573,17 @@ def test_autodiff_excess_and_whitened_jacobian_vs_finite_diff(
     w_mat = jnp.asarray(rng.normal(0.0, 1.0, size=(ds.n_obs, n_grid)), dtype=jnp.float64)
     q_std = 1.88
 
-    def _build(z: jax.Array, sigma: jax.Array, length_yr: jax.Array) -> _FieldBase:
+    def _build(
+        z: jax.Array,
+        sigma: jax.Array,
+        length_yr: jax.Array,
+        template: jax.Array | None,
+    ) -> _FieldBase:
         kwargs: dict[str, object] = {
             "sigma": sigma,
             "length_yr": length_yr,
             "order": 2.3,
-            "template": tmpl,
+            "template": template,
         }
         if field_cls is LogGaussianField:
             kwargs["q_mean"] = 2.05
@@ -560,23 +593,41 @@ def test_autodiff_excess_and_whitened_jacobian_vs_finite_diff(
     s0 = jnp.asarray(0.43, dtype=jnp.float64)
     l0 = jnp.asarray(5.4, dtype=jnp.float64)
 
+    def _unpack(params: jax.Array) -> _FieldBase:
+        t_arg = params[n_grid + 2 :] if use_template else None
+        return _build(params[:n_grid], params[n_grid], params[n_grid + 1], t_arg)
+
     def _exc_scalar(params: jax.Array) -> jax.Array:
-        f = _build(params[:n_grid], params[n_grid], params[n_grid + 1])
-        return jnp.dot(w_obs, f.excess(op, q_std=q_std))
+        return jnp.dot(w_obs, _unpack(params).excess(op, q_std=q_std))
 
     def _jac_scalar(params: jax.Array) -> jax.Array:
-        f = _build(params[:n_grid], params[n_grid], params[n_grid + 1])
-        return jnp.sum(w_mat * f._whitened_jacobian(op, inv_sig, q_std=q_std))
+        return jnp.sum(w_mat * _unpack(params)._whitened_jacobian(op, inv_sig, q_std=q_std))
 
-    p0 = jnp.concatenate([z0, jnp.array([s0, l0], dtype=jnp.float64)])
+    parts = [z0, jnp.array([s0, l0], dtype=jnp.float64)]
+    if use_template:
+        assert tmpl is not None
+        parts.append(tmpl)
+    p0 = jnp.concatenate(parts)
 
     g_exc_ad = np.asarray(jax.grad(_exc_scalar)(p0), dtype=np.float64)
-    g_exc_fd = _central_fd_grad(_exc_scalar, p0, eps=5e-6)
+    g_exc_fd = _central_fd_grad(jax.jit(_exc_scalar), p0, eps=5e-6)
     np.testing.assert_allclose(g_exc_ad, g_exc_fd, rtol=1e-6, atol=1e-6)
 
     g_jac_ad = np.asarray(jax.grad(_jac_scalar)(p0), dtype=np.float64)
-    g_jac_fd = _central_fd_grad(_jac_scalar, p0, eps=5e-6)
+    g_jac_fd = _central_fd_grad(jax.jit(_jac_scalar), p0, eps=5e-6)
     np.testing.assert_allclose(g_jac_ad, g_jac_fd, rtol=1e-6, atol=1e-6)
+
+    if use_template:
+        # Ensure template gradients are strictly non-trivial and match analytical w_grid oracle
+        assert np.linalg.norm(g_exc_ad[n_grid + 2 :]) > 1e-3
+        assert np.linalg.norm(g_jac_ad[n_grid + 2 :]) > 1e-3
+        if field_cls is GaussianField:
+            f0 = _build(z0, s0, l0, None)
+            eta0 = f0.evaluate_grid()
+            expected_t_grad = np.asarray((op.w_grid.T @ w_obs) * eta0, dtype=np.float64)
+            np.testing.assert_allclose(
+                g_exc_ad[n_grid + 2 :], expected_t_grad, rtol=1e-13, atol=1e-13
+            )
 
 
 # =============================================================================

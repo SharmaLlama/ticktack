@@ -911,7 +911,8 @@ class _FieldBase(ProductionTerm):
         if op.template_digest != "":
             expected_tmpl = kwargs.get("template") if issubclass(cls, GaussianField) else None
             tmpl_digest = _compute_template_digest(expected_tmpl)
-            if tmpl_digest != "" and tmpl_digest != op.template_digest:
+            presence_mismatch = (op.template_digest == "none") != (expected_tmpl is None)
+            if presence_mismatch or (tmpl_digest != "" and tmpl_digest != op.template_digest):
                 if issubclass(cls, GaussianField) and expected_tmpl is None:
                     raise ValueError(
                         "op was built with a temporal template; pass matching "
@@ -938,18 +939,22 @@ class _FieldBase(ProductionTerm):
 
     @property
     def n_grid(self) -> int:
+        """Number of uniform DCT-II grid knots."""
         return int(self.latent.shape[0])
 
     @property
     def dt(self) -> float:
+        """Uniform grid spacing in years (yr)."""
         return (self.t_end - self.t_start) / float(self.n_grid - 1)
 
     @property
     def t_grid(self) -> jax.Array:
+        """Uniform grid knot times in years (yr) of shape ``(n_grid,)``."""
         return jnp.linspace(self.t_start, self.t_end, self.n_grid, dtype=jnp.float64)
 
     @property
     def effective_kernel(self) -> SpectralKernel:
+        """Active :class:`SpectralKernel` (``kernel`` or default :class:`MaternSpectrum`)."""
         if self.kernel is not None:
             return self.kernel
         return MaternSpectrum(
@@ -992,16 +997,15 @@ class _FieldBase(ProductionTerm):
                 f"does not match {type(self).__name__} grid "
                 f"[{self.t_start}, {self.t_end}] (n_grid={self.n_grid})."
             )
-        tmpl_digest = _compute_template_digest(self._operator_template())
-        if (
-            op.template_digest != ""
-            and tmpl_digest != ""
-            and op.template_digest != tmpl_digest
-        ):
-            raise ValueError(
-                f"Operator template_digest {op.template_digest!r} does not match "
-                f"{type(self).__name__} template digest {tmpl_digest!r}."
-            )
+        op_tmpl = self._operator_template()
+        tmpl_digest = _compute_template_digest(op_tmpl)
+        if op.template_digest != "":
+            presence_mismatch = (op.template_digest == "none") != (op_tmpl is None)
+            if presence_mismatch or (tmpl_digest != "" and op.template_digest != tmpl_digest):
+                raise ValueError(
+                    f"Operator template_digest {op.template_digest!r} does not match "
+                    f"{type(self).__name__} template digest {tmpl_digest or '<traced>'!r}."
+                )
 
     def _prior_variance_scale(self) -> jax.Array:
         """Return the stationary pre-history variance scale factor at ``t_start``."""
@@ -1027,6 +1031,11 @@ class _FieldBase(ProductionTerm):
         -------
         jax.Array
             Predicted ``Delta14C`` excursion in permil (‰) of shape ``(n_obs,)``.
+
+        Examples
+        --------
+        >>> field = GaussianField.from_operator(op, sigma=0.3).with_latent(z)
+        >>> d14c_exc = field.excess(op)
         """
         raise NotImplementedError
 
@@ -1174,9 +1183,16 @@ class GaussianField(_FieldBase):
         -------
         jax.Array
             ``Delta14C`` excursion in permil (‰) with shape ``(n_obs,)``.
+
+        Examples
+        --------
+        >>> gf = GaussianField.from_operator(op, sigma=0.3).with_latent(z)
+        >>> d14c_exc = gf.excess(op)
         """
         del q_std
         self._validate_operator(op)
+        if self.template is not None and _concrete(self.template) is None:
+            return op.w_grid @ self.evaluate_grid()
         return op.w_dct @ (_safe_sqrt(self.power_spectrum()) * self.latent)
 
     def _evaluate_grid_and_q(
@@ -1197,7 +1213,10 @@ class GaussianField(_FieldBase):
         self._validate_operator(op)
         dq_draws = jax.vmap(lambda z: self.with_latent(z).evaluate_grid())(z_draws)
         q_draws = jnp.asarray(q_std, dtype=jnp.float64) + dq_draws
-        f_exc_draws = (z_draws * _safe_sqrt(self.power_spectrum())[None, :]) @ op.w_dct.T
+        if self.template is not None and _concrete(self.template) is None:
+            f_exc_draws = dq_draws @ op.w_grid.T
+        else:
+            f_exc_draws = (z_draws * _safe_sqrt(self.power_spectrum())[None, :]) @ op.w_dct.T
         return dq_draws, q_draws, f_exc_draws
 
     def _whitened_jacobian(
@@ -1210,7 +1229,12 @@ class GaussianField(_FieldBase):
         del q_std
         self._validate_operator(op)
         inv_s = jnp.asarray(inv_sig, dtype=jnp.float64)
-        return inv_s[:, None] * (op.w_dct * _safe_sqrt(self.power_spectrum())[None, :])
+        w_dct = (
+            (op.w_grid * self.template[None, :]) @ _dct2_ortho_matrix(self.n_grid).T
+            if self.template is not None and _concrete(self.template) is None
+            else op.w_dct
+        )
+        return inv_s[:, None] * (w_dct * _safe_sqrt(self.power_spectrum())[None, :])
 
     def _linearized_error_scale_inputs(
         self,
@@ -1378,6 +1402,11 @@ class LogGaussianField(_FieldBase):
         -------
         jax.Array
             ``Delta14C`` excursion in permil (‰) with shape ``(n_obs,)``.
+
+        Examples
+        --------
+        >>> lgf = LogGaussianField.from_operator(op, q_mean=1.8).with_latent(z)
+        >>> d14c_exc = lgf.excess(op, q_std=1.76)
         """
         self._validate_operator(op)
         return op.w_grid @ self.evaluate_grid(q_std=q_std)
