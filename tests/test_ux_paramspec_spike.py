@@ -222,13 +222,30 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                     atol=1e-13,
                 )
 
-        # Deep-tail float64 round-trip (u = -80 -> theta ~ 1.8e-35) and affine scale invariance
-        for lo_dt, hi_dt in ((0.0, 1.0), (0.0, 4.85)):
+        # Deep-tail float64 round-trip on lower (0, hi) and mirror upper (lo, 0) zero endpoints
+        for lo_dt, hi_dt, u_tail in (
+            (0.0, 1.0, -80.0),
+            (0.0, 4.85, -80.0),
+            (-1.0, 0.0, 80.0),
+            (-4.85, 0.0, 80.0),
+        ):
             spec_dt = tt.ParamSpec.bounded("dt", lo_dt, hi_dt)
-            u_deep = jnp.asarray(-80.0, dtype=jnp.float64)
+            u_deep = jnp.asarray(u_tail, dtype=jnp.float64)
             np.testing.assert_allclose(
                 float(spec_dt.unconstrain(spec_dt.constrain(u_deep))),
-                -80.0,
+                u_tail,
+                rtol=1e-13,
+            )
+        for lo_up, hi_up in ((-1.0, 0.0), (-4.85, 0.0)):
+            spec_up = tt.ParamSpec.bounded("dt_up", lo_up, hi_up, median=-1e-20)
+            np.testing.assert_allclose(
+                float(spec_up.constrain(spec_up.prior_mean)),
+                -1e-20,
+                rtol=1e-13,
+            )
+            np.testing.assert_allclose(
+                float(spec_up.unconstrain(-1e-20)),
+                float(spec_up.prior_mean),
                 rtol=1e-13,
             )
         spec_tiny = tt.ParamSpec.bounded("tiny", 0.0, 1e-25, median=1e-31)
@@ -237,6 +254,45 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             float(spec_tiny.prior_mean),
             rtol=1e-13,
         )
+
+        # Unquantized tiny medians near 0 on symmetric zero-straddling (-5.0, 5.0)
+        for med_z in (1e-16, -1e-16, 1e-14, -1e-14):
+            spec_z = tt.ParamSpec.bounded("sym_z", -5.0, 5.0, median=med_z)
+            u_z_ref = float(
+                (Decimal.from_float(med_z) - Decimal("-5.0")).ln()
+                - (Decimal("5.0") - Decimal.from_float(med_z)).ln()
+            )
+            np.testing.assert_allclose(float(spec_z.prior_mean), u_z_ref, rtol=1e-13)
+            np.testing.assert_allclose(
+                float(spec_z.constrain(spec_z.prior_mean)), med_z, rtol=1e-13
+            )
+            np.testing.assert_allclose(
+                float(spec_z.unconstrain(med_z)), float(spec_z.prior_mean), rtol=1e-13
+            )
+
+        # Wide zero-straddling intervals near DBL_MAX without intermediate 2 * med overflow
+        for lo_w, hi_w, med_w in (
+            (-1.6e308, 0.1e308, -0.91e308),
+            (-0.1e308, 1.6e308, 0.91e308),
+        ):
+            spec_w = tt.ParamSpec.bounded("wide_z", lo_w, hi_w, median=med_w)
+            u_w_ref = float(
+                (Decimal.from_float(med_w) - Decimal.from_float(lo_w)).ln()
+                - (Decimal.from_float(hi_w) - Decimal.from_float(med_w)).ln()
+            )
+            np.testing.assert_allclose(float(spec_w.prior_mean), u_w_ref, rtol=1e-13)
+            np.testing.assert_allclose(
+                float(spec_w.constrain(spec_w.prior_mean)), med_w, rtol=1e-13
+            )
+            np.testing.assert_allclose(
+                float(spec_w.unconstrain(med_w)), float(spec_w.prior_mean), rtol=1e-13
+            )
+            g_w = float(jax.grad(spec_w.unconstrain)(jnp.asarray(med_w)))
+            assert math.isfinite(g_w) and g_w >= 0.0
+            for t_w_ob in (lo_w - 0.05e308, lo_w, hi_w, hi_w + 0.05e308):
+                t_wj = jnp.asarray(t_w_ob, dtype=jnp.float64)
+                assert math.isfinite(float(spec_w.unconstrain(t_wj)))
+                assert math.isfinite(float(jax.grad(spec_w.unconstrain)(t_wj)))
 
         # Out-of-bounds inputs (theta <= low and theta >= high) remain finite with finite autodiff grad
         for lo_ob, hi_ob in (

@@ -348,8 +348,10 @@ class ParamSpec(zdx.Base):
         interval midpoint ``0.5 * (low + high)``. When ``median`` is supplied,
         ``u_0 = logit((median - low) / (high - low))`` is evaluated in
         cancellation-free ``float64`` arithmetic so
-        ``spec.constrain(spec.prior_mean) == median`` to machine precision across
-        both narrow and wide intervals.
+        ``spec.constrain(spec.prior_mean) == median`` across both narrow and wide
+        intervals (when ``low + high != 0`` and ``median -> 0``, ``prior_mean`` is
+        ``O(1)`` so ``constrain(prior_mean)`` is accurate to ``~eps * (high - low)``
+        in absolute units).
 
         Choosing ``logit_sd <= sqrt(2)`` (``~1.414``; default ``1.2``) ensures the
         induced logit-normal physical density ``p_theta(theta)`` is strictly
@@ -415,12 +417,13 @@ class ParamSpec(zdx.Base):
             d_lo = med_np - low_f
             d_hi = high_f - med_np
             near_mid = np.abs(d_lo - d_hi) <= 0.5 * d_hi
-            numer = (
-                (2.0 * med_np - (low_f + high_f))
-                if (low_f < 0.0 < high_f)
-                else (d_lo - d_hi)
-            )
-            safe_rel = np.where(near_mid, numer / d_hi, 0.0)
+            if low_f < 0.0 < high_f and high_f - low_f > 1.0:
+                numer, denom = med_np - 0.5 * (low_f + high_f), 0.5 * d_hi
+            elif low_f < 0.0 < high_f:
+                numer, denom = 2.0 * med_np - (low_f + high_f), d_hi
+            else:
+                numer, denom = d_lo - d_hi, d_hi
+            safe_rel = np.where(near_mid, numer / denom, 0.0)
             pm = np.where(near_mid, np.log1p(safe_rel), np.log(d_lo) - np.log(d_hi))
         return cls(
             path,
@@ -498,7 +501,17 @@ class ParamSpec(zdx.Base):
         if self.bijector == "sigmoid":
             lo = jnp.asarray(self.low, dtype=jnp.float64)
             hi = jnp.asarray(self.high, dtype=jnp.float64)
-            return lo + (hi - lo) * jax.nn.sigmoid(u_arr)
+            span = hi - lo
+            tails = jnp.where(
+                u_arr < 0.0,
+                lo + span * jax.nn.sigmoid(u_arr),
+                hi - span * jax.nn.sigmoid(-u_arr),
+            )
+            if self.low < 0.0 < self.high:
+                u_mid = jnp.clip(u_arr, -2.0, 2.0)
+                mid = 0.5 * (lo + hi) + (0.5 * span) * jnp.tanh(0.5 * u_mid)
+                return jnp.where(jnp.abs(u_arr) <= 1.0, mid, tails)
+            return tails
         return u_arr
 
     def unconstrain(self, theta: ArrayLike) -> jax.Array:
@@ -522,20 +535,24 @@ class ParamSpec(zdx.Base):
             floor = jnp.maximum(1e-300 * span, jnp.finfo(jnp.float64).tiny)
             raw_lo = t_arr - lo
             raw_hi = hi - t_arr
-            d_lo = jnp.maximum(raw_lo, floor)
-            d_hi = jnp.maximum(raw_hi, floor)
+            d_lo = jnp.clip(raw_lo, floor, span)
+            d_hi = jnp.clip(raw_hi, floor, span)
             near_mid = (
                 (raw_lo > floor)
                 & (raw_hi > floor)
                 & (jnp.abs(d_lo - d_hi) <= 0.5 * d_hi)
             )
-            numer = (
-                (2.0 * t_arr - (lo + hi))
-                if (self.low < 0.0 < self.high)
-                else (d_lo - d_hi)
-            )
-            safe_d_hi = jnp.where(near_mid, d_hi / span, 1.0)
-            safe_rel = jnp.where(near_mid, (numer / span) / safe_d_hi, 0.0)
+            t_mid = jnp.clip(t_arr, lo, hi)
+            if self.low < 0.0 < self.high and self.high - self.low > 1.0:
+                numer_s, denom_s = t_mid - 0.5 * (lo + hi), 0.5 * d_hi
+            elif self.low < 0.0 < self.high:
+                numer_s, denom_s = (2.0 * t_mid - (lo + hi)) / span, d_hi / span
+            elif self.high - self.low <= 1.0:
+                numer_s, denom_s = (d_lo - d_hi) / span, d_hi / span
+            else:
+                numer_s, denom_s = d_lo - d_hi, d_hi
+            safe_denom = jnp.where(near_mid, denom_s, 1.0)
+            safe_rel = jnp.where(near_mid, numer_s / safe_denom, 0.0)
             return jnp.where(
                 near_mid, jnp.log1p(safe_rel), jnp.log(d_lo) - jnp.log(d_hi)
             )
