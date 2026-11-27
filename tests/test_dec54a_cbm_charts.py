@@ -1167,3 +1167,31 @@ def test_flag_descriptors_jit_to_balanced_guards_non_identity_prod_and_open_from
         CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, chart="open")
     with pytest.raises(ValueError, match="sinks"):
         CarbonBoxModel.from_boxes(masses_ok, fluxes_ok, sinks={"DeepOcean": 0.0}, chart="open")
+
+    # 5. Round-3 threads: Python float via zodiax .set("log_total_mass", 9.5) in _validate_topology & active_parameter_mask
+    cbm_bal_float = load_preset("Guttler15", chart="balanced").set("log_total_mass", 9.5)
+    assert isinstance(cbm_bal_float.to_balanced().chart, BalancedChart)
+    assert isinstance(cbm_bal_float.with_chart(cbm_bal_float.chart).chart, BalancedChart)
+    assert cbm_bal_float.active_parameter_mask().shape == (24,)
+    assert bool(np.all(cbm_bal_float.active_parameter_mask()))
+
+    solver = ExactLinearSolver()
+    t_s = jnp.arange(770.0, 776.0, dtype=jnp.float64) + 0.3
+    t_e = t_s + 0.4
+    spec_float = cbm_fisher_spectrum(
+        lambda c: solver.predict_d14c(
+            c, SteadyProduction(1.76) + MiyakeSpike(774.5, 0.3, 6.2), t_s, t_e, box_indices=1
+        ),
+        cbm_bal_float,
+        jnp.full(t_s.shape, 1.5, dtype=jnp.float64),
+        prior_cbm_sd=0.35,
+    )
+    assert spec_float.active_mask.shape == (24,)
+
+    # 0-edge 1-box BalancedChart with Python float log_total_mass returns empty mask cleanly
+    topo_1box = Topology(("Troposphere",), (), (), prod_box_indices=(0,), trop_box_indices=(0,))
+    cbm_1box = CarbonBoxModel(topo_1box, BalancedChart(topo_1box, [], 6.2)).set(
+        "log_total_mass", 6.5
+    )
+    assert cbm_1box.with_chart(cbm_1box.chart).active_parameter_mask().shape == (0,)
+    assert SubspaceCBM.from_fisher.__annotations__["base_cbm"] == "CarbonBoxModel"

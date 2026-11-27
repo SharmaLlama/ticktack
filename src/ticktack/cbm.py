@@ -1582,13 +1582,13 @@ class _PerronChart(CBMChart):
             if self.tie_matrix_rows is None
             else (len(self.tie_matrix_rows[0]) if self.tie_matrix_rows else 0)
         )
-        if self.log_rates_free.shape != (expected_p,):  # type: ignore[attr-defined]
+        if np.shape(self.log_rates_free) != (expected_p,):  # type: ignore[attr-defined]
             raise ValueError(
-                f"log_rates_free must have shape ({expected_p},), got {self.log_rates_free.shape}."  # type: ignore[attr-defined]
+                f"log_rates_free must have shape ({expected_p},), got {np.shape(self.log_rates_free)}."  # type: ignore[attr-defined]
             )
-        if self.log_total_mass.shape != ():  # type: ignore[attr-defined]
+        if np.shape(self.log_total_mass) != ():  # type: ignore[attr-defined]
             raise ValueError(
-                f"log_total_mass must have scalar shape (), got {self.log_total_mass.shape}."  # type: ignore[attr-defined]
+                f"log_total_mass must have scalar shape (), got {np.shape(self.log_total_mass)}."  # type: ignore[attr-defined]
             )
 
     def edge_log_rates(self) -> jax.Array:
@@ -1621,12 +1621,11 @@ class _PerronChart(CBMChart):
 
     def active_parameter_mask(self) -> np.ndarray:
         diff_tree, _ = eqx.partition(self, eqx.is_inexact_array)
-        marked = eqx.tree_at(
-            lambda m: m.log_total_mass,
-            jax.tree_util.tree_map(lambda x: np.ones(x.shape, dtype=bool), diff_tree),
-            np.asarray(False),
-        )
-        return np.concatenate([np.ravel(x) for x in jax.tree_util.tree_leaves(marked)])
+        marked = jax.tree_util.tree_map(lambda x: np.ones(x.shape, dtype=bool), diff_tree)
+        if eqx.is_inexact_array(self.log_total_mass):  # type: ignore[attr-defined]
+            marked = eqx.tree_at(lambda m: m.log_total_mass, marked, np.asarray(False))
+        leaves = [np.ravel(x) for x in jax.tree_util.tree_leaves(marked)]
+        return np.concatenate(leaves) if leaves else np.zeros((0,), dtype=bool)
 
 
 class BalancedChart(_PerronChart):
@@ -1926,7 +1925,7 @@ class SubspaceCBM(_PerronCBM):
     @classmethod
     def from_fisher(
         cls,
-        base_cbm: BalancedCBM,
+        base_cbm: CarbonBoxModel,
         spectrum: Any,
         n_modes: int,
     ) -> SubspaceCBM:
@@ -1934,8 +1933,9 @@ class SubspaceCBM(_PerronCBM):
 
         Parameters
         ----------
-        base_cbm : BalancedCBM
-            Reference flow-balanced carbon-box model at ``alpha = 0``.
+        base_cbm : CarbonBoxModel
+            Reference flow-balanced carbon-box model (``BalancedCBM`` or a
+            :class:`BalancedChart`-backed ``CarbonBoxModel``) at ``alpha = 0``.
         spectrum : FisherSpectrumResult
             Prior-whitened Fisher spectrum computed at ``base_cbm``.
         n_modes : int
@@ -2075,13 +2075,13 @@ class ReversibleChart(CBMChart):
             raise ValueError(
                 "ReversibleChart edge-pair indices do not match topology (edges_src, edges_dst)."
             )
-        if self.log_masses.shape != (topology.n_boxes,):
+        if np.shape(self.log_masses) != (topology.n_boxes,):
             raise ValueError(
-                f"log_masses must have shape ({topology.n_boxes},), got {self.log_masses.shape}."
+                f"log_masses must have shape ({topology.n_boxes},), got {np.shape(self.log_masses)}."
             )
-        if self.log_sym_fluxes.shape != (len(fwd_expected),):
+        if np.shape(self.log_sym_fluxes) != (len(fwd_expected),):
             raise ValueError(
-                f"log_sym_fluxes must have shape ({len(fwd_expected)},), got {self.log_sym_fluxes.shape}."
+                f"log_sym_fluxes must have shape ({len(fwd_expected)},), got {np.shape(self.log_sym_fluxes)}."
             )
 
     def reservoir_masses(self, topology: Topology) -> jax.Array:
@@ -2302,9 +2302,9 @@ class OpenChart(_PerronChart):
             )
         if len(set(open_idx)) != len(open_idx):
             raise ValueError(f"open_box_indices must not contain duplicates, got {open_idx}.")
-        if self.log_sink_rates.shape != (len(open_idx),):
+        if np.shape(self.log_sink_rates) != (len(open_idx),):
             raise ValueError(
-                f"log_sink_rates must have shape ({len(open_idx)},), got {self.log_sink_rates.shape}."
+                f"log_sink_rates must have shape ({len(open_idx)},), got {np.shape(self.log_sink_rates)}."
             )
 
     def sink_rates(self, topology: Topology, decay_rate: float = DECAY_CAMBRIDGE) -> jax.Array:
