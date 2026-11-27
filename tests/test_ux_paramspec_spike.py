@@ -161,12 +161,14 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             atol=1e-15,
         )
 
-        # Sweep narrow (1e-4) through wide (10.0) intervals and asymmetric medians
+        # Sweep narrow (1e-4) through wide (10.0), asymmetric zero-straddling, and subnormal-product intervals
         intervals = [
             (0.01, 0.01 + 1e-4),
             (0.05, 0.15),
             (0.01, 1.5),
             (-5.0, 5.0),
+            (-1.35, 4.85),
+            (-3e-200, 7e-200),
             (2.5, 12.5),
         ]
         fracs = [1e-8, 0.02, 0.5 + 1e-14, 0.5 + 1e-10, 0.96, 1.0 - 1e-8]
@@ -179,9 +181,9 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                     float(spec.constrain(spec.prior_mean)),
                     med,
                     rtol=1e-13,
-                    atol=1e-15,
+                    atol=0.0,
                 )
-                # Verify unconstrain(med) == prior_mean without midpoint cancellation or 1e-12 clamp
+                # Verify unconstrain(med) == prior_mean without midpoint cancellation or dimensional clamp
                 np.testing.assert_allclose(
                     float(spec.unconstrain(med)),
                     float(spec.prior_mean),
@@ -220,22 +222,56 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                     atol=1e-13,
                 )
 
-        # Extreme tail (theta - low) / (high - low) = 1e-20 (< 1e-12, no premature clamp!)
-        spec_unit = tt.ParamSpec.bounded("u01", 0.0, 1.0)
+        # Deep-tail float64 round-trip (u = -80 -> theta ~ 1.8e-35) and affine scale invariance
+        for lo_dt, hi_dt in ((0.0, 1.0), (0.0, 4.85)):
+            spec_dt = tt.ParamSpec.bounded("dt", lo_dt, hi_dt)
+            u_deep = jnp.asarray(-80.0, dtype=jnp.float64)
+            np.testing.assert_allclose(
+                float(spec_dt.unconstrain(spec_dt.constrain(u_deep))),
+                -80.0,
+                rtol=1e-13,
+            )
+        spec_tiny = tt.ParamSpec.bounded("tiny", 0.0, 1e-25, median=1e-31)
         np.testing.assert_allclose(
-            float(spec_unit.unconstrain(1e-20)),
-            math.log(1e-20),
+            float(spec_tiny.unconstrain(1e-31)),
+            float(spec_tiny.prior_mean),
             rtol=1e-13,
         )
 
-        # Raw np.float32 narrow-interval sweep (1e-7..1e0) promoted cleanly without float() wrap
-        for base in (0.01, 1.0, 0.0):
+        # Out-of-bounds inputs (theta <= low and theta >= high) remain finite with finite autodiff grad
+        for lo_ob, hi_ob in (
+            (-0.5e-30, 0.5e-30),
+            (-3e-200, 7e-200),
+            (-1.35, 4.85),
+            (0.0, 1.0),
+        ):
+            spec_ob = tt.ParamSpec.bounded("ob", lo_ob, hi_ob)
+            span_ob = hi_ob - lo_ob
+            for t_ob in (
+                lo_ob - span_ob,
+                lo_ob - 1e-3 * span_ob,
+                lo_ob,
+                hi_ob,
+                hi_ob + span_ob,
+            ):
+                t_j = jnp.asarray(t_ob, dtype=jnp.float64)
+                u_ob = float(spec_ob.unconstrain(t_j))
+                g_ob = float(jax.grad(spec_ob.unconstrain)(t_j))
+                assert math.isfinite(u_ob)
+                assert math.isfinite(g_ob)
+
+        # Raw np.float32 narrow-interval sweep (1e-7..1e0, incl. asymmetric zero-straddling)
+        for mode in ("pos_small", "pos_unit", "sym_zero", "asym_zero"):
             for exp in (-7, -6, -5, -4, -3, -2, -1, 0):
                 span32 = 10.0**exp
-                lo32 = np.float32(base - 0.5 * span32 if base == 0.0 else base)
-                hi32 = np.float32(
-                    base + 0.5 * span32 if base == 0.0 else base + span32
-                )
+                if mode == "pos_small":
+                    lo32, hi32 = np.float32(0.01), np.float32(0.01 + span32)
+                elif mode == "pos_unit":
+                    lo32, hi32 = np.float32(1.0), np.float32(1.0 + span32)
+                elif mode == "sym_zero":
+                    lo32, hi32 = np.float32(-0.5 * span32), np.float32(0.5 * span32)
+                else:
+                    lo32, hi32 = np.float32(-0.31 * span32), np.float32(0.69 * span32)
                 if not (float(hi32) > float(lo32)):
                     continue
                 for frac32 in (0.03, 0.5 + 1e-3, 0.97):
@@ -730,6 +766,10 @@ class TestValidationErrors:
 
         with pytest.raises(ValueError, match="low < high"):
             tt.ParamSpec("x", "sigmoid", low=2.0, high=2.0)
+        with pytest.raises(ValueError, match="finite span"):
+            tt.ParamSpec("x", "sigmoid", low=-1e308, high=1e308)
+        with pytest.raises(ValueError, match="finite span"):
+            tt.ParamSpec.bounded("x", -1e308, 1e308, median=1e307)
 
         # ParamSpec.normal
         with pytest.raises(ValueError, match="sd"):

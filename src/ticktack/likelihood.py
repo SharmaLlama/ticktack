@@ -195,9 +195,12 @@ class ParamSpec(zdx.Base):
             raise ValueError(
                 f"{owner}: low and high must be finite; got low={low!r}, high={high!r}."
             )
-        if bijector == "sigmoid" and not (high_f > low_f):
+        if bijector == "sigmoid" and not (
+            high_f > low_f and math.isfinite(high_f - low_f)
+        ):
             raise ValueError(
-                f"{owner}: sigmoid bijector requires low < high; got low={low!r}, high={high!r}."
+                f"{owner}: sigmoid bijector requires finite low < high and finite span; "
+                f"got low={low!r}, high={high!r}."
             )
         pm_np = _concrete_f64_array(prior_mean, "prior_mean", owner=owner)
         ps_np = _concrete_f64_array(prior_sd, "prior_sd", owner=owner)
@@ -382,9 +385,15 @@ class ParamSpec(zdx.Base):
         owner = f"ParamSpec.bounded({path!r})"
         low_f = _concrete_scalar_f64(low, "low", owner=owner)
         high_f = _concrete_scalar_f64(high, "high", owner=owner)
-        if not (math.isfinite(low_f) and math.isfinite(high_f)) or not (high_f > low_f):
+        if not (
+            math.isfinite(low_f)
+            and math.isfinite(high_f)
+            and high_f > low_f
+            and math.isfinite(high_f - low_f)
+        ):
             raise ValueError(
-                f"{owner}: requires finite low < high; got low={low!r}, high={high!r}."
+                f"{owner}: requires finite low < high and finite span; "
+                f"got low={low!r}, high={high!r}."
             )
         lsd_np = _concrete_f64_array(logit_sd, "logit_sd", owner=owner)
         if not np.all(np.isfinite(lsd_np)) or np.any(lsd_np <= 0.0):
@@ -408,7 +417,7 @@ class ParamSpec(zdx.Base):
             near_mid = np.abs(d_lo - d_hi) <= 0.5 * d_hi
             numer = (
                 (2.0 * med_np - (low_f + high_f))
-                if (low_f * high_f < 0.0)
+                if (low_f < 0.0 < high_f)
                 else (d_lo - d_hi)
             )
             safe_rel = np.where(near_mid, numer / d_hi, 0.0)
@@ -509,15 +518,24 @@ class ParamSpec(zdx.Base):
         if self.bijector == "sigmoid":
             lo = jnp.asarray(self.low, dtype=jnp.float64)
             hi = jnp.asarray(self.high, dtype=jnp.float64)
-            d_lo = jnp.maximum(t_arr - lo, 1e-30)
-            d_hi = jnp.maximum(hi - t_arr, 1e-30)
-            near_mid = jnp.abs(d_lo - d_hi) <= 0.5 * d_hi
+            span = hi - lo
+            floor = jnp.maximum(1e-300 * span, jnp.finfo(jnp.float64).tiny)
+            raw_lo = t_arr - lo
+            raw_hi = hi - t_arr
+            d_lo = jnp.maximum(raw_lo, floor)
+            d_hi = jnp.maximum(raw_hi, floor)
+            near_mid = (
+                (raw_lo > floor)
+                & (raw_hi > floor)
+                & (jnp.abs(d_lo - d_hi) <= 0.5 * d_hi)
+            )
             numer = (
                 (2.0 * t_arr - (lo + hi))
-                if (self.low * self.high < 0.0)
+                if (self.low < 0.0 < self.high)
                 else (d_lo - d_hi)
             )
-            safe_rel = jnp.where(near_mid, numer / d_hi, 0.0)
+            safe_d_hi = jnp.where(near_mid, d_hi / span, 1.0)
+            safe_rel = jnp.where(near_mid, (numer / span) / safe_d_hi, 0.0)
             return jnp.where(
                 near_mid, jnp.log1p(safe_rel), jnp.log(d_lo) - jnp.log(d_hi)
             )
