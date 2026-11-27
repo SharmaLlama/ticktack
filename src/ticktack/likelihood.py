@@ -38,9 +38,16 @@ import jax.scipy.linalg as jsl
 import numpy as np
 import optimistix as optx
 import zodiax as zdx
+import zodiax.base as _zdx_base
 from jax.typing import ArrayLike
 
-from ._utils import _concrete, _safe_psd_root, _sigma_with_jitter
+from ._utils import (
+    _concrete,
+    _concrete_f64_array,
+    _concrete_scalar_f64,
+    _safe_psd_root,
+    _sigma_with_jitter,
+)
 from .cbm import CarbonBoxModel
 from .data import Dataset
 from .fields import (
@@ -93,71 +100,52 @@ __all__ = [
 
 _BIJECTOR_TYPES = Literal["identity", "exp", "softplus", "sigmoid"]
 _VALID_BIJECTORS = ("identity", "exp", "softplus", "sigmoid")
-_PARAMSPEC_SET_FIELDS = frozenset({"path", "bijector", "prior_mean", "prior_sd", "low", "high"})
-_LMCFG_SET_FIELDS = frozenset({
-    "offset_mode", "global_prior_mean", "global_prior_sd", "lab_prior_sd",
-    "solar_prior_sd", "trend_prior_sd", "marginalize_solar", "marginalize_trend",
-    "marginalize_gp", "marginalize_field", "n_gp_modes", "include_gp_initial_cov",
-    "include_field_initial_cov", "whiten_method", "dct_operator",
-})
+_PARAMSPEC_SET_FIELDS = frozenset(
+    {"path", "bijector", "prior_mean", "prior_sd", "low", "high"}
+)
+_LMCFG_SET_FIELDS = frozenset(
+    {
+        "offset_mode",
+        "global_prior_mean",
+        "global_prior_sd",
+        "lab_prior_sd",
+        "solar_prior_sd",
+        "trend_prior_sd",
+        "marginalize_solar",
+        "marginalize_trend",
+        "marginalize_gp",
+        "marginalize_field",
+        "n_gp_modes",
+        "include_gp_initial_cov",
+        "include_field_initial_cov",
+        "whiten_method",
+        "dct_operator",
+    }
+)
 
 
-def _concrete_f64_array(
-    value: ArrayLike,
-    name: str,
-    *,
-    owner: str = "ParamSpec",
-) -> np.ndarray:
-    """Convert ``value`` to a concrete ``float64`` NumPy array, rejecting JAX tracers."""
-    c = _concrete(value)
-    if c is None:
-        raise ValueError(f"{owner}: {name} must be a concrete (non-traced) value.")
-    try:
-        return np.asarray(c, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{owner}: {name} must be numeric; got {value!r}.") from exc
-
-
-def _concrete_scalar_f64(value: Any, name: str, *, owner: str = "ParamSpec") -> float:
-    """Convert scalar ``value`` to a concrete Python ``float``, rejecting non-scalars/tracers."""
-    arr = _concrete_f64_array(value, name, owner=owner)
-    if arr.ndim != 0:
-        raise ValueError(
-            f"{owner}: {name} must be a scalar float; got shape {arr.shape}."
-        )
-    return float(arr)
-
-
-def _parse_flat_zdx_updates(
+def _partition_zdx_updates(
     parameters: Any,
     values: Any,
     updates: dict[str, Any],
-) -> dict[str, Any] | None:
-    """Normalize top-level ``zdx.Base.set`` inputs; return ``None`` for nested leaf paths."""
-    if updates:
-        if parameters is not None or values is not None:
-            raise TypeError(
-                "set() received mixed input styles; pass (parameters, values), "
-                "a mapping, or keyword arguments."
-            )
-        items = list(updates.items())
-    elif isinstance(parameters, dict):
-        if values is not None:
-            raise TypeError("set() received both a mapping and values.")
-        items = list(parameters.items())
-    elif isinstance(parameters, str):
-        items = [(parameters, values)]
-    elif isinstance(parameters, (list, tuple)) and all(
-        isinstance(p, str) for p in parameters
-    ):
-        if not isinstance(values, (list, tuple)) or len(values) != len(parameters):
-            return None
-        items = list(zip(parameters, values))
-    else:
-        return None
-    if any(not isinstance(k, str) or "." in k for k, _ in items):
-        return None
-    return dict(items)
+) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
+    """Partition ``zdx.Base.set`` inputs into ``(top_level_dict, nested_path_pairs)``."""
+    params_norm, vals_norm = _zdx_base._normalise_mutation_inputs(
+        parameters, values, updates=updates, method_name="set"
+    )
+    if vals_norm is None:
+        vals_norm = [None]
+        if isinstance(params_norm, str):
+            params_norm = [params_norm]
+    paths, resolved_vals = _zdx_base._format(params_norm, vals_norm)
+    top_level: dict[str, Any] = {}
+    nested: list[tuple[str, Any]] = []
+    for parts, val in zip(paths, resolved_vals):
+        if len(parts) == 1:
+            top_level[parts[0]] = val
+        else:
+            nested.append((".".join(parts), val))
+    return top_level, nested
 
 
 class ParamSpec(zdx.Base):
@@ -193,8 +181,8 @@ class ParamSpec(zdx.Base):
         prior_mean: ArrayLike = 0.0,
         prior_sd: ArrayLike = 10.0,
         *,
-        low: float = 0.0,
-        high: float = 1.0,
+        low: ArrayLike = 0.0,
+        high: ArrayLike = 1.0,
     ) -> None:
         owner = f"ParamSpec({path!r})"
         if bijector not in _VALID_BIJECTORS:
@@ -344,11 +332,11 @@ class ParamSpec(zdx.Base):
     def bounded(
         cls,
         path: str,
-        low: float,
-        high: float,
+        low: ArrayLike,
+        high: ArrayLike,
         *,
         median: ArrayLike | None = None,
-        logit_sd: ArrayLike = 1.5,
+        logit_sd: ArrayLike = 1.2,
     ) -> ParamSpec:
         """Construct a logit-normal prior on ``(low, high)`` in physical units.
 
@@ -360,20 +348,24 @@ class ParamSpec(zdx.Base):
         ``spec.constrain(spec.prior_mean) == median`` to machine precision across
         both narrow and wide intervals.
 
+        Choosing ``logit_sd <= sqrt(2)`` (``~1.414``; default ``1.2``) ensures the
+        induced logit-normal physical density ``p_theta(theta)`` is strictly
+        unimodal across every ``median`` in ``(low, high)``, whereas values
+        ``> sqrt(2)`` split the physical prior into two boundary-ward modes.
+
         Parameters
         ----------
         path : str
             ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.duration"``).
-        low, high : float
-            Finite lower and upper physical bounds satisfying ``low < high``
+        low, high : ArrayLike
+            Finite scalar lower and upper physical bounds satisfying ``low < high``
             (e.g. ``0.01`` and ``2.0`` in ``yr`` for a sharp Miyake spike duration).
         median : ArrayLike, optional
             Optional physical prior median strictly inside ``(low, high)``
             (scalar or array). Defaults to ``None`` (midpoint ``0.5 * (low + high)``).
-        logit_sd : ArrayLike, default 1.5
-            Unconstrained logit-space standard deviation (``> 0``; ``~1.2-1.5``
-            places broad, weakly informative mass across the interior while
-            preventing boundary pile-up).
+        logit_sd : ArrayLike, default 1.2
+            Unconstrained logit-space standard deviation (``> 0``; ``<= sqrt(2)``
+            guarantees a unimodal physical density on ``(low, high)``).
 
         Returns
         -------
@@ -414,7 +406,11 @@ class ParamSpec(zdx.Base):
             d_lo = med_np - low_f
             d_hi = high_f - med_np
             near_mid = np.abs(d_lo - d_hi) <= 0.5 * d_hi
-            numer = (2.0 * med_np - (low_f + high_f)) if (low_f * high_f < 0.0) else (d_lo - d_hi)
+            numer = (
+                (2.0 * med_np - (low_f + high_f))
+                if (low_f * high_f < 0.0)
+                else (d_lo - d_hi)
+            )
             safe_rel = np.where(near_mid, numer / d_hi, 0.0)
             pm = np.where(near_mid, np.log1p(safe_rel), np.log(d_lo) - np.log(d_hi))
         return cls(
@@ -433,11 +429,18 @@ class ParamSpec(zdx.Base):
         /,
         **updates: Any,
     ) -> ParamSpec:
-        """Return a validated copy of ``self`` with updated specification field(s)."""
-        flat = _parse_flat_zdx_updates(parameters, values, updates)
-        if flat is None:
-            return super().set(parameters, values, **updates)
-        unknown = set(flat) - _PARAMSPEC_SET_FIELDS
+        """Return a validated copy of ``self`` with updated specification field(s).
+
+        Note that updating ``low`` or ``high`` preserves the stored unconstrained
+        ``prior_mean`` rather than recomputing a physical ``median``; use
+        :meth:`bounded` to re-centre on a physical median.
+        """
+        top_level, nested = _partition_zdx_updates(parameters, values, updates)
+        if nested:
+            raise AttributeError(
+                f"ParamSpec has no nested settable attribute {nested[0][0]!r}."
+            )
+        unknown = set(top_level) - _PARAMSPEC_SET_FIELDS
         if unknown:
             bad = sorted(unknown)[0]
             raise AttributeError(f"ParamSpec has no settable attribute {bad!r}.")
@@ -448,12 +451,12 @@ class ParamSpec(zdx.Base):
             self._prior_shape
         )
         return type(self)(
-            path=flat.get("path", self.path),
-            bijector=flat.get("bijector", self.bijector),
-            prior_mean=flat.get("prior_mean", pm_cur),
-            prior_sd=flat.get("prior_sd", ps_cur),
-            low=flat.get("low", self.low),
-            high=flat.get("high", self.high),
+            path=top_level.get("path", self.path),
+            bijector=top_level.get("bijector", self.bijector),
+            prior_mean=top_level.get("prior_mean", pm_cur),
+            prior_sd=top_level.get("prior_sd", ps_cur),
+            low=top_level.get("low", self.low),
+            high=top_level.get("high", self.high),
         )
 
     @property
@@ -506,10 +509,18 @@ class ParamSpec(zdx.Base):
         if self.bijector == "sigmoid":
             lo = jnp.asarray(self.low, dtype=jnp.float64)
             hi = jnp.asarray(self.high, dtype=jnp.float64)
-            span = hi - lo
-            p_lo = jnp.clip((t_arr - lo) / span, 1e-12, 1.0 - 1e-12)
-            p_hi = jnp.clip((hi - t_arr) / span, 1e-12, 1.0 - 1e-12)
-            return jnp.log(p_lo) - jnp.log(p_hi)
+            d_lo = jnp.maximum(t_arr - lo, 1e-30)
+            d_hi = jnp.maximum(hi - t_arr, 1e-30)
+            near_mid = jnp.abs(d_lo - d_hi) <= 0.5 * d_hi
+            numer = (
+                (2.0 * t_arr - (lo + hi))
+                if (self.low * self.high < 0.0)
+                else (d_lo - d_hi)
+            )
+            safe_rel = jnp.where(near_mid, numer / d_hi, 0.0)
+            return jnp.where(
+                near_mid, jnp.log1p(safe_rel), jnp.log(d_lo) - jnp.log(d_hi)
+            )
         return t_arr
 
     def log_abs_det_jacobian(self, u: ArrayLike) -> jax.Array:
@@ -799,18 +810,32 @@ class LinearMarginalConfig(zdx.Base):
         **updates: Any,
     ) -> LinearMarginalConfig:
         """Return a validated copy of ``self`` with updated config or ``dct_operator`` field(s)."""
-        flat = _parse_flat_zdx_updates(parameters, values, updates)
-        if flat is None:
-            return super().set(parameters, values, **updates)
-        unknown = set(flat) - _LMCFG_SET_FIELDS
+        top_level, nested = _partition_zdx_updates(parameters, values, updates)
+        unknown = set(top_level) - _LMCFG_SET_FIELDS
         if unknown:
             bad = sorted(unknown)[0]
             raise AttributeError(
                 f"LinearMarginalConfig has no settable attribute {bad!r}."
             )
-        kwargs = {name: getattr(self, name) for name in _LMCFG_SET_FIELDS}
-        kwargs.update(flat)
-        return type(self)(**kwargs)
+        for nest_path, _ in nested:
+            root = nest_path.split(".", 1)[0]
+            if root != "dct_operator":
+                raise AttributeError(
+                    f"LinearMarginalConfig cannot set nested path {nest_path!r}."
+                )
+        if top_level:
+            kwargs = {name: getattr(self, name) for name in _LMCFG_SET_FIELDS}
+            kwargs.update(top_level)
+            out = type(self)(**kwargs)
+        else:
+            out = self
+        for nest_path, nest_val in nested:
+            if out.dct_operator is None:
+                raise AttributeError(
+                    f"Cannot set {nest_path!r} when dct_operator is None."
+                )
+            out = super(LinearMarginalConfig, out).set(nest_path, nest_val)
+        return out
 
 
 # ---------------------------------------------------------------------------

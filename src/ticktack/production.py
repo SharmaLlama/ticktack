@@ -20,7 +20,7 @@ from jax.typing import ArrayLike
 import tinygp.kernels as tk
 import zodiax as zdx
 
-from ._utils import _concrete
+from ._utils import _concrete_scalar_f64
 from .constants import DEFAULT_Q_STD
 
 if TYPE_CHECKING:
@@ -705,19 +705,21 @@ class MiyakeSpike(ProductionTerm):
         """
         from .likelihood import ParamSpec
 
+        owner = "MiyakeSpike.param_specs"
         base = f"{stripped}." if (stripped := str(prefix).strip().rstrip(".")) else ""
-        raw = (_concrete(self.t_start), _concrete(self.duration), _concrete(self.fluence))
-        if any(x is None for x in raw):
-            raise ValueError(
-                "MiyakeSpike.param_specs requires concrete (non-traced) "
-                "t_start, duration, and fluence values."
-            )
-        t0, dur0, fl0 = float(raw[0]), float(raw[1]), float(raw[2])  # type: ignore[arg-type]
+        t0 = _concrete_scalar_f64(self.t_start, "t_start", owner=owner)
+        dur0 = _concrete_scalar_f64(self.duration, "duration", owner=owner)
+        fl0 = _concrete_scalar_f64(self.fluence, "fluence", owner=owner)
         if len(duration_bounds) != 2:
             raise ValueError(
                 f"duration_bounds must be a (low, high) pair; got {duration_bounds!r}."
             )
-        d_lo, d_hi = float(duration_bounds[0]), float(duration_bounds[1])
+        d_lo = _concrete_scalar_f64(
+            duration_bounds[0], "duration_bounds[0]", owner=owner
+        )
+        d_hi = _concrete_scalar_f64(
+            duration_bounds[1], "duration_bounds[1]", owner=owner
+        )
         if not (0.0 <= d_lo < d_hi < math.inf):
             raise ValueError(
                 "duration_bounds=(low, high) requires finite 0 <= low < high; "
@@ -745,13 +747,8 @@ class MiyakeSpike(ProductionTerm):
                     "skewness_sd is only valid when profile='skewgaussian'; "
                     f"got profile={self.profile!r}."
                 )
-            if (c_sk := _concrete(self.skewness)) is None:
-                raise ValueError(
-                    "MiyakeSpike.param_specs requires concrete (non-traced) skewness."
-                )
-            specs.append(
-                ParamSpec.normal(f"{base}skewness", mean=float(c_sk), sd=skewness_sd)
-            )
+            sk0 = _concrete_scalar_f64(self.skewness, "skewness", owner=owner)
+            specs.append(ParamSpec.normal(f"{base}skewness", mean=sk0, sd=skewness_sd))
         return tuple(specs)
 
     def unit_profile(self, u: jax.Array) -> jax.Array:

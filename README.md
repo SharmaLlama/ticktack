@@ -55,14 +55,13 @@ model = tt.RadiocarbonModel(cbm=cbm, production=production)
 
 space = tt.ParameterSpace(
     model,
-    [
-        tt.ParamSpec("production.spike.t_start", "sigmoid", low=773.5, high=775.8, prior_mean=0.0, prior_sd=1.5),
-        tt.ParamSpec("production.spike.duration", "sigmoid", low=0.04, high=1.5, prior_mean=-1.2, prior_sd=1.2),
-        tt.ParamSpec("production.spike.fluence", "exp", prior_mean=1.8, prior_sd=0.6),
-    ],
+    model.production.spike.param_specs(
+        t_start_sd=0.5,
+        duration_bounds=(0.04, 1.5),
+    ),
 )
 map_res = tt.fit_map(model, dataset, space)
-idata = tt.sample_nuts(map_res.fitted_model, dataset, space, init_map=False)
+idata = tt.sample_nuts(map_res.model, dataset, space, init_map=False)
 ```
 
 ## Tutorials (`notebooks/v2/`)

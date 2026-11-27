@@ -18,6 +18,37 @@ def _concrete(value: Any) -> np.ndarray | None:
         return None
 
 
+def _concrete_f64_array(
+    value: ArrayLike,
+    name: str,
+    *,
+    owner: str = "ticktack",
+) -> np.ndarray:
+    """Convert ``value`` to a concrete ``float64`` NumPy array, rejecting JAX tracers."""
+    c = _concrete(value)
+    if c is None:
+        raise ValueError(f"{owner}: {name} must be a concrete (non-traced) value.")
+    try:
+        return np.asarray(c, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{owner}: {name} must be numeric; got {value!r}.") from exc
+
+
+def _concrete_scalar_f64(
+    value: Any,
+    name: str,
+    *,
+    owner: str = "ticktack",
+) -> float:
+    """Convert scalar ``value`` to a concrete Python ``float``, rejecting non-scalars/tracers."""
+    arr = _concrete_f64_array(value, name, owner=owner)
+    if arr.ndim != 0:
+        raise ValueError(
+            f"{owner}: {name} must be a scalar float; got shape {arr.shape}."
+        )
+    return float(arr)
+
+
 def _sigma_with_jitter(sigma: ArrayLike, sigma_jitter: ArrayLike | None = None) -> jax.Array:
     """Return ``float64`` uncertainties ``sqrt(sigma^2 + sigma_jitter^2)``."""
     sig = jnp.asarray(sigma, dtype=jnp.float64)

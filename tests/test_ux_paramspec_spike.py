@@ -140,10 +140,20 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
 
     def test_bounded_midpoint_asymmetric_and_narrow_interval_cancellation(self) -> None:
         getcontext().prec = 80
-        # Default midpoint (median=None)
-        spec_mid = tt.ParamSpec.bounded("x", -1.35, 4.85, logit_sd=1.4)
+        # Default midpoint (median=None) and unimodality default logit_sd = 1.2 <= sqrt(2)
+        spec_mid = tt.ParamSpec.bounded("x", -1.35, 4.85)
         assert spec_mid.bijector == "sigmoid"
         assert spec_mid.prior_mean == 0.0
+        assert spec_mid.prior_sd == 1.2
+        assert float(spec_mid.prior_sd) <= math.sqrt(2.0)
+        # Verify induced physical log-density is strictly concave (unimodal) at u = 0
+        d2_log_p_theta = jax.grad(
+            jax.grad(
+                lambda u: spec_mid.log_prior_unconstrained(u)
+                - spec_mid.log_abs_det_jacobian(u)
+            )
+        )(jnp.asarray(0.0, dtype=jnp.float64))
+        assert float(d2_log_p_theta) < 0.0
         np.testing.assert_allclose(
             float(spec_mid.constrain(spec_mid.prior_mean)),
             0.5 * (-1.35 + 4.85),
@@ -159,7 +169,7 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             (-5.0, 5.0),
             (2.5, 12.5),
         ]
-        fracs = [1e-8, 0.02, 0.5 + 1e-10, 0.96, 1.0 - 1e-8]
+        fracs = [1e-8, 0.02, 0.5 + 1e-14, 0.5 + 1e-10, 0.96, 1.0 - 1e-8]
         for lo, hi in intervals:
             span = hi - lo
             for frac in fracs:
@@ -168,6 +178,13 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 np.testing.assert_allclose(
                     float(spec.constrain(spec.prior_mean)),
                     med,
+                    rtol=1e-13,
+                    atol=1e-15,
+                )
+                # Verify unconstrain(med) == prior_mean without midpoint cancellation or 1e-12 clamp
+                np.testing.assert_allclose(
+                    float(spec.unconstrain(med)),
+                    float(spec.prior_mean),
                     rtol=1e-13,
                     atol=1e-15,
                 )
@@ -203,23 +220,58 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                     atol=1e-13,
                 )
 
-        # Float32 inputs promoted without float32 cancellation
-        lo32 = np.float32(0.01)
-        hi32 = np.float32(0.0102)
-        med32 = np.float32(0.01017)
-        spec32 = tt.ParamSpec.bounded(
-            "dur32", float(lo32), float(hi32), median=med32, logit_sd=np.float32(1.2)
-        )
+        # Extreme tail (theta - low) / (high - low) = 1e-20 (< 1e-12, no premature clamp!)
+        spec_unit = tt.ParamSpec.bounded("u01", 0.0, 1.0)
         np.testing.assert_allclose(
-            float(spec32.constrain(spec32.prior_mean)),
-            float(med32),
+            float(spec_unit.unconstrain(1e-20)),
+            math.log(1e-20),
             rtol=1e-13,
         )
+
+        # Raw np.float32 narrow-interval sweep (1e-7..1e0) promoted cleanly without float() wrap
+        for base in (0.01, 1.0, 0.0):
+            for exp in (-7, -6, -5, -4, -3, -2, -1, 0):
+                span32 = 10.0**exp
+                lo32 = np.float32(base - 0.5 * span32 if base == 0.0 else base)
+                hi32 = np.float32(
+                    base + 0.5 * span32 if base == 0.0 else base + span32
+                )
+                if not (float(hi32) > float(lo32)):
+                    continue
+                for frac32 in (0.03, 0.5 + 1e-3, 0.97):
+                    med32 = np.float32(
+                        float(lo32) + frac32 * (float(hi32) - float(lo32))
+                    )
+                    if not (float(lo32) < float(med32) < float(hi32)):
+                        continue
+                    spec32 = tt.ParamSpec.bounded(
+                        "dur32", lo32, hi32, median=med32, logit_sd=np.float32(1.2)
+                    )
+                    lo_d = Decimal.from_float(float(lo32))
+                    hi_d = Decimal.from_float(float(hi32))
+                    med_d = Decimal.from_float(float(med32))
+                    u_ref32 = float((med_d - lo_d).ln() - (hi_d - med_d).ln())
+                    assert abs(float(spec32.prior_mean)) < 60.0  # unclipped interior
+                    np.testing.assert_allclose(
+                        float(spec32.prior_mean), u_ref32, rtol=1e-13, atol=1e-15
+                    )
+                    np.testing.assert_allclose(
+                        float(spec32.unconstrain(med32)),
+                        u_ref32,
+                        rtol=1e-13,
+                        atol=1e-15,
+                    )
+                    np.testing.assert_allclose(
+                        float(spec32.constrain(spec32.prior_mean)),
+                        float(med32),
+                        rtol=1e-13,
+                        atol=1e-15,
+                    )
 
         # 1D vector leaf bounded spec
         med_vec = np.array([0.04, 0.5, 1.85], dtype=np.float64)
         spec_vec = tt.ParamSpec.bounded(
-            "vec_b", 0.01, 2.0, median=med_vec, logit_sd=np.array([1.1, 1.3, 1.6])
+            "vec_b", 0.01, 2.0, median=med_vec, logit_sd=np.array([1.1, 1.2, 1.35])
         )
         np.testing.assert_allclose(
             np.asarray(spec_vec.constrain(spec_vec.prior_mean)), med_vec, rtol=1e-13
@@ -369,6 +421,15 @@ class TestZodiaxPyTreeAndJitCaching:
         spec_dict = spec1.set({"low": 0.02, "high": 1.8})
         assert (spec_dict.low, spec_dict.high) == (0.02, 1.8)
 
+        # Broadcast scalar across list of paths, tuple dict keys, and single-list array values
+        spec_id = tt.ParamSpec.normal("v", mean=np.array([0.0, 0.0]), sd=1.0)
+        spec_bcast = spec_id.set(["low", "high"], 0.5)
+        assert (spec_bcast.low, spec_bcast.high) == (0.5, 0.5)
+        spec_tup = spec_id.set({("low", "high"): 0.75})
+        assert (spec_tup.low, spec_tup.high) == (0.75, 0.75)
+        spec_arr = spec_id.set(["prior_mean"], np.array([1.2, -0.8]))
+        np.testing.assert_allclose(np.asarray(spec_arr.prior_mean), [1.2, -0.8])
+
         cfg1 = tt.LinearMarginalConfig(offset_mode="hierarchical", lab_prior_sd=1.5)
         cfg2 = tt.LinearMarginalConfig(offset_mode="hierarchical", lab_prior_sd=1.5)
         assert isinstance(cfg1, zdx.Base)
@@ -395,11 +456,20 @@ class TestZodiaxPyTreeAndJitCaching:
         assert cfg_op.get("dct_operator", to_array=False) is op
         assert cfg_op.get("dct_operator.w_dct").shape == op.w_dct.shape
 
-        # Nested PyTree leaf update inside dct_operator via super().set(...)
-        scaled_op_cfg = cfg_op.set("dct_operator.w_dct", 2.0 * op.w_dct)
-        np.testing.assert_allclose(
-            np.asarray(scaled_op_cfg.dct_operator.w_dct), 2.0 * np.asarray(op.w_dct)
+        # Mixed top-level static + nested PyTree leaf update in one .set(...) call
+        mixed_cfg = cfg_op.set(
+            {"offset_mode": "shared", "dct_operator.w_dct": 2.0 * op.w_dct}
         )
+        assert mixed_cfg.offset_mode == "shared"
+        np.testing.assert_allclose(
+            np.asarray(mixed_cfg.dct_operator.w_dct), 2.0 * np.asarray(op.w_dct)
+        )
+
+        # Broadcast scalar and tuple dict key on LinearMarginalConfig
+        cfg_bcast = cfg1.set(["marginalize_solar", "marginalize_gp"], False)
+        assert not cfg_bcast.marginalize_solar and not cfg_bcast.marginalize_gp
+        cfg_tup = cfg1.set({("marginalize_solar", "marginalize_trend"): False})
+        assert not cfg_tup.marginalize_solar and not cfg_tup.marginalize_trend
 
         cfg_cleared = cfg_op.set("dct_operator", None).set(
             offset_mode="shared", marginalize_gp=False
@@ -699,6 +769,8 @@ class TestValidationErrors:
             s.set("prior_sd", -1.0)
         with pytest.raises(AttributeError, match="no settable attribute"):
             s.set("nonexistent", 1.0)
+        with pytest.raises(AttributeError, match="nested"):
+            s.set("foo.bar", 1.0)
 
         cfg = tt.LinearMarginalConfig()
         with pytest.raises(ValueError, match="offset_mode"):
@@ -707,6 +779,10 @@ class TestValidationErrors:
             cfg.set("dct_operator", "not_an_operator")
         with pytest.raises(AttributeError, match="no settable attribute"):
             cfg.set("nonexistent", 1)
+        with pytest.raises(AttributeError, match="nested"):
+            cfg.set("offset_mode.sub", 1)
+        with pytest.raises(AttributeError, match="dct_operator is None"):
+            cfg.set("dct_operator.w_dct", 1.0)
 
     def test_miyake_spike_param_specs_validation(self) -> None:
         # Sharp spike outside default duration_bounds=(0.05, 2.0)
@@ -724,6 +800,15 @@ class TestValidationErrors:
             tt.MiyakeSpike(duration=0.2, profile="supergaussian").param_specs(
                 t_start_sd=0.5, skewness_sd=0.8
             )
+
+        # Non-scalar spike leaf rejected with actionable MiyakeSpike.param_specs ValueError
+        bad_spike = eqx.tree_at(
+            lambda sp: sp.t_start,
+            tt.MiyakeSpike(duration=0.2),
+            jnp.array([774.4, 774.6], dtype=jnp.float64),
+        )
+        with pytest.raises(ValueError, match=r"MiyakeSpike\.param_specs.*scalar"):
+            bad_spike.param_specs(t_start_sd=0.5)
 
         # Traced MiyakeSpike rejected cleanly
         with pytest.raises(ValueError, match="concrete"):
