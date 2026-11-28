@@ -52,8 +52,11 @@ def _leaf_names(tree: CarbonBoxModel) -> list[str]:
     leaves_with_path, _ = jax.tree_util.tree_flatten_with_path(tree)
     names: list[str] = []
     for path, _ in leaves_with_path:
-        assert len(path) == 1
-        names.append(path[0].name)
+        if getattr(tree, "chart", None) is not None:
+            assert len(path) == 2 and path[0].name == "chart"
+        else:
+            assert len(path) == 1
+        names.append(path[-1].name)
     return names
 
 
@@ -70,14 +73,15 @@ def test_shared_base_methods_and_dead_helper_removal() -> None:
     for cls in (FixedCBM, BalancedCBM, SubspaceCBM, ReversibleCBM, OpenCBM):
         assert cls.production_vector is CarbonBoxModel.production_vector
 
-    # Perron CBMs share _PerronCBM methods; non-Perron CBMs do not expose _perron_simplex.
-    for cls in (BalancedCBM, SubspaceCBM, OpenCBM):
-        assert issubclass(cls, cbm_mod._PerronCBM)
-        assert cls.edge_log_rates is cbm_mod._PerronCBM.edge_log_rates
-        assert cls.edge_rates is cbm_mod._PerronCBM.edge_rates
-        assert cls._perron_simplex is cbm_mod._PerronCBM._perron_simplex
-        assert cls.reservoir_masses is cbm_mod._PerronCBM.reservoir_masses
-        assert cls.relative_reservoir_masses is cbm_mod._PerronCBM.relative_reservoir_masses
+    # Perron charts share _PerronChart methods; SubspaceCBM retains _PerronCBM until Wave 5.
+    for chart_cls in (cbm_mod.BalancedChart, cbm_mod.OpenChart):
+        assert issubclass(chart_cls, cbm_mod._PerronChart)
+        assert chart_cls.edge_log_rates is cbm_mod._PerronChart.edge_log_rates
+        assert chart_cls.edge_rates is cbm_mod._PerronChart.edge_rates
+        assert chart_cls._perron_simplex is cbm_mod._PerronChart._perron_simplex
+        assert chart_cls.reservoir_masses is cbm_mod._PerronChart.reservoir_masses
+        assert chart_cls.relative_reservoir_masses is cbm_mod._PerronChart.relative_reservoir_masses
+    assert issubclass(SubspaceCBM, cbm_mod._PerronCBM)
 
     for cls in (FixedCBM, ReversibleCBM, EffectiveCBM):
         assert not hasattr(cls, "_perron_simplex")
