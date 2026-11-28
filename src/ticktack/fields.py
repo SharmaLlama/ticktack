@@ -856,7 +856,7 @@ class _FieldBase(ProductionTerm):
     @classmethod
     def from_operator(
         cls,
-        op: DCTResponseOperator | LinearizedDCTOperator,
+        op: DCTResponseOperator,
         *,
         kernel: SpectralKernel | None = None,
         sigma: ArrayLike = 0.3,
@@ -865,16 +865,14 @@ class _FieldBase(ProductionTerm):
     ) -> Self:
         """Construct a zero-initialized field aligned with a precomputed DCT operator grid.
 
-        Reads ``(op.t_start, op.t_end, op.n_grid)`` from ``op`` and validates operator
-        compatibility (including ``op.template_digest`` and requiring
-        :class:`DCTResponseOperator` for :class:`LogGaussianField`).
+        Reads ``(op.t_start, op.t_end, op.n_grid)`` from ``op`` and delegates grid and
+        ``template_digest`` compatibility checks to ``field._validate_operator(op)``.
 
         Parameters
         ----------
-        op : DCTResponseOperator or LinearizedDCTOperator
+        op : DCTResponseOperator
             Precomputed DCT-II response operator supplying ``t_start`` (yr),
-            ``t_end`` (yr), and ``n_grid``. :class:`LinearizedDCTOperator` is only
-            supported for :class:`GaussianField`.
+            ``t_end`` (yr), and ``n_grid``.
         kernel : SpectralKernel, optional
             Explicit spectral prior kernel (overrides ``sigma`` / ``length_yr``).
         sigma : ArrayLike, optional
@@ -898,36 +896,9 @@ class _FieldBase(ProductionTerm):
         >>> field = GaussianField.from_operator(op, kernel=MaternSpectrum(sigma=0.3))
         >>> log_field = LogGaussianField.from_operator(op, q_mean=1.8)
         """
-        if not isinstance(op, (DCTResponseOperator, LinearizedDCTOperator)):
-            raise TypeError(
-                "op must be a DCTResponseOperator or LinearizedDCTOperator, "
-                f"got {type(op)!r}."
-            )
-        if isinstance(op, LinearizedDCTOperator) and not issubclass(cls, GaussianField):
-            raise TypeError(
-                f"{cls.__name__}.from_operator requires a DCTResponseOperator; "
-                "LinearizedDCTOperator is only supported for GaussianField."
-            )
-        if op.template_digest != "":
-            expected_tmpl = kwargs.get("template") if issubclass(cls, GaussianField) else None
-            tmpl_digest = _compute_template_digest(expected_tmpl)
-            presence_mismatch = (op.template_digest == "none") != (expected_tmpl is None)
-            if presence_mismatch or (tmpl_digest != "" and tmpl_digest != op.template_digest):
-                if issubclass(cls, GaussianField) and expected_tmpl is None:
-                    raise ValueError(
-                        "op was built with a temporal template; pass matching "
-                        "template=... to GaussianField.from_operator(op, template=...)."
-                    )
-                if not issubclass(cls, GaussianField):
-                    raise ValueError(
-                        f"{cls.__name__}.from_operator requires an un-templated "
-                        "DCTResponseOperator (op.template_digest == 'none')."
-                    )
-                raise ValueError(
-                    "template passed to GaussianField.from_operator does not match "
-                    "op.template_digest."
-                )
-        return cls.zeros(
+        if not isinstance(op, DCTResponseOperator):
+            raise TypeError(f"op must be a DCTResponseOperator, got {type(op)!r}.")
+        field = cls.zeros(
             op.t_start,
             op.t_end,
             n_grid=op.n_grid,
@@ -936,6 +907,8 @@ class _FieldBase(ProductionTerm):
             length_yr=length_yr,
             **kwargs,
         )
+        field._validate_operator(op)
+        return field
 
     @property
     def n_grid(self) -> int:
@@ -1163,6 +1136,10 @@ class GaussianField(_FieldBase):
         eta = idct2(_safe_sqrt(self.power_spectrum()) * self.latent)
         return eta if self.template is None else self.template * eta
 
+    def _has_traced_template(self) -> bool:
+        """True when traced ``template`` must use ``op.w_grid`` instead of frozen ``op.w_dct``."""
+        return self.template is not None and _concrete(self.template) is None
+
     def excess(
         self,
         op: DCTResponseOperator,
@@ -1191,7 +1168,7 @@ class GaussianField(_FieldBase):
         """
         del q_std
         self._validate_operator(op)
-        if self.template is not None and _concrete(self.template) is None:
+        if self._has_traced_template():
             return op.w_grid @ self.evaluate_grid()
         return op.w_dct @ (_safe_sqrt(self.power_spectrum()) * self.latent)
 
@@ -1213,7 +1190,7 @@ class GaussianField(_FieldBase):
         self._validate_operator(op)
         dq_draws = jax.vmap(lambda z: self.with_latent(z).evaluate_grid())(z_draws)
         q_draws = jnp.asarray(q_std, dtype=jnp.float64) + dq_draws
-        if self.template is not None and _concrete(self.template) is None:
+        if self._has_traced_template():
             f_exc_draws = dq_draws @ op.w_grid.T
         else:
             f_exc_draws = (z_draws * _safe_sqrt(self.power_spectrum())[None, :]) @ op.w_dct.T
@@ -1229,11 +1206,11 @@ class GaussianField(_FieldBase):
         del q_std
         self._validate_operator(op)
         inv_s = jnp.asarray(inv_sig, dtype=jnp.float64)
-        w_dct = (
-            (op.w_grid * self.template[None, :]) @ _dct2_ortho_matrix(self.n_grid).T
-            if self.template is not None and _concrete(self.template) is None
-            else op.w_dct
-        )
+        if self._has_traced_template():
+            assert self.template is not None
+            w_dct = (op.w_grid * self.template[None, :]) @ _dct2_ortho_matrix(self.n_grid).T
+        else:
+            w_dct = op.w_dct
         return inv_s[:, None] * (w_dct * _safe_sqrt(self.power_spectrum())[None, :])
 
     def _linearized_error_scale_inputs(

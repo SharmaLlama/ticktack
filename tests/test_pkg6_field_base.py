@@ -249,7 +249,7 @@ def test_zeros_constructors_and_defaults() -> None:
             GaussianField.zeros(760.0, 800.0, n_grid=bad_type)  # type: ignore[arg-type]
 
 
-def test_from_operator_dct_and_linearized_operators() -> None:
+def test_from_operator_dct_validation_and_defaults() -> None:
     model, ds, op = _make_synthetic_problem(n_grid=24)
     lin_op = _make_subspace_linearized_operator(ds, t_start=752.0, t_end=788.0, n_grid=20)
     tmpl = jnp.linspace(0.5, 1.5, op.n_grid, dtype=jnp.float64)
@@ -263,21 +263,20 @@ def test_from_operator_dct_and_linearized_operators() -> None:
     )
 
     kern = MaternSpectrum(sigma=0.35, length_yr=6.0, order=2.5, zero_mode=False)
-    for cur_op in (op, lin_op):
-        gf = GaussianField.from_operator(cur_op, kernel=kern)
-        assert isinstance(gf, GaussianField)
-        assert gf.n_grid == cur_op.n_grid
-        assert gf.t_start == cur_op.t_start
-        assert gf.t_end == cur_op.t_end
-        assert gf.zero_mode is False
-        assert gf.kernel is kern
-        np.testing.assert_array_equal(gf.latent, jnp.zeros(cur_op.n_grid, dtype=jnp.float64))
+    gf = GaussianField.from_operator(op, kernel=kern)
+    assert isinstance(gf, GaussianField)
+    assert gf.n_grid == op.n_grid
+    assert gf.t_start == op.t_start
+    assert gf.t_end == op.t_end
+    assert gf.zero_mode is False
+    assert gf.kernel is kern
+    np.testing.assert_array_equal(gf.latent, jnp.zeros(op.n_grid, dtype=jnp.float64))
 
-    # Matching template on GaussianField succeeds; mismatches fail fast
+    # Matching template on GaussianField succeeds; mismatches fail fast via _validate_operator
     gf_tmpl = GaussianField.from_operator(op_tmpl, template=tmpl)
     np.testing.assert_array_equal(gf_tmpl.template, tmpl)
 
-    with pytest.raises(ValueError, match="temporal template"):
+    with pytest.raises(ValueError, match="template_digest"):
         GaussianField.from_operator(op_tmpl)
     with pytest.raises(ValueError, match="template_digest"):
         GaussianField.from_operator(op, template=tmpl)
@@ -302,15 +301,17 @@ def test_from_operator_dct_and_linearized_operators() -> None:
     assert float(lgf.q_mean) == pytest.approx(1.85)
     np.testing.assert_array_equal(lgf.template, tmpl)
 
-    # LogGaussianField rejects LinearizedDCTOperator and templated DCTResponseOperator
-    with pytest.raises(TypeError, match="LinearizedDCTOperator is only supported for GaussianField"):
-        LogGaussianField.from_operator(lin_op)
-    with pytest.raises(ValueError, match="un-templated DCTResponseOperator"):
+    # Both classes reject LinearizedDCTOperator and invalid operator types; LogGaussianField rejects templated op
+    with pytest.raises(TypeError, match="DCTResponseOperator"):
+        GaussianField.from_operator(lin_op)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="DCTResponseOperator"):
+        LogGaussianField.from_operator(lin_op)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="template_digest"):
         LogGaussianField.from_operator(op_tmpl)
 
-    with pytest.raises(TypeError, match="DCTResponseOperator or LinearizedDCTOperator"):
+    with pytest.raises(TypeError, match="DCTResponseOperator"):
         GaussianField.from_operator("not_an_operator")  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="DCTResponseOperator or LinearizedDCTOperator"):
+    with pytest.raises(TypeError, match="DCTResponseOperator"):
         LogGaussianField.from_operator(None)  # type: ignore[arg-type]
 
 
