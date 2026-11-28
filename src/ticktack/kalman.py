@@ -735,6 +735,42 @@ class _JosephUpdateResult(NamedTuple):
     inv_sqrt_s: jax.Array
 
 
+class _NodeMeasurementResult(NamedTuple):
+    """Filtered state and stacked per-slot innovation factors at one grid node.
+
+    Attributes
+    ----------
+    mean : jax.Array
+        Post-measurement state mean ``m_{k|k}`` of shape ``(d_state,)``.
+    cov : jax.Array
+        Post-measurement state covariance ``P_{k|k}`` of shape
+        ``(d_state, d_state)``.
+    m_extra : jax.Array
+        Post-measurement nuisance sensitivity ``M_{x, k|k}`` of shape
+        ``(d_state, p_nuis)``.
+    ll_node : jax.Array
+        Summed Gaussian log-normalizer increment at node ``k`` in nats.
+    std_innov : jax.Array
+        Standardized scalar innovations of shape ``(max_simul,)``.
+    std_extra : jax.Array
+        Standardized nuisance innovation rows of shape
+        ``(max_simul, p_nuis)``.
+    k_gain : jax.Array
+        Kalman gain vectors of shape ``(max_simul, d_state)``.
+    inv_sqrt_s : jax.Array
+        Inverse innovation SDs of shape ``(max_simul,)``.
+    """
+
+    mean: jax.Array
+    cov: jax.Array
+    m_extra: jax.Array
+    ll_node: jax.Array
+    std_innov: jax.Array
+    std_extra: jax.Array
+    k_gain: jax.Array
+    inv_sqrt_s: jax.Array
+
+
 class _KalmanForwardPass(NamedTuple):
     """Filtered trajectories and scalar innovation factors from the forward scan.
 
@@ -889,13 +925,6 @@ def _resolve_kalman_time_grid(
     c_weights: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
     """Build or validate a concrete uniform step grid ``(t_grid_np, step_dt)``."""
-    if c_starts.size == 0:
-        raise ValueError("At least one observation window is required.")
-    if not (np.all(np.isfinite(c_starts)) and np.all(np.isfinite(c_ends))):
-        raise ValueError("Observation window timestamps (t_starts, t_ends) must be finite.")
-    if np.any(c_ends < c_starts):
-        raise ValueError("Seasonal windows require t_ends >= t_starts.")
-
     if t_grid is None:
         if dt is None:
             step_dt = 1.0 / 24.0
@@ -939,11 +968,11 @@ def _assign_kalman_tracks(
     starts_np: np.ndarray,
     ends_np: np.ndarray,
     weights_np: np.ndarray,
-    step_dt: float | None = None,
+    step_dt: float,
 ) -> _TrackAssignment:
     """Map active sub-windows to ``t_grid_np`` indices and greedily colour interval tracks."""
     n_grid = t_grid_np.shape[0]
-    dt = float((t_grid_np[-1] - t_grid_np[0]) / (n_grid - 1)) if step_dt is None else float(step_dt)
+    dt = float(step_dt)
     t0 = float(t_grid_np[0])
     n_obs, m_sub = starts_np.shape
 
@@ -953,7 +982,10 @@ def _assign_kalman_tracks(
         if abs(k_float - k_int) > 1e-7 or k_int < 0 or k_int >= n_grid:
             raise ValueError(
                 f"Observation boundary {val} is not aligned to uniform t_grid "
-                f"(t0={t0}, dt={dt}, t_end={float(t_grid_np[-1])})."
+                f"(t0={t0}, dt={dt}, t_end={float(t_grid_np[-1])}). "
+                "Adjust dt (or n_substeps_per_year so 1 / n_substeps_per_year divides "
+                "all ring/seasonal boundary fractions), round boundaries to integer "
+                "multiples of dt, or pass an explicit aligned t_grid covering [t_starts, t_ends]."
             )
         return k_int
 
@@ -1008,7 +1040,7 @@ def _build_seasonal_kalman_schedule(
     ends_np: np.ndarray,
     weights_np: np.ndarray,
     c_obs: ArrayLike,
-    step_dt: float | None = None,
+    step_dt: float,
     *,
     d_gp: int = 0,
 ) -> _KalmanSchedule:
@@ -1016,8 +1048,8 @@ def _build_seasonal_kalman_schedule(
     c_obs_jax = jnp.asarray(c_obs, dtype=jnp.float64)
     n_grid = t_grid_np.shape[0]
     n_steps = n_grid - 1
-    dt = float((t_grid_np[-1] - t_grid_np[0]) / n_steps) if step_dt is None else float(step_dt)
-    tracks = _assign_kalman_tracks(t_grid_np, starts_np, ends_np, weights_np, step_dt=dt)
+    dt = float(step_dt)
+    tracks = _assign_kalman_tracks(t_grid_np, starts_np, ends_np, weights_np, dt)
     n_obs, n_boxes = c_obs_jax.shape
     n_tracks = tracks.n_tracks
 
@@ -1036,7 +1068,8 @@ def _build_seasonal_kalman_schedule(
         for ks, ke, w_m in tracks.sub_bounds[i]:
             if ke <= ks:
                 raise ValueError(
-                    "Mixed zero-width and positive-width sub-windows in one ring are not supported."
+                    "Zero-width point sub-windows cannot be combined with positive-width "
+                    "sub-windows or multiple distinct point epochs in one observation."
                 )
             step_rate[ks:ke, tr] += w_m / ((ke - ks) * dt)
 
@@ -1318,16 +1351,7 @@ def _node_measurement_updates(
     resid_shifted: jax.Array,
     r_vars: jax.Array,
     nuis_u_raw: jax.Array,
-) -> tuple[
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-]:
+) -> _NodeMeasurementResult:
     """Apply all active scalar observation updates sequentially at grid node ``k_node``."""
     ll_node = jnp.asarray(0.0, dtype=jnp.float64)
     std_innovs = []
@@ -1348,15 +1372,15 @@ def _node_measurement_updates(
         std_extras.append(upd.std_extra_row)
         k_gains.append(upd.k_gain)
         inv_sqrt_ss.append(upd.inv_sqrt_s)
-    return (
-        mean,
-        cov,
-        m_extra,
-        ll_node,
-        jnp.stack(std_innovs),
-        jnp.stack(std_extras),
-        jnp.stack(k_gains),
-        jnp.stack(inv_sqrt_ss),
+    return _NodeMeasurementResult(
+        mean=mean,
+        cov=cov,
+        m_extra=m_extra,
+        ll_node=ll_node,
+        std_innov=jnp.stack(std_innovs),
+        std_extra=jnp.stack(std_extras),
+        k_gain=jnp.stack(k_gains),
+        inv_sqrt_s=jnp.stack(inv_sqrt_ss),
     )
 
 
@@ -1379,7 +1403,7 @@ def _run_kalman_forward_pass(
     init_cov = jsl.block_diag(jnp.zeros((n_tracks, n_tracks), dtype=jnp.float64), sigma_xi_inf)
     init_mx = jnp.zeros((d_state, p_nuis), dtype=jnp.float64)
 
-    m0, p0, mx0, ll0, sin0, sex0, kg0, isqs0 = _node_measurement_updates(
+    node0 = _node_measurement_updates(
         init_mean,
         init_cov,
         init_mx,
@@ -1400,55 +1424,40 @@ def _run_kalman_forward_pass(
         p_pred = phi_k @ p_prev @ phi_k.T + sig_k
         p_pred = 0.5 * (p_pred + p_pred.T)
         mx_pred = phi_k @ mx_prev
-        m_f, p_f, mx_f, dll, s_in, s_ex, kg, isqs = _node_measurement_updates(
+        upd = _node_measurement_updates(
             m_pred, p_pred, mx_pred, k_step + 1, schedule, resid_shifted, r_vars, nuis_u_raw
         )
         return (
-            (m_f, p_f, mx_f, ll_acc + dll),
-            (m_f, p_f, mx_f, phi_k, s_in, s_ex, kg, isqs),
+            (upd.mean, upd.cov, upd.m_extra, ll_acc + upd.ll_node),
+            (
+                upd.mean,
+                upd.cov,
+                upd.m_extra,
+                phi_k,
+                upd.std_innov,
+                upd.std_extra,
+                upd.k_gain,
+                upd.inv_sqrt_s,
+            ),
         )
 
     (_, _, _, log_norm), scan_out = jax.lax.scan(
-        _forward_step, (m0, p0, mx0, ll0), jnp.arange(n_steps, dtype=jnp.int32)
+        _forward_step,
+        (node0.mean, node0.cov, node0.m_extra, node0.ll_node),
+        jnp.arange(n_steps, dtype=jnp.int32),
     )
     m_seq, p_seq, mx_seq, phi_seq, sin_seq, sex_seq, kg_seq, isqs_seq = scan_out
     return _KalmanForwardPass(
         log_norm=log_norm,
-        m_filt_all=jnp.concatenate([m0[None, :], m_seq], axis=0),
-        p_filt_all=jnp.concatenate([p0[None, :, :], p_seq], axis=0),
-        mx_filt_all=jnp.concatenate([mx0[None, :, :], mx_seq], axis=0),
+        m_filt_all=jnp.concatenate([node0.mean[None, :], m_seq], axis=0),
+        p_filt_all=jnp.concatenate([node0.cov[None, :, :], p_seq], axis=0),
+        mx_filt_all=jnp.concatenate([node0.m_extra[None, :, :], mx_seq], axis=0),
         phi_seq=phi_seq,
-        sin_all=jnp.concatenate([sin0[None, :], sin_seq], axis=0),
-        sex_all=jnp.concatenate([sex0[None, :, :], sex_seq], axis=0),
-        kg_all=jnp.concatenate([kg0[None, :, :], kg_seq], axis=0),
-        inv_sqs_all=jnp.concatenate([isqs0[None, :], isqs_seq], axis=0),
+        sin_all=jnp.concatenate([node0.std_innov[None, :], sin_seq], axis=0),
+        sex_all=jnp.concatenate([node0.std_extra[None, :, :], sex_seq], axis=0),
+        kg_all=jnp.concatenate([node0.k_gain[None, :, :], kg_seq], axis=0),
+        inv_sqs_all=jnp.concatenate([node0.inv_sqrt_s[None, :], isqs_seq], axis=0),
     )
-
-
-def _qr_whiten_and_posterior(
-    x: jax.Array,
-    u_mat: jax.Array,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
-    """Factor ``[U; I_p] = Q R`` once to return ``(quad, ½ ln det, ω̂, Σ_{ω|d})``."""
-    p_cols = u_mat.shape[1]
-    eye = jnp.eye(p_cols, dtype=jnp.float64)
-    aug = jnp.concatenate([u_mat, eye], axis=0)
-    q_aug, r_upper = jnp.linalg.qr(aug, mode="reduced")
-    n_rows = u_mat.shape[0]
-    q_top = q_aug[:n_rows]
-    q_bot = q_aug[n_rows:]
-    half_logdet = jnp.sum(jnp.log(jnp.abs(jnp.diag(r_upper))))
-
-    omega0 = jsl.solve_triangular(r_upper, q_top.T @ x, lower=False)
-    r_top = x - u_mat @ omega0
-    d_omega = jsl.solve_triangular(r_upper, q_top.T @ r_top - q_bot.T @ omega0, lower=False)
-    omega = omega0 + d_omega
-    r_final = x - u_mat @ omega
-    quad = jnp.dot(r_final, r_final) + jnp.dot(omega, omega)
-
-    r_inv = jsl.solve_triangular(r_upper, eye, lower=False)
-    cov_raw = r_inv @ r_inv.T
-    return quad, half_logdet, omega, 0.5 * (cov_raw + cov_raw.T)
 
 
 def _marginalize_kalman_nuisance(
@@ -1468,10 +1477,10 @@ def _marginalize_kalman_nuisance(
         )
 
     all_sex = fwd.sex_all.reshape(-1, nuis.p_nuis)
-    quad_nuis, half_logdet_nuis, omega_nuis, cov_omega_nuis = _qr_whiten_and_posterior(
-        all_sin, all_sex
-    )
-    total_ll = fwd.log_norm - 0.5 * quad_nuis - half_logdet_nuis
+    qr_res = _qr_whiten_and_posterior(all_sin, all_sex)
+    omega_nuis = qr_res.mean
+    cov_omega_nuis = qr_res.cov
+    total_ll = fwd.log_norm - 0.5 * qr_res.quad - qr_res.half_logdet
     nuis_mean = nuis.prior_mean + nuis.prior_root @ omega_nuis
     raw_cov = nuis.prior_root @ cov_omega_nuis @ nuis.prior_root.T
     nuis_cov = 0.5 * (raw_cov + raw_cov.T)
@@ -1512,7 +1521,8 @@ def _run_kalman_rts_smoother(
         m_f, p_f, mx_f, phi_prev, h_s, act_s, kg_s, isqs_s, sin_s, sex_s = inputs
 
         m_s = m_f + p_f @ lam_fut
-        p_s = 0.5 * ((p_f - p_f @ cap_fut @ p_f) + (p_f - p_f @ cap_fut @ p_f).T)
+        delta_p = p_f - p_f @ cap_fut @ p_f
+        p_s = 0.5 * (delta_p + delta_p.T)
         mx_s = mx_f + p_f @ lam_x_fut
 
         lam, cap, lam_x = lam_fut, cap_fut, lam_x_fut
@@ -1741,6 +1751,7 @@ def kalman_gp_marginal(
 
 from .linear import (
     _build_obs_matrix,
+    _qr_whiten_and_posterior,
     _try_extract_sde,
     solin_sarkka_basis,
     stationary_cbm_gp_cov,

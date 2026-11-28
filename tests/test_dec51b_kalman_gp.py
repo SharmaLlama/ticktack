@@ -542,9 +542,23 @@ def test_exports_deduplication_clean_imports_and_single_whiten(
     assert tt_linear.kalman_gp_marginal is kalman_gp_marginal
     assert ticktack.kalman_gp_marginal is kalman_gp_marginal
 
-    # Deduplicated helpers in linear.py point directly to ticktack._utils
+    # Deduplicated helpers in linear.py and kalman.py share one implementation
     assert tt_linear._concrete is tt_utils._concrete
     assert tt_linear._safe_psd_root is tt_utils._safe_psd_root
+    assert tt_kalman._qr_whiten_and_posterior is tt_linear._qr_whiten_and_posterior
+
+    # Verify linear.whiten_qr and linear.posterior delegate cleanly to _qr_whiten_and_posterior
+    rng_qr = np.random.default_rng(7803)
+    u_qr = jnp.asarray(rng_qr.standard_normal((12, 3)) * np.array([1.0e8, 3.2, 0.15]))
+    x_qr = jnp.asarray(rng_qr.standard_normal(12) * 14.0 + 25.0)
+    qr_bundle = tt_linear._qr_whiten_and_posterior(x_qr, u_qr)
+    w_vec, h_ld = tt_linear.whiten_qr(x_qr, u_qr)
+    om_post, cov_post = tt_linear.posterior(x_qr, u_qr)
+    np.testing.assert_allclose(w_vec, qr_bundle.whitened, rtol=1e-15, atol=1e-15)
+    np.testing.assert_allclose(jnp.dot(w_vec, w_vec), qr_bundle.quad, rtol=1e-10, atol=1e-10)
+    np.testing.assert_allclose(h_ld, qr_bundle.half_logdet, rtol=1e-15, atol=1e-15)
+    np.testing.assert_allclose(om_post, qr_bundle.mean, rtol=1e-15, atol=1e-15)
+    np.testing.assert_allclose(cov_post, qr_bundle.cov, rtol=1e-15, atol=1e-15)
 
     # Zero Any annotations in src/ticktack/kalman.py
     kalman_src = inspect.getsource(tt_kalman)
@@ -567,9 +581,7 @@ def test_exports_deduplication_clean_imports_and_single_whiten(
     calls = 0
     orig_qr = tt_kalman._qr_whiten_and_posterior
 
-    def _counted_qr(
-        x: jax.Array, u: jax.Array
-    ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
+    def _counted_qr(x: jax.Array, u: jax.Array) -> tt_linear._QRWhitenPosterior:
         nonlocal calls
         calls += 1
         return orig_qr(x, u)
@@ -1240,10 +1252,22 @@ def test_private_kalman_helpers_and_negative_controls() -> None:
         nuisance_prior_root=ds["nuis_prior_root"],
     )
 
-    # Negative control 1: omitting half_logdet_nuis makes the loglike parity assertion FAIL!
-    _, half_ld, _, _ = _qr_whiten_and_posterior(
-        fwd.sin_all.reshape(-1), fwd.sex_all.reshape(-1, nuis.p_nuis)
+    node0_res = tt_kalman._node_measurement_updates(
+        jnp.zeros(tracks.n_tracks + 5, dtype=jnp.float64),
+        jnp.eye(tracks.n_tracks + 5, dtype=jnp.float64),
+        jnp.zeros((tracks.n_tracks + 5, nuis.p_nuis), dtype=jnp.float64),
+        jnp.int32(0),
+        schedule,
+        nuis.resid_shifted,
+        jnp.asarray(ds["sigma_obs"] ** 2),
+        nuis.nuis_u_raw,
     )
+    assert isinstance(node0_res, tt_kalman._NodeMeasurementResult)
+
+    # Negative control 1: omitting half_logdet_nuis makes the loglike parity assertion FAIL!
+    half_ld = _qr_whiten_and_posterior(
+        fwd.sin_all.reshape(-1), fwd.sex_all.reshape(-1, nuis.p_nuis)
+    ).half_logdet
     ll_missing_logdet = marg.loglike + half_ld
     assert abs(float(ll_missing_logdet) - oracle.loglike) > 2.0
     with pytest.raises(AssertionError):
@@ -1304,18 +1328,22 @@ def test_kalman_gp_marginal_input_validation_errors() -> None:
             np.array([0.0, np.nan, 2.0]), np.asarray(t_s)[:, None], np.asarray(t_e)[:, None], None
         )
     with pytest.raises(ValueError, match="At least one"):
-        _resolve_kalman_time_grid(None, np.zeros((0, 1)), np.zeros((0, 1)), 0.5)
-    with pytest.raises(ValueError, match="t_ends >= t_starts"):
-        _resolve_kalman_time_grid(None, np.array([[2.0]]), np.array([[1.0]]), 0.5)
+        kalman_gp_marginal(
+            a_mat, b_vec, kern, jnp.zeros((0,)), jnp.zeros((0,)), np.zeros((0,)), np.zeros((0,))
+        )
     with pytest.raises(ValueError, match="finite"):
-        _resolve_kalman_time_grid(None, np.array([[np.inf]]), np.array([[2.0]]), 0.5)
+        kalman_gp_marginal(
+            a_mat, b_vec, kern, jnp.ones(1), jnp.ones(1), np.array([np.inf]), np.array([2.0])
+        )
     with pytest.raises(ValueError, match="dt must be finite and strictly positive"):
         kalman_gp_marginal(a_mat, b_vec, kern, resid, sigma, t_s, t_e, dt=-0.25)
+    with pytest.raises(ValueError, match="not aligned.*n_substeps_per_year"):
+        kalman_gp_marginal(a_mat, b_vec, kern, resid, sigma, t_s + 0.13, t_e)
     with pytest.raises(ValueError, match="not aligned"):
         kalman_gp_marginal(
             a_mat, b_vec, kern, resid, sigma, t_s + 0.13, t_e, t_grid=jnp.arange(0.0, 4.0, 0.5)
         )
-    with pytest.raises(ValueError, match="Mixed zero-width and positive-width"):
+    with pytest.raises(ValueError, match="Zero-width point sub-windows cannot be combined"):
         kalman_gp_marginal(
             a_mat,
             b_vec,
@@ -1324,6 +1352,17 @@ def test_kalman_gp_marginal_input_validation_errors() -> None:
             jnp.array([0.9]),
             jnp.array([[0.0, 1.0]]),
             jnp.array([[0.0, 2.0]]),
+            dt=0.5,
+        )
+    with pytest.raises(ValueError, match="multiple distinct point epochs"):
+        kalman_gp_marginal(
+            a_mat,
+            b_vec,
+            kern,
+            jnp.array([1.0]),
+            jnp.array([0.9]),
+            jnp.array([[0.0, 1.0]]),
+            jnp.array([[0.0, 1.0]]),
             dt=0.5,
         )
     with pytest.raises(ValueError, match="t_ends >= t_starts"):

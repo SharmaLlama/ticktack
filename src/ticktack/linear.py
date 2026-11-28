@@ -34,6 +34,7 @@ import jax.scipy.linalg as jsl
 import numpy as onp
 import tinygp.kernels as tgk
 import zodiax as zdx
+from jax.typing import ArrayLike
 from tinygp.kernels import quasisep as tgq
 from tinygp.solvers.quasisep.block import Block
 
@@ -95,9 +96,7 @@ def whiten_blocks(
         ],
         axis=-1,
     )
-    stack, logdets = jax.lax.scan(
-        _rank_one_step, stack, 1 + n_span + jnp.arange(local.shape[-1])
-    )
+    stack, logdets = jax.lax.scan(_rank_one_step, stack, 1 + n_span + jnp.arange(local.shape[-1]))
     done = (
         jnp.concatenate([x[:, None], spanning], axis=1)
         .at[rows]
@@ -106,14 +105,10 @@ def whiten_blocks(
     n_rows = jnp.sum(rows < n, axis=1)
     per_row = 0.5 * jnp.sum(logdets, axis=0) / jnp.maximum(n_rows, 1)
     extra = (
-        jnp.zeros_like(x)
-        .at[rows]
-        .set(jnp.broadcast_to(per_row[:, None], rows.shape), mode="drop")
+        jnp.zeros_like(x).at[rows].set(jnp.broadcast_to(per_row[:, None], rows.shape), mode="drop")
     )
     if n_span:
-        done, span_logdets = jax.lax.scan(
-            _rank_one_step, done[None], 1 + jnp.arange(n_span)
-        )
+        done, span_logdets = jax.lax.scan(_rank_one_step, done[None], 1 + jnp.arange(n_span))
         done = done[0]
         extra = extra + 0.5 * jnp.sum(span_logdets) / n
     return done[:, 0], extra
@@ -156,50 +151,95 @@ def whiten_cholesky(x: Any, U: Any) -> tuple[jax.Array, jax.Array]:
     return x_arr - w_mat @ y, jnp.sum(jnp.log(jnp.diag(chol)))
 
 
-def whiten_qr(x: Any, U: Any) -> tuple[jax.Array, jax.Array]:
+class _QRWhitenPosterior(NamedTuple):
+    """Augmented thin-QR whitening and standardized posterior factors for ``I + U Uᵀ``.
+
+    Attributes
+    ----------
+    whitened : jax.Array
+        Square-root whitened vector/matrix ``u`` matching ``x.shape`` with
+        ``uᵀ u = xᵀ (I + U Uᵀ)⁻¹ x``.
+    quad : jax.Array
+        Cancellation-free quadratic form ``‖x - U ω̂‖² + ‖ω̂‖²`` summed over
+        axis ``0`` (scalar for 1D ``x``, ``(m,)`` for 2D ``x``).
+    half_logdet : jax.Array
+        Scalar half log-determinant ``½ ln det(I_k + Uᵀ U)`` in nats.
+    mean : jax.Array
+        Iteratively refined standardized posterior mean ``ω̂ = (I_k + Uᵀ U)⁻¹ Uᵀ x``.
+    cov : jax.Array
+        Standardized posterior covariance ``(I_k + Uᵀ U)⁻¹`` of shape ``(k, k)``.
+    """
+
+    whitened: jax.Array
+    quad: jax.Array
+    half_logdet: jax.Array
+    mean: jax.Array
+    cov: jax.Array
+
+
+def _qr_whiten_and_posterior(x: ArrayLike, U: ArrayLike) -> _QRWhitenPosterior:
+    """Factor ``[U; I_k] = Q R`` once with one-step iterative refinement."""
+    x_arr = jnp.asarray(x, dtype=jnp.float64)
+    u_mat = jnp.asarray(U, dtype=jnp.float64)
+    k = u_mat.shape[1]
+    if k == 0:
+        return _QRWhitenPosterior(
+            whitened=x_arr,
+            quad=jnp.sum(jnp.square(x_arr), axis=0),
+            half_logdet=jnp.asarray(0.0, dtype=jnp.float64),
+            mean=jnp.zeros((0,) + x_arr.shape[1:], dtype=jnp.float64),
+            cov=jnp.zeros((0, 0), dtype=jnp.float64),
+        )
+    n_rows = u_mat.shape[0]
+    eye = jnp.eye(k, dtype=jnp.float64)
+    q_aug, r_upper = jnp.linalg.qr(jnp.concatenate([u_mat, eye], axis=0), mode="reduced")
+    q_top = q_aug[:n_rows]
+    q_bot = q_aug[n_rows:]
+    half_logdet = jnp.sum(jnp.log(jnp.abs(jnp.diag(r_upper))))
+
+    omega0 = jsl.solve_triangular(r_upper, q_top.T @ x_arr, lower=False)
+    r_top = x_arr - u_mat @ omega0
+    d_omega = jsl.solve_triangular(r_upper, q_top.T @ r_top - q_bot.T @ omega0, lower=False)
+    omega = omega0 + d_omega
+    r_final = x_arr - u_mat @ omega
+    quad = jnp.sum(jnp.square(r_final), axis=0) + jnp.sum(jnp.square(omega), axis=0)
+
+    signs = jnp.where(jnp.diag(r_upper) >= 0.0, 1.0, -1.0)
+    chol = (signs[:, None] * r_upper).T
+    l_inv_t = jsl.solve_triangular(chol, eye, lower=True).T
+    w_mat = q_top * signs[None, :]
+    z_corr = jsl.solve_triangular(eye + l_inv_t, omega, lower=False)
+    whitened = r_final + w_mat @ z_corr
+    cov_raw = l_inv_t @ l_inv_t.T
+    return _QRWhitenPosterior(
+        whitened=whitened,
+        quad=quad,
+        half_logdet=half_logdet,
+        mean=omega,
+        cov=0.5 * (cov_raw + cov_raw.T),
+    )
+
+
+def whiten_qr(x: ArrayLike, U: ArrayLike) -> tuple[jax.Array, jax.Array]:
     """Whiten ``x`` for ``I + U Uᵀ`` via augmented thin QR without squaring ``κ(U)``.
 
     Factors ``[U; I_k] = Q R`` so ``Rᵀ R = I_k + Uᵀ U`` (preserving precision
     even when ``κ(U) ~ 10¹⁰``) and returns ``(u, ½ log det(I + Uᵀ U))`` where
     ``uᵀ u = ‖x - U ω̂‖² + ‖ω̂‖² = xᵀ (I + U Uᵀ)⁻¹ x``.
     """
-    x_arr = jnp.asarray(x, dtype=jnp.float64)
-    u_mat = jnp.asarray(U, dtype=jnp.float64)
-    k = u_mat.shape[1]
-    if k == 0:
-        return x_arr, jnp.asarray(0.0, dtype=jnp.float64)
-    eye = jnp.eye(k, dtype=u_mat.dtype)
-    aug = jnp.concatenate([u_mat, eye], axis=0)
-    _, r_upper = jnp.linalg.qr(aug, mode="reduced")
-    # Ensure positive diagonal on L = R.T for exact square-root whitening formula
-    signs = jnp.where(jnp.diag(r_upper) >= 0.0, 1.0, -1.0)
-    chol = (signs[:, None] * r_upper).T  # lower triangular with chol @ chol.T = I + UᵀU
-    l_inv_t = jsl.solve_triangular(chol, eye, lower=True).T
-    w_mat = u_mat @ l_inv_t
-    y = jsl.solve_triangular(eye + l_inv_t, w_mat.T @ x_arr, lower=False)
-    return x_arr - w_mat @ y, jnp.sum(jnp.log(jnp.abs(jnp.diag(r_upper))))
+    res = _qr_whiten_and_posterior(x, U)
+    return res.whitened, res.half_logdet
 
 
-def posterior(x: Any, U: Any) -> tuple[jax.Array, jax.Array]:
+def posterior(x: ArrayLike, U: ArrayLike) -> tuple[jax.Array, jax.Array]:
     """Conditional posterior ``N(S⁻¹ Uᵀ x, S⁻¹)`` of standardized ``ω`` (``w = μ + Λ¹/² ω``).
 
-    Includes one residual-space iterative refinement step so broad baseline
-    offsets (``σ_global = 200‰``) retain full ``float64`` precision.
+    Delegates to augmented thin QR with one residual-space iterative refinement
+    step so broad baseline offsets (``σ_global = 200‰``) and ill-conditioned
+    designs retain full ``float64`` precision without squaring ``κ(U)``.
     """
-    x_arr = jnp.asarray(x, dtype=jnp.float64)
-    u_mat = jnp.asarray(U, dtype=jnp.float64)
-    k = u_mat.shape[1]
-    if k == 0:
-        return jnp.zeros((0,), dtype=jnp.float64), jnp.zeros((0, 0), dtype=jnp.float64)
-    eye = jnp.eye(k, dtype=u_mat.dtype)
-    s_mat = eye + u_mat.T @ u_mat
-    factor = jsl.cho_factor(s_mat, lower=True)
-    omega = jsl.cho_solve(factor, u_mat.T @ x_arr)
-    resid = x_arr - u_mat @ omega
-    omega = omega + jsl.cho_solve(factor, u_mat.T @ resid - omega)
-    cov = jsl.cho_solve(factor, eye)
-    cov = 0.5 * (cov + cov.T)
-    return omega, cov
+    res = _qr_whiten_and_posterior(x, U)
+    return res.mean, res.cov
 
 
 class LinearMarginal(zdx.Base):
@@ -268,9 +308,7 @@ class LinearMarginal(zdx.Base):
         else:
             root = jnp.asarray(prior_root, dtype=jnp.float64)
             if root.ndim != 2 or root.shape[0] != k:
-                raise ValueError(
-                    f"prior_root must have shape ({k}, m); got {root.shape}."
-                )
+                raise ValueError(f"prior_root must have shape ({k}, m); got {root.shape}.")
             check = _concrete(root)
             if check is not None and not onp.all(onp.isfinite(check)):
                 raise ValueError("prior_root must contain finite entries.")
@@ -280,9 +318,7 @@ class LinearMarginal(zdx.Base):
         if check_mean is not None and not onp.all(onp.isfinite(check_mean)):
             raise ValueError("prior_mean must be finite.")
         if method not in ("cholesky", "qr", "rank_one"):
-            raise ValueError(
-                f"method must be 'cholesky', 'qr', or 'rank_one'; got {method!r}."
-            )
+            raise ValueError(f"method must be 'cholesky', 'qr', or 'rank_one'; got {method!r}.")
 
         self.design = design_arr
         self.prior_mean = mean
@@ -444,9 +480,7 @@ def _normalize_windows(
     if sub_weights is None:
         weights = jnp.full((n_obs, m_sub), 1.0 / m_sub, dtype=jnp.float64)
     else:
-        w_raw = jnp.broadcast_to(
-            jnp.asarray(sub_weights, dtype=jnp.float64), (n_obs, m_sub)
-        )
+        w_raw = jnp.broadcast_to(jnp.asarray(sub_weights, dtype=jnp.float64), (n_obs, m_sub))
         w_sum = jnp.sum(w_raw, axis=-1, keepdims=True)
         weights = w_raw / jnp.where(w_sum > 0.0, w_sum, 1.0)
     c_s, c_e = _concrete(starts), _concrete(ends)
@@ -467,9 +501,7 @@ def _build_obs_matrix(
     if obs_matrix is not None:
         c_mat = jnp.asarray(obs_matrix, dtype=jnp.float64)
         if c_mat.shape != (n_obs, n_boxes):
-            raise ValueError(
-                f"obs_matrix must have shape ({n_obs}, {n_boxes}); got {c_mat.shape}."
-            )
+            raise ValueError(f"obs_matrix must have shape ({n_obs}, {n_boxes}); got {c_mat.shape}.")
         return c_mat
     idx_raw = jnp.asarray(box_indices)
     if idx_raw.ndim > 1 or not jnp.issubdtype(idx_raw.dtype, jnp.integer):
@@ -478,9 +510,7 @@ def _build_obs_matrix(
             f"got shape {idx_raw.shape} and dtype {idx_raw.dtype}."
         )
     if idx_raw.ndim == 1 and idx_raw.shape[0] != n_obs:
-        raise ValueError(
-            f"box_indices must have length {n_obs}; got shape {idx_raw.shape}."
-        )
+        raise ValueError(f"box_indices must have length {n_obs}; got shape {idx_raw.shape}.")
     idx = jnp.broadcast_to(idx_raw.astype(jnp.int32), (n_obs,))
     c_idx = _concrete(idx)
     if c_idx is not None and onp.any((c_idx < 0) | (c_idx >= n_boxes)):
@@ -805,9 +835,7 @@ def spectral_density(kernel: tgk.Kernel, omega: Any) -> jax.Array:
             + ((alpha - 0.5) * t_nodes - jnp.exp(t_nodes))[:, None]
             - 0.5 * alpha * jnp.square(ell) * jnp.exp(-t_nodes)[:, None] * w2.reshape(1, -1)
         )
-        return jnp.sum(dt_weights[:, None] * jnp.exp(log_integrand), axis=0).reshape(
-            w.shape
-        )
+        return jnp.sum(dt_weights[:, None] * jnp.exp(log_integrand), axis=0).reshape(w.shape)
 
     if isinstance(kernel, tgq.SHO):
         w0 = jnp.asarray(kernel.omega, dtype=jnp.float64)
@@ -819,9 +847,7 @@ def spectral_density(kernel: tgk.Kernel, omega: Any) -> jax.Array:
         return num / den
 
     if isinstance(kernel, tgq.Scale):
-        return jnp.asarray(kernel.scale, dtype=jnp.float64) * spectral_density(
-            kernel.kernel, w
-        )
+        return jnp.asarray(kernel.scale, dtype=jnp.float64) * spectral_density(kernel.kernel, w)
 
     if isinstance(kernel, tgq.Wrapper):
         return spectral_density(kernel.kernel, w)
@@ -843,9 +869,7 @@ def spectral_density(kernel: tgk.Kernel, omega: Any) -> jax.Array:
                 else 1.0
             )
             w0 = 2.0 * math.pi / period
-            return 0.5 * sig2 * (
-                spectral_density(k2, w - w0) + spectral_density(k2, w + w0)
-            )
+            return 0.5 * sig2 * (spectral_density(k2, w - w0) + spectral_density(k2, w + w0))
         if isinstance(k2, (tgk.Cosine, tgq.Cosine)):
             period = jnp.asarray(k2.scale, dtype=jnp.float64)
             sig2 = (
@@ -854,9 +878,7 @@ def spectral_density(kernel: tgk.Kernel, omega: Any) -> jax.Array:
                 else 1.0
             )
             w0 = 2.0 * math.pi / period
-            return 0.5 * sig2 * (
-                spectral_density(k1, w - w0) + spectral_density(k1, w + w0)
-            )
+            return 0.5 * sig2 * (spectral_density(k1, w - w0) + spectral_density(k1, w + w0))
         if isinstance(k1, tgk.ExpSineSquared) or isinstance(k2, tgk.ExpSineSquared):
             ess, base = (k1, k2) if isinstance(k1, tgk.ExpSineSquared) else (k2, k1)
             period = jnp.asarray(ess.scale, dtype=jnp.float64)
@@ -866,8 +888,7 @@ def spectral_density(kernel: tgk.Kernel, omega: Any) -> jax.Array:
             out = ie[0] * spectral_density(base, w)
             for m in range(1, 13):
                 out = out + ie[m] * (
-                    spectral_density(base, w - m * w0)
-                    + spectral_density(base, w + m * w0)
+                    spectral_density(base, w - m * w0) + spectral_density(base, w + m * w0)
                 )
             return out
         if isinstance(k1, tgk.ExpSquared) and isinstance(k2, tgk.ExpSquared):
@@ -898,9 +919,7 @@ def spectral_density(kernel: tgk.Kernel, omega: Any) -> jax.Array:
             "use tinygp.kernels.quasisep.SHO, or use harmonic_solar_design."
         )
 
-    raise TypeError(
-        f"Unsupported kernel type {type(kernel).__name__!r} for spectral_density."
-    )
+    raise TypeError(f"Unsupported kernel type {type(kernel).__name__!r} for spectral_density.")
 
 
 def _sde_spectral_density(
@@ -935,9 +954,7 @@ def _quadrature_spectral_density(kernel: tgk.Kernel, omega: jax.Array) -> jax.Ar
     xi = 0.5 * (jnp.asarray(_GLEG96_X, dtype=jnp.float64) + 1.0)
     wt = 0.5 * jnp.asarray(_GLEG96_W, dtype=jnp.float64) * tau_max
     taus = xi * tau_max
-    k_vals = jax.vmap(lambda t: kernel.evaluate(jnp.asarray(0.0, dtype=jnp.float64), t))(
-        taus
-    )
+    k_vals = jax.vmap(lambda t: kernel.evaluate(jnp.asarray(0.0, dtype=jnp.float64), t))(taus)
     w_flat = omega.reshape(-1)
     spec = 2.0 * jnp.sum(
         (wt * k_vals)[:, None] * jnp.cos(taus[:, None] * w_flat[None, :]),
@@ -1087,9 +1104,7 @@ def stationary_cbm_gp_cov(
     u_mat, v_mat = _solve_complex_resolvents(a_mat, b_eff, omegas)  # (n, 3 * n_quad)
     s_vals = spectral_density(kernel, omegas)  # (3 * n_quad,)
     quad_weights = (dw_total * s_vals) / math.pi  # (3 * n_quad,)
-    sigma_y0 = (u_mat * quad_weights[None, :]) @ u_mat.T + (
-        v_mat * quad_weights[None, :]
-    ) @ v_mat.T
+    sigma_y0 = (u_mat * quad_weights[None, :]) @ u_mat.T + (v_mat * quad_weights[None, :]) @ v_mat.T
     sigma_y0 = 0.5 * (sigma_y0 + sigma_y0.T)
     root_y0 = _safe_psd_root(sigma_y0, jitter=jitter)
     return sigma_y0, root_y0
@@ -1219,9 +1234,7 @@ def _seasonal_homogeneous_operator(
     c_tilde = c_obs.astype(v_eig.dtype) @ v_eig  # (N_d, n)
     psi1_vals = _scalar_psi1(durations[:, :, None] * lam[None, None, :])
     exp_vals = jnp.exp(offsets[:, :, None] * lam[None, None, :])
-    modal_factors = jnp.sum(
-        weights[:, :, None] * psi1_vals * exp_vals, axis=1
-    )  # (N_d, n)
+    modal_factors = jnp.sum(weights[:, :, None] * psi1_vals * exp_vals, axis=1)  # (N_d, n)
     return jnp.real((c_tilde * modal_factors) @ v_inv)
 
 
@@ -1304,23 +1317,15 @@ class CausalGPProjection(NamedTuple):
                 "when nuisance_design is passed."
             )
         if nuisance_prior_sd is not None:
-            sd_n = jnp.broadcast_to(
-                jnp.asarray(nuisance_prior_sd, dtype=jnp.float64), (k_nuis,)
-            )
+            sd_n = jnp.broadcast_to(jnp.asarray(nuisance_prior_sd, dtype=jnp.float64), (k_nuis,))
             nuis_root = jnp.diag(sd_n)
         else:
             nuis_root = jnp.asarray(nuisance_prior_root, dtype=jnp.float64)
-        nuis_mean = jnp.broadcast_to(
-            jnp.asarray(nuisance_prior_mean, dtype=jnp.float64), (k_nuis,)
-        )
+        nuis_mean = jnp.broadcast_to(jnp.asarray(nuisance_prior_mean, dtype=jnp.float64), (k_nuis,))
 
         full_design = jnp.concatenate([self.whitened_design, nuis_x], axis=1)
-        full_mean = jnp.concatenate(
-            [jnp.zeros((n_gp_cols,), dtype=jnp.float64), nuis_mean]
-        )
-        full_root = jsl.block_diag(
-            jnp.eye(n_gp_cols, dtype=jnp.float64), nuis_root
-        )
+        full_mean = jnp.concatenate([jnp.zeros((n_gp_cols,), dtype=jnp.float64), nuis_mean])
+        full_root = jsl.block_diag(jnp.eye(n_gp_cols, dtype=jnp.float64), nuis_root)
         return LinearMarginal(
             full_design,
             prior_mean=full_mean,
@@ -1425,11 +1430,7 @@ def project_causal_gp(
     pad_val = 30.0 if pad is None else float(pad)
 
     a_val = (t0_obs - pad_val) if a is None else jnp.asarray(a, dtype=jnp.float64)
-    b_val = (
-        (t_max_obs + pad_val)
-        if b_bound is None
-        else jnp.asarray(b_bound, dtype=jnp.float64)
-    )
+    b_val = (t_max_obs + pad_val) if b_bound is None else jnp.asarray(b_bound, dtype=jnp.float64)
     c_a, c_t0, c_b, c_tmax = (
         _concrete(a_val),
         _concrete(t0_obs),
@@ -1459,9 +1460,7 @@ def project_causal_gp(
     # 2. Exact analytic sinc seasonal averages of cos ω_j(t - a) and sin ω_j(t - a)
     durations = ends - starts  # (N_d, M_sub)
     mids_from_a = 0.5 * (starts + ends) - a_val  # (N_d, M_sub)
-    sinc_factor = jnp.sinc(
-        0.5 * durations[:, :, None] * omegas[None, None, :] / jnp.pi
-    )
+    sinc_factor = jnp.sinc(0.5 * durations[:, :, None] * omegas[None, None, :] / jnp.pi)
     cos_season = jnp.sum(
         weights[:, :, None]
         * sinc_factor
@@ -1481,9 +1480,7 @@ def project_causal_gp(
         a_mat, c_obs, starts, ends, weights, a_val, cbm=cbm, modal=modal
     )  # (N_d, n)
 
-    causal_design = (
-        v_obs * cos_season + u_obs * sin_season - w_hom_a @ v_mat
-    ) / jnp.sqrt(half_len)
+    causal_design = (v_obs * cos_season + u_obs * sin_season - w_hom_a @ v_mat) / jnp.sqrt(half_len)
 
     if initial_anchor == "t0":
         t_anchor = t0_obs
@@ -1494,9 +1491,7 @@ def project_causal_gp(
         t_anchor = a_val
         w_hom_anchor = w_hom_a
     else:
-        raise ValueError(
-            f"initial_anchor must be 't0' or 'a'; got {initial_anchor!r}."
-        )
+        raise ValueError(f"initial_anchor must be 't0' or 'a'; got {initial_anchor!r}.")
 
     if kernel is None:
         return CausalGPProjection(
@@ -1551,10 +1546,7 @@ def project_causal_gp(
             lam_m, v_eig_m, v_inv_m = modal
             expm_dt_v = jnp.real(
                 v_eig_m
-                @ (
-                    jnp.exp(lam_m * dt_anchor)[:, None]
-                    * (v_inv_m @ v_mat.astype(v_inv_m.dtype))
-                )
+                @ (jnp.exp(lam_m * dt_anchor)[:, None] * (v_inv_m @ v_mat.astype(v_inv_m.dtype)))
             )
         else:
             expm_dt_v = jsl.expm(a_mat * dt_anchor) @ v_mat
