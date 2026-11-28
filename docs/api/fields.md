@@ -7,6 +7,16 @@
 ::: ticktack.fields
     options:
       show_root_heading: false
+      inherited_members:
+        - zeros
+        - from_operator
+        - n_grid
+        - dt
+        - t_grid
+        - effective_kernel
+        - power_spectrum
+        - knot_variance
+        - with_latent
 
 ### Joint Spike Profiling in Kernel Optimization (`optimize_spike` & `spike_priors`)
 
