@@ -105,6 +105,13 @@ _VALID_OFFSET_MODES = ("hierarchical", "per_series", "shared", "none")
 _VALID_WHITEN_METHODS = ("cholesky", "qr", "rank_one")
 _SUBNORMAL_MIN = math.ldexp(1.0, -1074)
 _FLOAT64_TINY = float(np.finfo(np.float64).tiny)
+# Detect once whether the active XLA backend preserves float64 subnormals (x86_64) or sets FTZ (aarch64).
+_XLA_TINY = (
+    _SUBNORMAL_MIN
+    if float(jnp.exp(jnp.asarray(-710.0, dtype=jnp.float64))) > 0.0
+    else _FLOAT64_TINY
+)
+_XLA_RECIP_MIN = 6.0e-309 if _XLA_TINY < _FLOAT64_TINY else _FLOAT64_TINY
 _PARAMSPEC_SET_FIELDS = frozenset({"path", "bijector", "prior_mean", "prior_sd", "low", "high"})
 _LMCFG_SET_FIELDS = frozenset(
     {
@@ -215,40 +222,54 @@ def _sigmoid_scale(low: float, high: float) -> tuple[int, int, int, float, float
     exp_scale = frexp_e - 1
     exp_a = exp_scale // 2
     exp_b = exp_scale - exp_a
-    s_inv_a, s_inv_b = math.ldexp(1.0, -exp_a), math.ldexp(1.0, -exp_b)
+    s_inv_a = math.ldexp(1.0, -exp_a)
+    s_inv_b = math.ldexp(1.0, -exp_b)
     lo_s = (low * s_inv_a) * s_inv_b
     hi_s = (high * s_inv_a) * s_inv_b
     return exp_scale, exp_a, exp_b, lo_s, hi_s, hi_s - lo_s
 
 
-def _sigmoid_logit_xp(theta: ArrayLike, low: float, high: float, xp: Any) -> Any:
-    """Unit-invariant logit ``ln((theta - low) / (high - theta))`` on ``(low, high)``."""
-    # Rescale by two normal powers of two so endpoints/span are O(1) while preserving subnormals.
+def _sigmoid_endpoint_gaps(
+    t_arr: ArrayLike, low: float, high: float, xp: Any
+) -> tuple[int, int, int, float, float, float, Any, Any, Any]:
+    """Return rescaled interval metadata and endpoint gaps ``(t_s - lo_s, hi_s - t_s)``."""
     exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
-    t_arr = xp.asarray(theta, dtype=np.float64)
+    t_in = xp.asarray(t_arr, dtype=np.float64)
     if exp_scale < 0:
         cap = (8.0 * math.ldexp(1.0, exp_a)) * math.ldexp(1.0, exp_b)
-        t_arr = xp.clip(t_arr, -cap, cap)
-    t_s = (t_arr * math.ldexp(1.0, -exp_a)) * math.ldexp(1.0, -exp_b)
-    lo, hi, span = xp.asarray(lo_s), xp.asarray(hi_s), xp.asarray(span_s)
-    floor = _SUBNORMAL_MIN if xp is np else _FLOAT64_TINY
-    raw_lo, raw_hi = t_s - lo, hi - t_s
-    d_lo, d_hi = xp.clip(raw_lo, floor, span), xp.clip(raw_hi, floor, span)
-    log_d_lo, log_d_hi = xp.log(d_lo), xp.log(d_hi)
-    # When exp_scale > 2, 2^-exp_scale can underflow small endpoint gaps (e.g. 1e-20 on (0, 1e308)).
+        t_in = xp.clip(t_in, -cap, cap)
+    s_inv_a = math.ldexp(1.0, -exp_a)
+    s_inv_b = math.ldexp(1.0, -exp_b)
+    t_s = (t_in * s_inv_a) * s_inv_b
+    return exp_scale, exp_a, exp_b, lo_s, hi_s, span_s, t_s, t_s - lo_s, hi_s - t_s
+
+
+def _sigmoid_logit_xp(theta: ArrayLike, low: float, high: float, xp: Any) -> Any:
+    """Unit-invariant logit ``ln((theta - low) / (high - theta))`` on ``(low, high)``."""
+    exp_scale, _, _, lo_s, hi_s, span_s, t_s, raw_lo, raw_hi = _sigmoid_endpoint_gaps(
+        theta, low, high, xp
+    )
+    t_arr = xp.asarray(theta, dtype=np.float64)
+    floor = _SUBNORMAL_MIN if xp is np else _XLA_TINY
+    d_lo = xp.clip(raw_lo, floor, span_s)
+    d_hi = xp.clip(raw_hi, floor, span_s)
+    log_d_lo = xp.log(d_lo)
+    log_d_hi = xp.log(d_hi)
+    # When exp_scale > 2, 2^-exp_scale can underflow small unscaled gaps (e.g. 4e-308 on (0, 1e308)).
     if exp_scale > 2:
-        shift_ln, span_q = (exp_scale - 2) * math.log(2.0), 0.25 * high - 0.25 * low
-        d_lo_q = xp.clip(0.25 * t_arr - 0.25 * low, floor, span_q)
-        d_hi_q = xp.clip(0.25 * high - 0.25 * t_arr, floor, span_q)
-        log_d_lo = xp.where(raw_lo < _FLOAT64_TINY, xp.log(d_lo_q) - shift_ln, log_d_lo)
-        log_d_hi = xp.where(raw_hi < _FLOAT64_TINY, xp.log(d_hi_q) - shift_ln, log_d_hi)
+        shift_ln = exp_scale * math.log(2.0)
+        if abs(low) < 1e290:
+            d_lo_u = xp.clip(xp.clip(t_arr, low, min(high, 1e300)) - low, floor, 1e300)
+            log_d_lo = xp.where(raw_lo < _FLOAT64_TINY, xp.log(d_lo_u) - shift_ln, log_d_lo)
+        if abs(high) < 1e290:
+            d_hi_u = xp.clip(high - xp.clip(t_arr, max(low, -1e300), high), floor, 1e300)
+            log_d_hi = xp.where(raw_hi < _FLOAT64_TINY, xp.log(d_hi_u) - shift_ln, log_d_hi)
     # Near the midpoint, log(d_lo) - log(d_hi) cancels; evaluate log1p((d_lo - d_hi) / d_hi).
     near_mid = (
         (raw_lo > _FLOAT64_TINY) & (raw_hi > _FLOAT64_TINY) & (xp.abs(d_lo - d_hi) <= 0.5 * d_hi)
     )
-    t_mid = xp.clip(t_s, lo, hi)
-    # On zero-straddling intervals, 2*theta - (low + high) avoids cancellation as theta -> 0.
-    numer = (2.0 * t_mid - (lo + hi)) if (low < 0.0 < high) else (d_lo - d_hi)
+    t_mid = xp.clip(t_s, lo_s, hi_s)
+    numer = (2.0 * t_mid - (lo_s + hi_s)) if (low < 0.0 < high) else (d_lo - d_hi)
     safe_d_hi = xp.where(near_mid, d_hi, 1.0)
     return xp.where(
         near_mid, xp.log1p(xp.where(near_mid, numer / safe_d_hi, 0.0)), log_d_lo - log_d_hi
@@ -265,47 +286,58 @@ def _sigmoid_unconstrain_jvp(
     low: float, high: float, primals: tuple[jax.Array], tangents: tuple[jax.Array]
 ) -> tuple[jax.Array, jax.Array]:
     (t_arr,), (t_dot,) = primals, tangents
-    exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
-    in_cap, t_in = jnp.ones_like(t_arr, dtype=bool), t_arr
-    if exp_scale < 0:
-        cap = (8.0 * math.ldexp(1.0, exp_a)) * math.ldexp(1.0, exp_b)
-        in_cap, t_in = jnp.abs(t_arr) < cap, jnp.clip(t_arr, -cap, cap)
-    s_inv_a, s_inv_b = math.ldexp(1.0, -exp_a), math.ldexp(1.0, -exp_b)
-    t_s = (t_in * s_inv_a) * s_inv_b
-    raw_lo, raw_hi = t_s - lo_s, hi_s - t_s
-    d_lo, d_hi = jnp.clip(raw_lo, _FLOAT64_TINY, span_s), jnp.clip(raw_hi, _FLOAT64_TINY, span_s)
+    exp_scale, exp_a, exp_b, _, _, span_s, _, raw_lo, raw_hi = _sigmoid_endpoint_gaps(
+        t_arr, low, high, jnp
+    )
+    inside = (t_arr > low) & (t_arr < high)
+    s_inv_a = math.ldexp(1.0, -exp_a)
+    s_inv_b = math.ldexp(1.0, -exp_b)
+    scaled_floor = (
+        max(_XLA_RECIP_MIN, math.ldexp(_XLA_RECIP_MIN, -exp_scale))
+        if exp_scale > -1000
+        else _FLOAT64_TINY
+    )
+    d_lo = jnp.clip(raw_lo, scaled_floor, span_s)
+    d_hi = jnp.clip(raw_hi, scaled_floor, span_s)
     if exp_scale > 2:
-        raw_lo_q, raw_hi_q = 0.25 * t_in - 0.25 * low, 0.25 * high - 0.25 * t_in
-        span_q = 0.25 * high - 0.25 * low
-        d_lo_q = jnp.clip(raw_lo_q, _FLOAT64_TINY, span_q)
-        d_hi_q = jnp.clip(raw_hi_q, _FLOAT64_TINY, span_q)
-        term_lo = jnp.where(
-            raw_lo >= _FLOAT64_TINY,
-            ((1.0 / d_lo) * s_inv_a) * s_inv_b,
-            jnp.where(raw_lo_q > _FLOAT64_TINY, 0.25 / d_lo_q, 0.0),
-        )
-        term_hi = jnp.where(
-            raw_hi >= _FLOAT64_TINY,
-            ((1.0 / d_hi) * s_inv_a) * s_inv_b,
-            jnp.where(raw_hi_q > _FLOAT64_TINY, 0.25 / d_hi_q, 0.0),
-        )
+        term_lo = jnp.where(raw_lo >= scaled_floor, ((1.0 / d_lo) * s_inv_a) * s_inv_b, 0.0)
+        term_hi = jnp.where(raw_hi >= scaled_floor, ((1.0 / d_hi) * s_inv_a) * s_inv_b, 0.0)
+        if abs(low) < 1e290:
+            raw_lo_u = jnp.clip(t_arr, low, min(high, 1e300)) - low
+            d_lo_u = jnp.clip(raw_lo_u, _XLA_RECIP_MIN, 1e300)
+            term_lo = jnp.where(
+                raw_lo >= _FLOAT64_TINY,
+                term_lo,
+                jnp.where(raw_lo_u >= _XLA_RECIP_MIN, 1.0 / d_lo_u, 0.0),
+            )
+        if abs(high) < 1e290:
+            raw_hi_u = high - jnp.clip(t_arr, max(low, -1e300), high)
+            d_hi_u = jnp.clip(raw_hi_u, _XLA_RECIP_MIN, 1e300)
+            term_hi = jnp.where(
+                raw_hi >= _FLOAT64_TINY,
+                term_hi,
+                jnp.where(raw_hi_u >= _XLA_RECIP_MIN, 1.0 / d_hi_u, 0.0),
+            )
         both_norm = (raw_lo >= _FLOAT64_TINY) & (raw_hi >= _FLOAT64_TINY)
         sum_norm = ((1.0 / d_lo + 1.0 / d_hi) * s_inv_a) * s_inv_b
-        deriv = jnp.where(in_cap, jnp.where(both_norm, sum_norm, term_lo + term_hi), 0.0)
+        deriv = jnp.where(inside, jnp.where(both_norm, sum_norm, term_lo + term_hi), 0.0)
     else:
-        interior = in_cap & (raw_lo > _FLOAT64_TINY) & (raw_hi > _FLOAT64_TINY)
-        deriv = (jnp.where(interior, 1.0 / d_lo + 1.0 / d_hi, 0.0) * s_inv_a) * s_inv_b
+        ok = inside & (raw_lo >= scaled_floor) & (raw_hi >= scaled_floor)
+        deriv = (jnp.where(ok, 1.0 / d_lo + 1.0 / d_hi, 0.0) * s_inv_a) * s_inv_b
     return _sigmoid_unconstrain(t_arr, low, high), deriv * t_dot
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
 def _sigmoid_constrain(u_arr: jax.Array, low: float, high: float) -> jax.Array:
     exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
-    lo, hi, span = jnp.asarray(lo_s), jnp.asarray(hi_s), jnp.asarray(span_s)
-    s_a, s_b = math.ldexp(1.0, exp_a), math.ldexp(1.0, exp_b)
-    tails_s = jnp.where(
-        u_arr < 0.0, lo + span * jax.nn.sigmoid(u_arr), hi - span * jax.nn.sigmoid(-u_arr)
-    )
+    lo = jnp.asarray(lo_s)
+    hi = jnp.asarray(hi_s)
+    span = jnp.asarray(span_s)
+    s_a = math.ldexp(1.0, exp_a)
+    s_b = math.ldexp(1.0, exp_b)
+    sig_pos = jnp.where(u_arr < -37.0, jnp.exp(u_arr), jax.nn.sigmoid(u_arr))
+    sig_neg = jnp.where(u_arr > 37.0, jnp.exp(-u_arr), jax.nn.sigmoid(-u_arr))
+    tails_s = jnp.where(u_arr < 0.0, lo + span * sig_pos, hi - span * sig_neg)
     tails = (tails_s * s_a) * s_b
     if exp_scale > 0:
         log_span = math.log(span_s) + exp_scale * math.log(2.0)
@@ -356,18 +388,27 @@ class ParamSpec(_ValidatedZodiaxBase):
     high: float = eqx.field(static=True)
 
     def __init__(
-        self, path: str, bijector: _BIJECTOR_TYPES = "identity",
-        prior_mean: ArrayLike = 0.0, prior_sd: ArrayLike = 10.0,
-        *, low: ArrayLike = 0.0, high: ArrayLike = 1.0,
+        self,
+        path: str,
+        bijector: _BIJECTOR_TYPES = "identity",
+        prior_mean: ArrayLike = 0.0,
+        prior_sd: ArrayLike = 10.0,
+        *,
+        low: ArrayLike = 0.0,
+        high: ArrayLike = 1.0,
     ) -> None:
         owner = f"ParamSpec({path!r})"
         bij = _validate_choice(bijector, _VALID_BIJECTORS, "bijector", owner)
         low_f = _concrete_scalar_f64(low, "low", owner=owner)
         high_f = _concrete_scalar_f64(high, "high", owner=owner)
         if not (math.isfinite(low_f) and math.isfinite(high_f)):
-            raise ValueError(f"{owner}: low and high must be finite; got low={low!r}, high={high!r}.")
+            raise ValueError(
+                f"{owner}: low and high must be finite; got low={low!r}, high={high!r}."
+            )
         if bij == "sigmoid" and not (high_f > low_f):
-            raise ValueError(f"{owner}: sigmoid requires low < high; got low={low!r}, high={high!r}.")
+            raise ValueError(
+                f"{owner}: sigmoid requires low < high; got low={low!r}, high={high!r}."
+            )
         pm_np = _concrete_f64_array(prior_mean, "prior_mean", owner=owner)
         ps_np = _concrete_f64_array(prior_sd, "prior_sd", owner=owner)
         if not np.all(np.isfinite(pm_np)):
@@ -375,13 +416,16 @@ class ParamSpec(_ValidatedZodiaxBase):
         if not np.all(np.isfinite(ps_np)) or np.any(ps_np <= 0.0):
             raise ValueError(f"{owner}: prior_sd must be finite and > 0; got {prior_sd!r}.")
         b_shape = np.broadcast_shapes(pm_np.shape, ps_np.shape)
-        pm_b, ps_b = np.broadcast_to(pm_np, b_shape), np.broadcast_to(ps_np, b_shape)
+        pm_b = np.broadcast_to(pm_np, b_shape)
+        ps_b = np.broadcast_to(ps_np, b_shape)
 
-        self.path, self.bijector = str(path), bij
+        self.path = str(path)
+        self.bijector = bij
         self._prior_shape = tuple(int(s) for s in b_shape)
         self._prior_mean_tuple = tuple(float(x) for x in pm_b.reshape(-1))
         self._prior_sd_tuple = tuple(float(x) for x in ps_b.reshape(-1))
-        self.low, self.high = low_f, high_f
+        self.low = low_f
+        self.high = high_f
 
     @classmethod
     def normal(cls, path: str, mean: ArrayLike = 0.0, sd: ArrayLike = 1.0) -> ParamSpec:

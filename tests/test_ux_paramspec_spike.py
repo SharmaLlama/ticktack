@@ -270,13 +270,16 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 float(spec_z.unconstrain(med_z)), float(spec_z.prior_mean), rtol=1e-13
             )
 
-        # Wide intervals near DBL_MAX (including zero-straddling and asymmetric near-endpoint medians)
+        # Wide intervals near DBL_MAX (including zero-straddling, near-DBL_MIN, and asymmetric medians)
         for lo_w, hi_w, med_w in (
             (-1e308, 1e308, -0.5e308),
             (-1e308, 1e308, 1e10),
             (-0.8e308, 0.8e308, 1e10),
             (-1.6e308, 0.1e308, -0.91e308),
             (-0.1e308, 1.6e308, 0.91e308),
+            (0.0, 1e308, 4.0e-308),
+            (-1e308, 0.0, -4.0e-308),
+            (0.0, 0.5, 4.0e-308),
             (0.0, 1e308, 1e-20),
             (-1e308, 0.0, -1e-20),
             (0.0, 1e308, 0.1),
@@ -287,50 +290,76 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             med_wd = Decimal.from_float(med_w)
             span_wd = hi_wd - lo_wd
             u_w_ref = float((med_wd - lo_wd).ln() - (hi_wd - med_wd).ln())
-            g_u_ref = float(Decimal(1) / (med_wd - lo_wd) + Decimal(1) / (hi_wd - med_wd))
+            g_u_dec = Decimal(1) / (med_wd - lo_wd) + Decimal(1) / (hi_wd - med_wd)
             g_c_ref = float((med_wd - lo_wd) * (hi_wd - med_wd) / span_wd)
 
-            np.testing.assert_allclose(float(spec_w.prior_mean), u_w_ref, rtol=1e-13)
+            np.testing.assert_allclose(float(spec_w.prior_mean), u_w_ref, rtol=1e-13, atol=0.0)
             np.testing.assert_allclose(
-                float(spec_w.constrain(spec_w.prior_mean)), med_w, rtol=1e-13
+                float(spec_w.constrain(spec_w.prior_mean)), med_w, rtol=1e-12, atol=0.0
             )
             np.testing.assert_allclose(
-                float(spec_w.unconstrain(med_w)), float(spec_w.prior_mean), rtol=1e-13
+                float(spec_w.unconstrain(med_w)), float(spec_w.prior_mean), rtol=1e-13, atol=0.0
             )
             assert math.isfinite(float(spec_w.log_abs_det_jacobian(spec_w.prior_mean)))
 
             g_c = float(jax.grad(spec_w.constrain)(jnp.asarray(spec_w.prior_mean)))
             assert g_c > 0.0
-            np.testing.assert_allclose(g_c, g_c_ref, rtol=1e-12)
+            np.testing.assert_allclose(g_c, g_c_ref, rtol=1e-12, atol=0.0)
 
             g_u = float(jax.grad(spec_w.unconstrain)(jnp.asarray(med_w)))
             assert math.isfinite(g_u)
-            if g_u_ref >= float(np.finfo(np.float64).tiny):
+            if g_u_dec >= Decimal.from_float(float(np.finfo(np.float64).tiny)) and g_u_dec < Decimal(
+                "1.6e308"
+            ):
                 assert g_u > 0.0
-                np.testing.assert_allclose(g_u, g_u_ref, rtol=1e-12)
+                np.testing.assert_allclose(g_u, float(g_u_dec), rtol=1e-12, atol=0.0)
 
             for t_w_ob in (lo_w, hi_w):
                 t_wj = jnp.asarray(t_w_ob, dtype=jnp.float64)
                 assert math.isfinite(float(spec_w.unconstrain(t_wj)))
-                assert math.isfinite(float(jax.grad(spec_w.unconstrain)(t_wj)))
+                assert float(jax.grad(spec_w.unconstrain)(t_wj)) == 0.0
 
         # Subnormal median in bounded and near-DBL_MIN tail u = -708 round-trip + grad
         spec_sub = tt.ParamSpec.bounded("sub", -1.0, 1.0, median=1e-310)
-        np.testing.assert_allclose(float(spec_sub.prior_mean), 2.0e-310, rtol=1e-12)
+        np.testing.assert_allclose(float(spec_sub.prior_mean), 2.0e-310, rtol=1e-12, atol=0.0)
         spec_sub01 = tt.ParamSpec.bounded("sub01", 0.0, 1.0, median=1e-310)
-        np.testing.assert_allclose(float(spec_sub01.prior_mean), math.log(1e-310), rtol=1e-12)
         np.testing.assert_allclose(
-            float(spec_sub01.constrain(spec_sub01.prior_mean)), 1e-310, rtol=1e-12, atol=1e-308
+            float(spec_sub01.prior_mean), math.log(1e-310), rtol=1e-12, atol=0.0
         )
+        assert math.isfinite(float(spec_sub01.unconstrain(1e-310)))
+        assert math.isfinite(
+            float(jax.grad(spec_sub01.unconstrain)(jnp.asarray(1e-308, dtype=jnp.float64)))
+        )
+        if float(jnp.exp(jnp.asarray(-710.0, dtype=jnp.float64))) > 0.0:
+            # x86_64 XLA preserves IEEE-754 float64 subnormals (aarch64 XLA sets hardware FTZ).
+            np.testing.assert_allclose(
+                float(spec_sub01.constrain(spec_sub01.prior_mean)), 1e-310, rtol=1e-12, atol=0.0
+            )
+            np.testing.assert_allclose(
+                float(spec_sub01.unconstrain(1e-310)),
+                float(spec_sub01.prior_mean),
+                rtol=1e-12,
+                atol=0.0,
+            )
+            np.testing.assert_allclose(
+                float(jax.grad(spec_sub01.unconstrain)(jnp.asarray(1e-308, dtype=jnp.float64))),
+                1.0e308,
+                rtol=1e-12,
+                atol=0.0,
+            )
         for hi_tail in (1.0, 2.0):
             spec_tail = tt.ParamSpec.bounded("tail", 0.0, hi_tail)
             th_tail = float(spec_tail.constrain(jnp.asarray(-708.0)))
             assert th_tail > 0.0
-            np.testing.assert_allclose(th_tail, hi_tail * math.exp(-708.0), rtol=1e-12)
-            np.testing.assert_allclose(float(spec_tail.unconstrain(th_tail)), -708.0, rtol=1e-12)
+            np.testing.assert_allclose(th_tail, hi_tail * math.exp(-708.0), rtol=1e-12, atol=0.0)
+            np.testing.assert_allclose(
+                float(spec_tail.unconstrain(th_tail)), -708.0, rtol=1e-12, atol=0.0
+            )
             g_tail = float(jax.grad(spec_tail.unconstrain)(jnp.asarray(th_tail)))
             assert g_tail > 0.0
-            np.testing.assert_allclose(g_tail, 1.0 / th_tail + 1.0 / hi_tail, rtol=1e-12)
+            np.testing.assert_allclose(
+                g_tail, 1.0 / th_tail + 1.0 / hi_tail, rtol=1e-12, atol=0.0
+            )
 
         base_u = float(tt.ParamSpec.bounded("ui", -1.35, 4.85, median=-0.37).prior_mean)
         for unit_scale in (1e-12, 1.0, 365.25, 1e12):
@@ -342,12 +371,14 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             )
             np.testing.assert_allclose(float(spec_ui.prior_mean), base_u, rtol=1e-15)
 
-        # Out-of-bounds inputs (theta <= low and theta >= high) remain finite with finite autodiff grad
+        # Out-of-bounds inputs (theta <= low and theta >= high) remain finite with zero autodiff grad
         for lo_ob, hi_ob in (
             (-0.5e-30, 0.5e-30),
             (-3e-200, 7e-200),
             (-1.35, 4.85),
             (0.0, 1.0),
+            (0.0, 10.0),
+            (773.5, 775.8),
         ):
             spec_ob = tt.ParamSpec.bounded("ob", lo_ob, hi_ob)
             span_ob = hi_ob - lo_ob
@@ -362,7 +393,17 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 u_ob = float(spec_ob.unconstrain(t_j))
                 g_ob = float(jax.grad(spec_ob.unconstrain)(t_j))
                 assert math.isfinite(u_ob)
-                assert math.isfinite(g_ob)
+                assert g_ob == 0.0
+
+        # Central finite-difference verification of unconstrain JVP on exp_scale > 2 interval
+        spec_yr = tt.ParamSpec.bounded("t_start", 773.5, 775.8, median=774.58)
+        for t_fd in (773.6, 774.58, 775.7):
+            eps = 1e-6
+            fd = (
+                float(spec_yr.unconstrain(t_fd + eps)) - float(spec_yr.unconstrain(t_fd - eps))
+            ) / (2.0 * eps)
+            ad = float(jax.grad(spec_yr.unconstrain)(jnp.asarray(t_fd, dtype=jnp.float64)))
+            np.testing.assert_allclose(ad, fd, rtol=1e-8)
 
         # Raw np.float32 narrow-interval sweep (1e-7..1e0, incl. asymmetric zero-straddling)
         for mode in ("pos_small", "pos_unit", "sym_zero", "asym_zero"):
