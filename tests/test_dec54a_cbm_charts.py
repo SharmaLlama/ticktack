@@ -326,12 +326,13 @@ def test_load_preset_chart_vs_kind_parity_and_kirchhoff(
         miyake17_closure=closure,  # type: ignore[arg-type]
         tie_symmetric_edges=tie_sym,
     )
-    cbm_kind = load_preset(
-        preset_name,
-        kind=chart_kind,  # type: ignore[arg-type]
-        miyake17_closure=closure,  # type: ignore[arg-type]
-        tie_symmetric_edges=tie_sym,
-    )
+    with pytest.warns(DeprecationWarning, match=r"Wave 6.*chart="):
+        cbm_kind = load_preset(
+            preset_name,
+            kind=chart_kind,  # type: ignore[arg-type]
+            miyake17_closure=closure,  # type: ignore[arg-type]
+            tie_symmetric_edges=tie_sym,
+        )
     assert type(cbm_chart) is CarbonBoxModel
     assert isinstance(cbm_chart.chart, expected_chart_cls)
     assert isinstance(cbm_kind, CarbonBoxModel)
@@ -383,7 +384,8 @@ def test_load_preset_error_guards_and_random_kirchhoff_invariance() -> None:
 def test_active_parameter_mask_fisher_spectrum_and_subspace_compat() -> None:
     """Verify gauge-mask auto-detection in cbm_fisher_spectrum and SubspaceCBM.from_fisher compatibility."""
     cbm_bal_chart = load_preset("Guttler15", chart="balanced")
-    cbm_bal_kind = load_preset("Guttler15", kind="balanced")
+    with pytest.warns(DeprecationWarning, match=r"Wave 6.*chart="):
+        cbm_bal_kind = load_preset("Guttler15", kind="balanced")
     cbm_open_chart = load_preset("Miyake17", chart="open")
 
     expected_bal_mask = np.array([True] * 24 + [False], dtype=bool)
@@ -818,9 +820,11 @@ def test_to_fixed_jit_to_balanced_tying_overflow_and_chart_from_state() -> None:
     assert float(jnp.linalg.norm(g_via_fix.log_k_trop_to_sinks)) > 0.0
 
     # Thread 5: to_balanced() preserves tie_matrix_rows and avoids exp(800.0) overflow
+    with pytest.warns(DeprecationWarning, match=r"Wave 6.*chart="):
+        b21_tied_kind = load_preset("Brehm21", kind="balanced", tie_symmetric_edges=True)
     for b21_tied in (
         load_preset("Brehm21", chart="balanced", tie_symmetric_edges=True),
-        load_preset("Brehm21", kind="balanced", tie_symmetric_edges=True),
+        b21_tied_kind,
     ):
         assert b21_tied.log_rates_free.shape == (39,)
         assert b21_tied.tie_matrix_rows is not None
@@ -1037,9 +1041,11 @@ def test_effective_param_specs_jit_open_sink_guards_and_fixed_validation() -> No
         _CustomDynamicCBM(topo_asym).param_specs(prior_sd=0.35)
 
     # 2. to_balanced() rejects OpenChart, OpenCBM, and calibrated EffectiveCBM under eqx.filter_jit / jax.jit
+    with pytest.warns(DeprecationWarning, match=r"Wave 6.*chart="):
+        miyake_open_kind = load_preset("Miyake17", kind="open")
     for open_model in (
         load_preset("Miyake17", chart="open"),
-        load_preset("Miyake17", kind="open"),
+        miyake_open_kind,
         EffectiveCBM(K=3),
     ):
         with pytest.raises(ValueError, match="positive sinks"):
@@ -1317,3 +1323,75 @@ def test_claude_gate5_exact_box_matching_default_prod_kirchhoff_msg_and_kind_dep
         _ = load_preset("Guttler15", chart="balanced")
         _ = load_preset("Guttler15")
     assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]
+
+    # 4. 0D scalar and 2D prod_weights rejected cleanly by CBMChart._validate_topology
+    class _BadShapePWChart(CBMChart):
+        prod_weights: jax.Array
+
+        def __init__(self, pw: jax.Array) -> None:
+            self.prod_weights = pw
+
+    topo_sym = _sym_3box_topo()
+    for bad_pw in (jnp.asarray(1.0), jnp.ones((2, 2), dtype=jnp.float64)):
+        with pytest.raises(ValueError, match="prod_weights shape"):
+            CarbonBoxModel(topo_sym, _BadShapePWChart(bad_pw))
+
+    # 5. Hemispheric default production rejects mismatched hemispheres & NH/SH string prefixes
+    with pytest.raises(ValueError, match="production="):
+        CarbonBoxModel.from_boxes(
+            masses={
+                ("Stratosphere", "north"): 45.0,
+                ("Strat", "north"): 45.0,
+                ("Upper Air", "south"): 45.0,
+                ("Troposphere", "north"): 250.0,
+                ("Troposphere", "south"): 250.0,
+            },
+            fluxes=[
+                (("Stratosphere", "north"), ("Troposphere", "north"), 22.0),
+                (("Troposphere", "north"), ("Stratosphere", "north"), 22.0),
+                (("Strat", "north"), ("Troposphere", "north"), 22.0),
+                (("Troposphere", "north"), ("Strat", "north"), 22.0),
+                (("Upper Air", "south"), ("Troposphere", "south"), 22.0),
+                (("Troposphere", "south"), ("Upper Air", "south"), 22.0),
+                (("Troposphere", "north"), ("Troposphere", "south"), 70.0),
+                (("Troposphere", "south"), ("Troposphere", "north"), 70.0),
+            ],
+            chart="balanced",
+        )
+    with pytest.raises(ValueError, match="production="):
+        CarbonBoxModel.from_boxes(
+            masses={("Stratosphere", "north"): 45.0, ("Surface Air", "south"): 250.0},
+            fluxes=[
+                (("Stratosphere", "north"), ("Surface Air", "south"), 22.0),
+                (("Surface Air", "south"), ("Stratosphere", "north"), 22.0),
+            ],
+            troposphere=("Surface Air", "south"),
+            chart="balanced",
+        )
+    with pytest.raises(ValueError, match=r"2-tuple keys"):
+        CarbonBoxModel.from_boxes(
+            masses={
+                "NH Stratosphere": 45.0,
+                "NH Troposphere": 250.0,
+                "SH Stratosphere": 45.0,
+                "SH Troposphere": 250.0,
+            },
+            fluxes=[
+                ("NH Stratosphere", "NH Troposphere", 22.0),
+                ("NH Troposphere", "NH Stratosphere", 22.0),
+                ("NH Troposphere", "SH Troposphere", 70.0),
+                ("SH Troposphere", "NH Troposphere", 70.0),
+                ("SH Stratosphere", "SH Troposphere", 22.0),
+                ("SH Troposphere", "SH Stratosphere", 22.0),
+            ],
+            chart="balanced",
+        )
+    with pytest.raises(ValueError, match=r"2-tuple keys"):
+        CarbonBoxModel.from_boxes(
+            masses={("NH_Troposphere", "south"): 250.0, ("Troposphere", "north"): 250.0},
+            fluxes=[
+                (("NH_Troposphere", "south"), ("Troposphere", "north"), 70.0),
+                (("Troposphere", "north"), ("NH_Troposphere", "south"), 70.0),
+            ],
+            chart="balanced",
+        )

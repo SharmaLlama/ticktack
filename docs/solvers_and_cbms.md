@@ -18,12 +18,31 @@ Rather than exposing raw matrix entries that can violate mass conservation or po
 | :--- | :--- | :--- | :--- |
 | `FixedChart` / `FixedCBM` | $0$ (frozen in inference) | Directly specified reservoir masses $\mathbf{M}$ ($\text{GtC}$), gross fluxes $F_{i \to j}$ ($\text{GtC yr}^{-1}$), and optional sink rates ($\text{yr}^{-1}$) | Standard Miyake / solar / IFT production inference with fixed `Brehm21` or `Guttler15` transport |
 | `BalancedChart` / `BalancedCBM` | $|\mathcal{E}|$ directed log rates (`log_rates_free`, or $p \le |\mathcal{E}|$ tied groups) + $\ln M_{\text{tot}}$ | Pre-industrial $^{12}\text{C}$ mass balance $\sum_j M_j k_{j \to i} = M_i \sum_j k_{i \to j}$ via [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) null-vector stationary masses | Sensitivity analysis & Fisher spectrum on directed multi-box topologies (`Brehm21` has 56 directed free rates, or 39 when the 17 equal-rate N/S pairs are tied via `tie_symmetric_edges=True`) |
-| `ReversibleChart` / `ReversibleCBM` | $n$ log reservoir masses (`log_masses`) + $|\mathcal{E}_{\text{undir}}|$ symmetric log fluxes (`log_sym_fluxes`), with a 1D global mass–flux scale gauge $(\mathbf{1}_n, \mathbf{1}_{|\mathcal{E}_{\text{undir}}|})$ | Detailed balance $M_i k_{i \to j} = M_j k_{j \to i} = F_{ij}$, guaranteeing real negative eigenvalues of $A$ ($M^{1/2}$ similarity to a negative-definite symmetric matrix) | Non-oscillatory reversible carbon-exchange priors (pass `include_masses=False` to `param_specs` to eliminate the scale gauge, or regularize with finite Gaussian priors) |
+| `ReversibleChart` / `ReversibleCBM` | $n$ log reservoir masses (`log_masses`) + $|\mathcal{E}_{\text{undir}}|$ symmetric log fluxes (`log_sym_fluxes`), with a 1D global mass–flux scale gauge $(\mathbf{1}_n, \mathbf{1}_{|\mathcal{E}_{\text{undir}}|})$ | Detailed balance $M_i k_{i \to j} = M_j k_{j \to i} = F_{ij}$, guaranteeing real negative eigenvalues of $A$ ($M^{1/2}$ similarity to a negative-definite symmetric matrix) | Non-oscillatory reversible carbon-exchange priors (`include_masses=True` with finite `prior_sd` preserves all $(n - 1) + |\mathcal{E}_{\text{undir}}|$ physical degrees of freedom while regularizing the 1D scale gauge; `include_masses=False` holds all inventories and $n - 1$ mass ratios $M_i / M_j$ fixed so only symmetric fluxes vary) |
 | `OpenChart` / `OpenCBM` | Directed log rates (`log_rates_free`) + $\ln M_{\text{tot}}$ + open-box log sink rates (`log_sink_rates`) | Irreversible deep-ocean / sediment burial first-order loss $k_{\text{sink}} > 0$ ($\text{yr}^{-1}$) atop flow-balanced inter-box transport | Truncated shallow-box models (`Miyake17`) and open-system carbon-loss experiments |
 | `EffectiveCBM(K)` | $2K - 2$ unconstrained log rates | Minimal star-graph (mammillary) topology with zero similarity-gauge redundancy; exact reduction only for reversible webs, and an approximation (`0.044‰` RMS in tests) for non-reversible webs (see [Fisher Information & EffectiveCBMs](fisher_and_effective_cbm.md)) | Joint carbon-cycle + production inference & Bayesian model comparison |
 | `SubspaceCBM` (`FisherSubspaceCBM`) | $m$ unconstrained mode amplitudes `alpha` | Perron–Frobenius mass balance restricted to the top $m$ Schur-marginalized Fisher log-rate eigenmodes (`SubspaceCBM.from_fisher`) | Joint full-topology uncertainty propagation without sampling poorly conditioned directions |
 
 In `BalancedCBM`, unconstrained coordinates `log_rates_free` parametrize the directed first-order transfer rates $k_{i \to j} > 0$ (optionally tied across equal-rate hemispheric edge pairs via `tie_matrix`) on any strongly connected graph $\mathcal{G}$; solving for the unique positive [Perron–Frobenius](https://en.wikipedia.org/wiki/Perron%E2%80%93Frobenius_theorem) right null-vector of the conservative rate matrix yields the stationary reservoir $^{12}\text{C}$ fractions $M_i / M_{\text{tot}}$ automatically so Kirchhoff inflow equals outflow at every node without constrained optimization.
+
+```python
+import ticktack as tt
+
+# Load a literature preset on a chosen coordinate chart (preferred over deprecated kind=...)
+cbm_b21 = tt.load_preset("Brehm21", chart="balanced", tie_symmetric_edges=True)
+
+# Or build a custom CarbonBoxModel directly by reservoir name (GtC and GtC yr^-1)
+cbm_custom = tt.CarbonBoxModel.from_boxes(
+    masses={"Stratosphere": 90.0, "Troposphere": 510.0, "Ocean": 38000.0},
+    fluxes=[
+        ("Stratosphere", "Troposphere", 45.0),
+        ("Troposphere", "Stratosphere", 45.0),
+        ("Troposphere", "Ocean", 60.0),
+        ("Ocean", "Troposphere", 60.0),
+    ],
+    chart="reversible",
+)
+```
 
 Two properties of the published non-reversible `BalancedCBM` presets should be noted:
 

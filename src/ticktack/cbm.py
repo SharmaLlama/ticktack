@@ -471,11 +471,11 @@ class CBMChart(zdx.Base):
         """Validate structural compatibility between ``self`` and ``topology``."""
         pw = getattr(self, "prod_weights", None)
         if pw is not None:
-            pw_len = int(pw.shape[0]) if hasattr(pw, "shape") else len(pw)
-            if pw_len != len(topology.prod_box_indices):
+            expected = (len(topology.prod_box_indices),)
+            if np.shape(pw) != expected:
                 raise ValueError(
-                    f"{type(self).__name__} prod_weights length ({pw_len}) does not match "
-                    f"topology.prod_box_indices length ({len(topology.prod_box_indices)})."
+                    f"{type(self).__name__} prod_weights shape {np.shape(pw)} does not match "
+                    f"expected {expected}."
                 )
 
     def edge_rates(self, topology: Topology) -> jax.Array:
@@ -1019,12 +1019,12 @@ class CarbonBoxModel(zdx.Base):
             Non-negative cosmic-ray ``14C`` production weights (dimensionless;
             normalized internally to sum to ``1.0``), given either as a mapping by
             reservoir key or as a sequence of length ``n_boxes``. When omitted,
-            exact normalized stratosphere names (``"stratosphere"``, ``"strat"``,
-            ``"nh_stratosphere"``, ``"sh_stratosphere"``) and the ``troposphere``
-            reservoir(s) receive a ``0.70`` / ``0.30`` stratosphere/troposphere
-            split (matching :class:`EffectiveCBM` ``eta_strat = 0.70``) when
-            matched in equal counts, or ``1.0`` on ``troposphere`` when no
-            stratosphere box is present; ambiguous counts raise ``ValueError``
+            exact normalized stratosphere names (``"stratosphere"``, ``"strat"``)
+            and the ``troposphere`` reservoir(s) receive a ``0.70`` / ``0.30``
+            stratosphere/troposphere split (matching :class:`EffectiveCBM`
+            ``eta_strat = 0.70``) when matched one-to-one per hemisphere, or
+            ``1.0`` on ``troposphere`` when no stratosphere box is present;
+            ambiguous counts or hemisphere mismatches raise ``ValueError``
             prompting explicit ``production=...``.
         sinks : Mapping[key, float] | Sequence[float], optional
             Non-negative first-order irreversible open-system loss rates ``k_sink``
@@ -1035,9 +1035,9 @@ class CarbonBoxModel(zdx.Base):
             Reservoir key (or sequence of keys) defining the global reference
             tropospheric reservoir(s) ``T`` used to normalize ``R_ref`` and
             ``Delta14C``. Defaults to exact normalized matches in
-            ``{"troposphere", "trop", "nh_troposphere", "sh_troposphere"}`` (at
-            most one per hemisphere); must be passed explicitly when missing or
-            ambiguous.
+            ``{"troposphere", "trop"}`` (at most one per hemisphere; use
+            ``(name, "north" | "south")`` 2-tuple keys for hemispheric models);
+            must be passed explicitly when missing or ambiguous.
         chart : {"fixed", "balanced", "reversible", "open"}, optional
             Coordinate chart class to instantiate (default ``"fixed"``).
         decay_rate : float, optional
@@ -1072,7 +1072,7 @@ class CarbonBoxModel(zdx.Base):
                 "production weights must be finite, non-negative, and have positive sum."
             )
         if p_arr is None:
-            prod_idx, prod_w = _resolve_default_production(names, trop_idx)
+            prod_idx, prod_w = _resolve_default_production(names, hemis, has_hemi, trop_idx)
         else:
             prod_idx = tuple(int(i) for i in np.flatnonzero(p_arr > 0.0))
             prod_w = p_arr[list(prod_idx)]
@@ -1118,22 +1118,35 @@ def _parse_reservoir_items(
         ck = _box_norm_key(rk)
         if ck in lookup:
             raise ValueError(f"Duplicate reservoir key {rk!r}.")
+        bname = str(rk[0]) if has_hemi else str(rk)
+        hemi = _normalize_hemisphere(rk[1]) if has_hemi else "none"
+        _check_hemi_prefix(rk, bname, hemi, has_hemi)
         lookup[ck] = lookup[rk] = idx
-        names.append(str(rk[0]) if has_hemi else str(rk))
-        hemis.append(_normalize_hemisphere(rk[1]) if has_hemi else "none")
+        names.append(bname)
+        hemis.append(hemi)
     return has_hemi, names, hemis, lookup
 
 
-_TROP_BOX_NAMES = frozenset({"troposphere", "trop", "nh_troposphere", "sh_troposphere"})
-_STRAT_BOX_NAMES = frozenset({"stratosphere", "strat", "nh_stratosphere", "sh_stratosphere"})
+_TROP_BOX_NAMES = frozenset({"troposphere", "trop"})
+_STRAT_BOX_NAMES = frozenset({"stratosphere", "strat"})
 
 
 def _norm_box_token(name: str) -> str:
     return "_".join(name.strip().lower().replace("-", " ").split())
 
 
+def _check_hemi_prefix(rk: Any, bname: str, hemi: str, has_hemi: bool) -> None:
+    tok = _norm_box_token(bname)
+    pref = "north" if tok.startswith("nh_") else ("south" if tok.startswith("sh_") else None)
+    if pref is not None and (not has_hemi or hemi != pref):
+        raise ValueError(
+            f"Hemispheric prefix in reservoir key {rk!r} is invalid; use 2-tuple keys like "
+            "('Troposphere', 'north') and ('Troposphere', 'south')."
+        )
+
+
 def _resolve_default_production(
-    names: Sequence[str], trop_idx: tuple[int, ...]
+    names: Sequence[str], hemis: Sequence[str], has_hemi: bool, trop_idx: tuple[int, ...]
 ) -> tuple[tuple[int, ...], np.ndarray]:
     """Infer default ``14C`` production indices and weights (70% strat / 30% trop)."""
     strat_idx = tuple(
@@ -1142,7 +1155,9 @@ def _resolve_default_production(
     )
     if not strat_idx:
         return trop_idx, np.full((len(trop_idx),), 1.0 / len(trop_idx), dtype=np.float64)
-    if len(strat_idx) != len(trop_idx):
+    strat_h = {hemis[i] for i in strat_idx}
+    hemi_bad = has_hemi and (len(strat_h) != len(strat_idx) or strat_h != {hemis[i] for i in trop_idx})
+    if len(strat_idx) != len(trop_idx) or hemi_bad:
         raise ValueError(
             f"Could not infer cosmic-ray production split unambiguously "
             f"({len(strat_idx)} stratosphere vs {len(trop_idx)} troposphere box(es)); "
@@ -2055,9 +2070,12 @@ class ReversibleChart(CBMChart):
     gauge** ``(1_{n_boxes}, 1_{n_pairs})`` scales all inventories and gross fluxes by
     ``exp(c)`` while leaving ``edge_rates``, ``matrix_A()``,
     ``relative_reservoir_masses()``, and ``Delta14C`` strictly invariant (zero Fisher
-    information). Pass ``include_masses=False`` to :meth:`param_specs` to freeze
-    ``log_masses`` and eliminate this 1D scale gauge, or regularize it with a finite
-    Gaussian prior ``prior_sd``.
+    information). Using ``include_masses=True`` with a finite Gaussian ``prior_sd``
+    in :meth:`param_specs` preserves all ``(n_boxes - 1) + n_pairs`` physical
+    reversible degrees of freedom while regularizing this 1D scale gauge; passing
+    ``include_masses=False`` holds all reservoir inventories and all ``n_boxes - 1``
+    mass ratios ``M_i / M_j = k_{j->i} / k_{i->j}`` fixed so only the ``n_pairs``
+    symmetric fluxes vary.
 
     Parameters
     ----------
@@ -2151,11 +2169,14 @@ class ReversibleChart(CBMChart):
         Notes
         -----
         When ``include_masses=True`` (default), both ``log_masses`` (shape ``(n_boxes,)``)
-        and ``log_sym_fluxes`` (shape ``(n_pairs,)``) are returned, which retains the
-        1D zero-Fisher global mass–flux scale direction ``(1_{n_boxes}, 1_{n_pairs})``
-        (``ln M_i -> ln M_i + c``, ``ln F_{ij} -> ln F_{ij} + c``), regularized only by
-        the Gaussian prior ``prior_sd``. Pass ``include_masses=False`` to hold
-        ``log_masses`` fixed and sample only the ``n_pairs`` gauge-free ``log_sym_fluxes``.
+        and ``log_sym_fluxes`` (shape ``(n_pairs,)``) are returned, preserving all
+        ``(n_boxes - 1) + n_pairs`` physical reversible degrees of freedom while
+        regularizing the 1D zero-Fisher global mass–flux scale direction
+        ``(1_{n_boxes}, 1_{n_pairs})`` (``ln M_i -> ln M_i + c``,
+        ``ln F_{ij} -> ln F_{ij} + c``) via the Gaussian prior ``prior_sd``. Pass
+        ``include_masses=False`` to hold all reservoir inventories and all
+        ``n_boxes - 1`` mass ratios ``M_i / M_j`` fixed so only the ``n_pairs``
+        symmetric fluxes vary.
         """
         from .likelihood import ParamSpec
 
@@ -2476,14 +2497,9 @@ class OpenCBM(CarbonBoxModel):
         super().__init__(
             topology,
             OpenChart(
-                topology,
-                log_rates_free,
-                log_total_mass,
-                log_sink_rates,
-                open_box_indices=open_box_indices,
-                prod_weights=pw,
-                tie_matrix=tie_matrix,
-                symmetric_edge_groups=symmetric_edge_groups,
+                topology, log_rates_free, log_total_mass, log_sink_rates,
+                open_box_indices=open_box_indices, prod_weights=pw,
+                tie_matrix=tie_matrix, symmetric_edge_groups=symmetric_edge_groups,
             ),
             decay_rate=decay_rate,
         )
