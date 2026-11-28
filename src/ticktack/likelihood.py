@@ -28,6 +28,7 @@ Implements the full Bayesian parameter infrastructure:
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Any, Literal, NamedTuple
 
@@ -38,9 +39,16 @@ import jax.scipy.linalg as jsl
 import numpy as np
 import optimistix as optx
 import zodiax as zdx
+import zodiax.base as _zdx_base
 from jax.typing import ArrayLike
 
-from ._utils import _concrete, _safe_psd_root, _sigma_with_jitter
+from ._utils import (
+    _concrete,
+    _concrete_f64_array,
+    _concrete_scalar_f64,
+    _safe_psd_root,
+    _sigma_with_jitter,
+)
 from .cbm import CarbonBoxModel
 from .data import Dataset
 from .fields import (
@@ -92,22 +100,282 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _BIJECTOR_TYPES = Literal["identity", "exp", "softplus", "sigmoid"]
+_VALID_BIJECTORS = ("identity", "exp", "softplus", "sigmoid")
+_VALID_OFFSET_MODES = ("hierarchical", "per_series", "shared", "none")
+_VALID_WHITEN_METHODS = ("cholesky", "qr", "rank_one")
+_SUBNORMAL_MIN = math.ldexp(1.0, -1074)
+_FLOAT64_TINY = float(np.finfo(np.float64).tiny)
+# 2^54 * DBL_MIN (~4.01e-292): any FTZ flush of subnormal lo_s/hi_s perturbs gaps >= this by < 0.5 ulp.
+_FTZ_SAFE_GAP = math.ldexp(_FLOAT64_TINY, 54)
+# Detect once whether the active XLA backend preserves float64 subnormals (x86_64) or sets FTZ (aarch64).
+_XLA_TINY = (
+    _SUBNORMAL_MIN
+    if float(jnp.exp(jnp.asarray(-710.0, dtype=jnp.float64))) > 0.0
+    else _FLOAT64_TINY
+)
+_XLA_RECIP_MIN = 6.0e-309 if _XLA_TINY < _FLOAT64_TINY else _FLOAT64_TINY
+_PARAMSPEC_SET_FIELDS = frozenset({"path", "bijector", "prior_mean", "prior_sd", "low", "high"})
+_LMCFG_SET_FIELDS = frozenset(
+    {
+        "offset_mode", "global_prior_mean", "global_prior_sd", "lab_prior_sd", "solar_prior_sd",
+        "trend_prior_sd", "marginalize_solar", "marginalize_trend", "marginalize_gp",
+        "marginalize_field", "n_gp_modes", "include_gp_initial_cov", "include_field_initial_cov",
+        "whiten_method", "dct_operator",
+    }
+)
+_ZDX_BINARY_OPS: dict[str, Any] = {
+    "add": lambda a, b: a + b,
+    "multiply": lambda a, b: a * b,
+    "divide": lambda a, b: a / b,
+    "power": lambda a, b: a**b,
+    "min": lambda a, b: (
+        jnp.minimum(a, b)
+        if isinstance(a, jax.Array) or isinstance(b, jax.Array)
+        else np.minimum(a, b)
+    ),
+    "max": lambda a, b: (
+        jnp.maximum(a, b)
+        if isinstance(a, jax.Array) or isinstance(b, jax.Array)
+        else np.maximum(a, b)
+    ),
+}
 
 
-class ParamSpec(eqx.Module):
+def _validate_choice(val: Any, allowed: tuple[str, ...], name: str, owner: str) -> str:
+    if val not in allowed:
+        raise ValueError(f"{owner}: {name} must be one of {allowed}; got {val!r}.")
+    return str(val)
+
+
+def _check_lmcfg_sd(
+    val: Any, name: str, *, allow_zero: bool = False, allow_inf: bool = False
+) -> float:
+    if val is None and allow_inf:
+        return math.inf
+    v = _concrete_scalar_f64(val, name, owner="LinearMarginalConfig")
+    lo_ok = (v >= 0.0) if allow_zero else (v > 0.0)
+    if math.isnan(v) or not lo_ok or (not allow_inf and not math.isfinite(v)):
+        raise ValueError(f"LinearMarginalConfig: invalid {name}={val!r}.")
+    return v
+
+
+def _partition_zdx_updates(
+    parameters: Any, values: Any, updates: dict[str, Any]
+) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
+    """Partition ``zdx.Base.set`` inputs into ``(top_level_dict, nested_path_pairs)``."""
+    params_norm, vals_norm = _zdx_base._normalise_mutation_inputs(
+        parameters, values, updates=updates, method_name="set"
+    )
+    if vals_norm is None:
+        vals_norm = [None]
+        if isinstance(params_norm, str):
+            params_norm = [params_norm]
+    paths, resolved_vals = _zdx_base._format(params_norm, vals_norm)
+    top_level: dict[str, Any] = {}
+    nested: list[tuple[str, Any]] = []
+    for parts, val in zip(paths, resolved_vals):
+        if len(parts) == 1:
+            top_level[parts[0]] = val
+        else:
+            nested.append((".".join(parts), val))
+    return top_level, nested
+
+
+class _ValidatedZodiaxBase(zdx.Base):
+    """``zodiax.Base`` subclass routing arithmetic/min/max updates through validated ``.set``."""
+
+    def _apply_zdx_op(
+        self, method: str, parameters: Any, values: Any, updates: dict[str, Any]
+    ) -> Any:
+        p_norm, v_norm = _zdx_base._normalise_mutation_inputs(
+            parameters, values, updates=updates, method_name=method, require_values=True
+        )
+        paths, vals = _zdx_base._format(p_norm, v_norm)
+        op = _ZDX_BINARY_OPS[method]
+        acc: dict[str, Any] = {}
+        for parts, val in zip(paths, vals):
+            key = ".".join(parts)
+            cur = acc[key] if key in acc else self.get(key, to_array=False)
+            acc[key] = op(cur, val)
+        return self.set(acc)
+
+    def add(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> Any:
+        return self._apply_zdx_op("add", parameters, values, updates)
+
+    def multiply(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> Any:
+        return self._apply_zdx_op("multiply", parameters, values, updates)
+
+    def divide(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> Any:
+        return self._apply_zdx_op("divide", parameters, values, updates)
+
+    def power(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> Any:
+        return self._apply_zdx_op("power", parameters, values, updates)
+
+    def min(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> Any:
+        return self._apply_zdx_op("min", parameters, values, updates)
+
+    def max(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> Any:
+        return self._apply_zdx_op("max", parameters, values, updates)
+
+
+def _sigmoid_scale(low: float, high: float) -> tuple[int, int, int, float, float, float]:
+    """Return ``(exp_scale, exp_a, exp_b, lo_s, hi_s, span_s)`` rescaled by ``2**-exp_scale``."""
+    _, frexp_e = math.frexp(max(abs(low), abs(high)))
+    exp_scale = frexp_e - 1
+    exp_a = exp_scale // 2
+    exp_b = exp_scale - exp_a
+    s_inv_a = math.ldexp(1.0, -exp_a)
+    s_inv_b = math.ldexp(1.0, -exp_b)
+    lo_s = (low * s_inv_a) * s_inv_b
+    hi_s = (high * s_inv_a) * s_inv_b
+    return exp_scale, exp_a, exp_b, lo_s, hi_s, hi_s - lo_s
+
+
+def _sigmoid_endpoint_gaps(
+    t_arr: ArrayLike, low: float, high: float, xp: Any
+) -> tuple[int, int, int, float, float, float, Any, Any, Any]:
+    """Return rescaled interval metadata and endpoint gaps ``(t_s - lo_s, hi_s - t_s)``."""
+    exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
+    t_in = xp.asarray(t_arr, dtype=np.float64)
+    if exp_scale < 0:
+        cap = (8.0 * math.ldexp(1.0, exp_a)) * math.ldexp(1.0, exp_b)
+        t_in = xp.clip(t_in, -cap, cap)
+    s_inv_a = math.ldexp(1.0, -exp_a)
+    s_inv_b = math.ldexp(1.0, -exp_b)
+    t_s = (t_in * s_inv_a) * s_inv_b
+    return exp_scale, exp_a, exp_b, lo_s, hi_s, span_s, t_s, t_s - lo_s, hi_s - t_s
+
+
+def _sigmoid_logit_xp(theta: ArrayLike, low: float, high: float, xp: Any) -> Any:
+    """Unit-invariant logit ``ln((theta - low) / (high - theta))`` on ``(low, high)``."""
+    exp_scale, _, _, lo_s, hi_s, span_s, t_s, raw_lo, raw_hi = _sigmoid_endpoint_gaps(
+        theta, low, high, xp
+    )
+    t_arr = xp.asarray(theta, dtype=np.float64)
+    floor = _SUBNORMAL_MIN if xp is np else _XLA_TINY
+    d_lo = xp.clip(raw_lo, floor, span_s)
+    d_hi = xp.clip(raw_hi, floor, span_s)
+    log_d_lo = xp.log(d_lo)
+    log_d_hi = xp.log(d_hi)
+    # When exp_scale > 0, 2^-exp_scale can underflow small gaps or flush subnormal lo_s/hi_s under FTZ.
+    if exp_scale > 0:
+        shift_ln = exp_scale * math.log(2.0)
+        if abs(low) < 1e290:
+            d_lo_u = xp.clip(xp.clip(t_arr, low, min(high, 1e300)) - low, floor, 1e300)
+            log_d_lo = xp.where(raw_lo < _FTZ_SAFE_GAP, xp.log(d_lo_u) - shift_ln, log_d_lo)
+        if abs(high) < 1e290:
+            d_hi_u = xp.clip(high - xp.clip(t_arr, max(low, -1e300), high), floor, 1e300)
+            log_d_hi = xp.where(raw_hi < _FTZ_SAFE_GAP, xp.log(d_hi_u) - shift_ln, log_d_hi)
+    # Near the midpoint, log(d_lo) - log(d_hi) cancels; evaluate log1p((d_lo - d_hi) / d_hi).
+    near_mid = (
+        (raw_lo > _FLOAT64_TINY) & (raw_hi > _FLOAT64_TINY) & (xp.abs(d_lo - d_hi) <= 0.5 * d_hi)
+    )
+    t_mid = xp.clip(t_s, lo_s, hi_s)
+    numer = (2.0 * t_mid - (lo_s + hi_s)) if (low < 0.0 < high) else (d_lo - d_hi)
+    safe_d_hi = xp.where(near_mid, d_hi, 1.0)
+    return xp.where(
+        near_mid, xp.log1p(xp.where(near_mid, numer / safe_d_hi, 0.0)), log_d_lo - log_d_hi
+    )
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
+def _sigmoid_unconstrain(t_arr: jax.Array, low: float, high: float) -> jax.Array:
+    return _sigmoid_logit_xp(t_arr, low, high, jnp)
+
+
+@_sigmoid_unconstrain.defjvp
+def _sigmoid_unconstrain_jvp(
+    low: float, high: float, primals: tuple[jax.Array], tangents: tuple[jax.Array]
+) -> tuple[jax.Array, jax.Array]:
+    (t_arr,), (t_dot,) = primals, tangents
+    exp_scale, exp_a, exp_b, _, _, span_s, _, raw_lo, raw_hi = _sigmoid_endpoint_gaps(
+        t_arr, low, high, jnp
+    )
+    inside = (t_arr > low) & (t_arr < high)
+    s_inv_a = math.ldexp(1.0, -exp_a)
+    s_inv_b = math.ldexp(1.0, -exp_b)
+    scaled_floor = max(_XLA_RECIP_MIN, math.ldexp(_XLA_RECIP_MIN, -exp_scale))
+    d_lo = jnp.maximum(raw_lo, scaled_floor)
+    d_hi = jnp.maximum(raw_hi, scaled_floor)
+    if exp_scale > 0:
+        term_lo = jnp.where(raw_lo >= scaled_floor, ((1.0 / d_lo) * s_inv_a) * s_inv_b, 0.0)
+        term_hi = jnp.where(raw_hi >= scaled_floor, ((1.0 / d_hi) * s_inv_a) * s_inv_b, 0.0)
+        if abs(low) < 1e290:
+            raw_lo_u = jnp.clip(t_arr, low, min(high, 1e300)) - low
+            d_lo_u = jnp.clip(raw_lo_u, _XLA_RECIP_MIN, 1e300)
+            term_lo = jnp.where(
+                raw_lo >= _FTZ_SAFE_GAP,
+                term_lo,
+                jnp.where(raw_lo_u >= _XLA_RECIP_MIN, 1.0 / d_lo_u, 0.0),
+            )
+        if abs(high) < 1e290:
+            raw_hi_u = high - jnp.clip(t_arr, max(low, -1e300), high)
+            d_hi_u = jnp.clip(raw_hi_u, _XLA_RECIP_MIN, 1e300)
+            term_hi = jnp.where(
+                raw_hi >= _FTZ_SAFE_GAP,
+                term_hi,
+                jnp.where(raw_hi_u >= _XLA_RECIP_MIN, 1.0 / d_hi_u, 0.0),
+            )
+        both_norm = (raw_lo >= _FTZ_SAFE_GAP) & (raw_hi >= _FTZ_SAFE_GAP)
+        sum_norm = ((1.0 / d_lo + 1.0 / d_hi) * s_inv_a) * s_inv_b
+        deriv = jnp.where(inside, jnp.where(both_norm, sum_norm, term_lo + term_hi), 0.0)
+    else:
+        ok = inside & (raw_lo >= scaled_floor) & (raw_hi >= scaled_floor)
+        deriv = (jnp.where(ok, 1.0 / d_lo + 1.0 / d_hi, 0.0) * s_inv_a) * s_inv_b
+    deriv = jnp.where(jnp.isfinite(deriv), deriv, 0.0)
+    return _sigmoid_unconstrain(t_arr, low, high), deriv * t_dot
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
+def _sigmoid_constrain(u_arr: jax.Array, low: float, high: float) -> jax.Array:
+    exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
+    lo = jnp.asarray(lo_s)
+    hi = jnp.asarray(hi_s)
+    span = jnp.asarray(span_s)
+    s_a = math.ldexp(1.0, exp_a)
+    s_b = math.ldexp(1.0, exp_b)
+    sig_pos = jnp.where(u_arr < -37.0, jnp.exp(u_arr), jax.nn.sigmoid(u_arr))
+    sig_neg = jnp.where(u_arr > 37.0, jnp.exp(-u_arr), jax.nn.sigmoid(-u_arr))
+    tails_s = jnp.where(u_arr < 0.0, lo + span * sig_pos, hi - span * sig_neg)
+    tails = (tails_s * s_a) * s_b
+    if exp_scale >= 0:
+        log_span = math.log(span_s) + exp_scale * math.log(2.0)
+        deep_lo = low + jnp.exp(jnp.minimum(log_span + u_arr, 709.0))
+        deep_hi = high - jnp.exp(jnp.minimum(log_span - u_arr, 709.0))
+        tails = jnp.where(u_arr < -37.0, deep_lo, jnp.where(u_arr > 37.0, deep_hi, tails))
+    if low < 0.0 < high:
+        mid_s = 0.5 * (lo + hi) + (0.5 * span) * jnp.tanh(0.5 * jnp.clip(u_arr, -2.0, 2.0))
+        return jnp.where(jnp.abs(u_arr) <= 1.0, (mid_s * s_a) * s_b, tails)
+    return tails
+
+
+@_sigmoid_constrain.defjvp
+def _sigmoid_constrain_jvp(
+    low: float, high: float, primals: tuple[jax.Array], tangents: tuple[jax.Array]
+) -> tuple[jax.Array, jax.Array]:
+    (u_arr,), (u_dot,) = primals, tangents
+    exp_scale, _, _, _, _, span_s = _sigmoid_scale(low, high)
+    log_span = math.log(span_s) + exp_scale * math.log(2.0)
+    deriv = jnp.exp(log_span - jax.nn.softplus(-u_arr) - jax.nn.softplus(u_arr))
+    return _sigmoid_constrain(u_arr, low, high), deriv * u_dot
+
+
+class ParamSpec(_ValidatedZodiaxBase):
     """Specification for a parameter leaf (scalar or array) with a smooth bijector.
 
     Maps elementwise between unconstrained real values ``u`` and constrained
     physical values ``theta`` via a differentiable bijection:
 
-    * ``"identity"``: ``theta = u`` (unbounded reals).
-    * ``"exp"``: ``theta = exp(u)`` (strictly positive quantities).
+    * ``"identity"``: ``theta = u`` (unbounded reals; see :meth:`normal`).
+    * ``"exp"``: ``theta = exp(u)`` (strictly positive quantities; see :meth:`lognormal`).
     * ``"softplus"``: ``theta = log(1 + exp(u)) + 1e-6`` (soft positive).
-    * ``"sigmoid"``: ``theta = low + (high - low) * sigmoid(u)`` (bounded).
+    * ``"sigmoid"``: ``theta = low + (high - low) * sigmoid(u)`` (bounded; see :meth:`bounded`).
 
-    The Gaussian prior ``N(prior_mean, prior_sd^2)`` is specified directly in
+    The Gaussian prior ``N(prior_mean, prior_sd^2)`` is specified in
     unconstrained ``u`` space so that ``int exp(log_prior_unconstrained(u)) du = 1``
-    identically (essential for calibrated SMC evidence estimation).
+    identically (essential for calibrated SMC evidence estimation). Prefer the
+    physical-unit constructors :meth:`normal`, :meth:`lognormal`, and
+    :meth:`bounded` over manual unconstrained ``prior_mean`` offsets.
     """
 
     path: str = eqx.field(static=True)
@@ -125,48 +393,246 @@ class ParamSpec(eqx.Module):
         prior_mean: ArrayLike = 0.0,
         prior_sd: ArrayLike = 10.0,
         *,
-        low: float = 0.0,
-        high: float = 1.0,
+        low: ArrayLike = 0.0,
+        high: ArrayLike = 1.0,
     ) -> None:
-        if bijector not in ("identity", "exp", "softplus", "sigmoid"):
+        owner = f"ParamSpec({path!r})"
+        bij = _validate_choice(bijector, _VALID_BIJECTORS, "bijector", owner)
+        low_f = _concrete_scalar_f64(low, "low", owner=owner)
+        high_f = _concrete_scalar_f64(high, "high", owner=owner)
+        if not (math.isfinite(low_f) and math.isfinite(high_f)):
             raise ValueError(
-                f"bijector must be 'identity', 'exp', 'softplus', or 'sigmoid'; got {bijector!r}."
+                f"{owner}: low and high must be finite; got low={low!r}, high={high!r}."
             )
-        if bijector == "sigmoid" and not (float(high) > float(low)):
+        if bij == "sigmoid" and not (high_f > low_f):
             raise ValueError(
-                f"sigmoid bijector requires high > low; got low={low}, high={high}."
+                f"{owner}: sigmoid requires low < high; got low={low!r}, high={high!r}."
             )
-        pm_np = np.asarray(prior_mean, dtype=np.float64)
-        ps_np = np.maximum(np.asarray(prior_sd, dtype=np.float64), 1e-30)
+        pm_np = _concrete_f64_array(prior_mean, "prior_mean", owner=owner)
+        ps_np = _concrete_f64_array(prior_sd, "prior_sd", owner=owner)
+        if not np.all(np.isfinite(pm_np)):
+            raise ValueError(f"{owner}: prior_mean must be finite; got {prior_mean!r}.")
+        if not np.all(np.isfinite(ps_np)) or np.any(ps_np <= 0.0):
+            raise ValueError(f"{owner}: prior_sd must be finite and > 0; got {prior_sd!r}.")
         b_shape = np.broadcast_shapes(pm_np.shape, ps_np.shape)
         pm_b = np.broadcast_to(pm_np, b_shape)
         ps_b = np.broadcast_to(ps_np, b_shape)
 
         self.path = str(path)
-        self.bijector = str(bijector)
+        self.bijector = bij
         self._prior_shape = tuple(int(s) for s in b_shape)
         self._prior_mean_tuple = tuple(float(x) for x in pm_b.reshape(-1))
         self._prior_sd_tuple = tuple(float(x) for x in ps_b.reshape(-1))
-        self.low = float(low)
-        self.high = float(high)
+        self.low = low_f
+        self.high = high_f
+
+    @classmethod
+    def normal(cls, path: str, mean: ArrayLike = 0.0, sd: ArrayLike = 1.0) -> ParamSpec:
+        """Construct a Gaussian prior directly in physical units (identity bijector).
+
+        Places ``theta = u ~ N(mean, sd^2)`` on an unbounded scalar or array
+        model leaf so ``spec.constrain(spec.prior_mean) == mean`` with zero
+        Jacobian distortion.
+
+        Parameters
+        ----------
+        path : str
+            ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.t_start"``).
+        mean : ArrayLike, default 0.0
+            Physical prior mean (scalar or array broadcastable to the target leaf),
+            in the leaf's native physical units (e.g. calendar years ``yr`` for
+            ``t_start``).
+        sd : ArrayLike, default 1.0
+            Physical ``1 sigma`` prior standard deviation (finite and ``> 0``),
+            in the same units as ``mean``.
+
+        Returns
+        -------
+        ParamSpec
+            Specification with ``bijector="identity"``, ``prior_mean=mean``, and
+            ``prior_sd=sd``.
+
+        Examples
+        --------
+        >>> spec = ParamSpec.normal("production.spike.t_start", mean=774.5, sd=0.5)
+        >>> float(spec.constrain(spec.prior_mean))
+        774.5
+        """
+        owner = f"ParamSpec.normal({path!r})"
+        mean_np = _concrete_f64_array(mean, "mean", owner=owner)
+        sd_np = _concrete_f64_array(sd, "sd", owner=owner)
+        if not np.all(np.isfinite(mean_np)):
+            raise ValueError(f"{owner}: mean must be finite; got {mean!r}.")
+        if not np.all(np.isfinite(sd_np)) or np.any(sd_np <= 0.0):
+            raise ValueError(
+                f"{owner}: sd must be finite and strictly positive (> 0); got {sd!r}."
+            )
+        return cls(path, bijector="identity", prior_mean=mean_np, prior_sd=sd_np)
+
+    @classmethod
+    def lognormal(cls, path: str, median: ArrayLike, sigma_log: ArrayLike) -> ParamSpec:
+        """Construct a strictly positive log-normal prior from its physical median.
+
+        Places ``u = ln(theta) ~ N(ln(median), sigma_log^2)`` under the
+        exponential bijector ``theta = exp(u)``, so the induced physical prior
+        has median ``median`` (``spec.constrain(spec.prior_mean) == median`` to
+        float64 precision) and multiplicative ``1 sigma`` central 68% interval
+        ``[median * exp(-sigma_log), median * exp(+sigma_log)]``. Supports both
+        scalar and ND array leaves.
+
+        Parameters
+        ----------
+        path : str
+            ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.fluence"``).
+        median : ArrayLike
+            Strictly positive physical prior median (``> 0``), in the leaf's
+            physical units (e.g. ``atoms cm^-2 s^-1 yr`` or ``q_0 yr`` for
+            ``MiyakeSpike.fluence``).
+        sigma_log : ArrayLike
+            Log-space standard deviation ``sigma_log > 0`` (dimensionless natural-log
+            units; e.g. ``0.5`` gives a factor ``exp(0.5) ~ 1.65`` ``1 sigma`` spread).
+
+        Returns
+        -------
+        ParamSpec
+            Specification with ``bijector="exp"``, ``prior_mean=ln(median)``, and
+            ``prior_sd=sigma_log``.
+
+        Examples
+        --------
+        >>> spec = ParamSpec.lognormal("production.spike.fluence", median=6.5, sigma_log=0.5)
+        >>> round(float(spec.constrain(spec.prior_mean)), 12)
+        6.5
+        """
+        owner = f"ParamSpec.lognormal({path!r})"
+        med_np = _concrete_f64_array(median, "median", owner=owner)
+        sig_np = _concrete_f64_array(sigma_log, "sigma_log", owner=owner)
+        if not np.all(np.isfinite(med_np)) or np.any(med_np <= 0.0):
+            raise ValueError(
+                f"{owner}: median must be finite and strictly positive (> 0); got {median!r}."
+            )
+        if not np.all(np.isfinite(sig_np)) or np.any(sig_np <= 0.0):
+            raise ValueError(
+                f"{owner}: sigma_log must be finite and strictly positive (> 0); "
+                f"got {sigma_log!r}."
+            )
+        return cls(path, bijector="exp", prior_mean=np.log(med_np), prior_sd=sig_np)
+
+    @classmethod
+    def bounded(
+        cls,
+        path: str,
+        low: ArrayLike,
+        high: ArrayLike,
+        *,
+        median: ArrayLike | None = None,
+        logit_sd: ArrayLike = 1.2,
+    ) -> ParamSpec:
+        """Construct a logit-normal prior on ``(low, high)`` in physical units.
+
+        Maps ``u ~ N(u_0, logit_sd^2)`` through ``theta = low + (high - low) * sigmoid(u)``.
+        When ``median`` is omitted, ``u_0 = 0`` centres the prior median at the
+        interval midpoint ``0.5 * (low + high)``. When ``median`` is supplied,
+        ``u_0`` is set to the logit of ``(median - low) / (high - low)`` so
+        ``spec.constrain(spec.prior_mean) == median`` across narrow and wide
+        intervals.
+
+        Choosing ``logit_sd <= sqrt(2)`` (``~1.414``; default ``1.2``) guarantees
+        that the physical density ``p_theta(theta)`` has a single peak for every
+        ``median`` in ``(low, high)``; larger ``logit_sd > sqrt(2)`` becomes
+        bimodal when ``median`` is near the midpoint, pushing prior mass toward
+        both bounds.
+
+        Parameters
+        ----------
+        path : str
+            ``zodiax`` dot-separated parameter path (e.g. ``"production.spike.duration"``).
+        low, high : ArrayLike
+            Finite scalar lower and upper physical bounds satisfying ``low < high``
+            (e.g. ``0.01`` and ``2.0`` in ``yr`` for a sharp Miyake spike duration).
+        median : ArrayLike, optional
+            Optional physical prior median strictly inside ``(low, high)``
+            (scalar or array). Defaults to ``None`` (midpoint ``0.5 * (low + high)``).
+        logit_sd : ArrayLike, default 1.2
+            Unconstrained logit-space standard deviation (``> 0``; ``<= sqrt(2)``
+            guarantees a unimodal physical density on ``(low, high)``).
+
+        Returns
+        -------
+        ParamSpec
+            Specification with ``bijector="sigmoid"``, bounds ``(low, high)``,
+            logit ``prior_mean``, and ``prior_sd=logit_sd``.
+
+        Examples
+        --------
+        >>> spec = ParamSpec.bounded("production.spike.duration", 0.01, 2.0, median=0.08)
+        >>> round(float(spec.constrain(spec.prior_mean)), 12)
+        0.08
+        """
+        owner = f"ParamSpec.bounded({path!r})"
+        low_f = _concrete_scalar_f64(low, "low", owner=owner)
+        high_f = _concrete_scalar_f64(high, "high", owner=owner)
+        if not (math.isfinite(low_f) and math.isfinite(high_f) and high_f > low_f):
+            raise ValueError(
+                f"{owner}: requires finite low < high; got low={low!r}, high={high!r}."
+            )
+        lsd_np = _concrete_f64_array(logit_sd, "logit_sd", owner=owner)
+        if not np.all(np.isfinite(lsd_np)) or np.any(lsd_np <= 0.0):
+            raise ValueError(
+                f"{owner}: logit_sd must be finite and strictly positive (> 0); "
+                f"got {logit_sd!r}."
+            )
+        if median is None:
+            pm: ArrayLike = 0.0
+        else:
+            med_np = _concrete_f64_array(median, "median", owner=owner)
+            if not np.all(np.isfinite(med_np)) or not np.all(
+                (med_np > low_f) & (med_np < high_f)
+            ):
+                raise ValueError(
+                    f"{owner}: median={median!r} must be finite and lie strictly "
+                    f"inside (low, high)=({low_f}, {high_f})."
+                )
+            pm = np.asarray(_sigmoid_logit_xp(med_np, low_f, high_f, np), dtype=np.float64)
+        return cls(path, bijector="sigmoid", prior_mean=pm, prior_sd=lsd_np, low=low_f, high=high_f)
+
+    def set(self, parameters: Any = None, values: Any = None, /, **updates: Any) -> ParamSpec:
+        """Return a validated copy of ``self`` with updated specification field(s).
+
+        Note that updating ``low`` or ``high`` preserves the stored unconstrained
+        ``prior_mean`` rather than recomputing a physical ``median``; use
+        :meth:`bounded` to re-centre on a physical median.
+        """
+        top_level, nested = _partition_zdx_updates(parameters, values, updates)
+        if nested:
+            raise AttributeError(f"ParamSpec has no nested settable attribute {nested[0][0]!r}.")
+        unknown = set(top_level) - _PARAMSPEC_SET_FIELDS
+        if unknown:
+            raise AttributeError(f"ParamSpec has no settable attribute {sorted(unknown)[0]!r}.")
+        pm_cur = np.asarray(self._prior_mean_tuple, dtype=np.float64).reshape(self._prior_shape)
+        ps_cur = np.asarray(self._prior_sd_tuple, dtype=np.float64).reshape(self._prior_shape)
+        return type(self)(
+            path=top_level.get("path", self.path),
+            bijector=top_level.get("bijector", self.bijector),
+            prior_mean=top_level.get("prior_mean", pm_cur),
+            prior_sd=top_level.get("prior_sd", ps_cur),
+            low=top_level.get("low", self.low),
+            high=top_level.get("high", self.high),
+        )
 
     @property
     def prior_mean(self) -> float | jax.Array:
         """Prior mean in unconstrained space (float for scalar specs, Array otherwise)."""
         if self._prior_shape == ():
             return self._prior_mean_tuple[0]
-        return jnp.asarray(self._prior_mean_tuple, dtype=jnp.float64).reshape(
-            self._prior_shape
-        )
+        return jnp.asarray(self._prior_mean_tuple, dtype=jnp.float64).reshape(self._prior_shape)
 
     @property
     def prior_sd(self) -> float | jax.Array:
         """Prior standard deviation in unconstrained space."""
         if self._prior_shape == ():
             return self._prior_sd_tuple[0]
-        return jnp.asarray(self._prior_sd_tuple, dtype=jnp.float64).reshape(
-            self._prior_shape
-        )
+        return jnp.asarray(self._prior_sd_tuple, dtype=jnp.float64).reshape(self._prior_shape)
 
     def constrain(self, u: ArrayLike) -> jax.Array:
         """Apply bijector: unconstrained ``u`` -> constrained ``theta``."""
@@ -178,9 +644,7 @@ class ParamSpec(eqx.Module):
         if self.bijector == "softplus":
             return jax.nn.softplus(u_arr) + 1e-6
         if self.bijector == "sigmoid":
-            lo = jnp.asarray(self.low, dtype=jnp.float64)
-            hi = jnp.asarray(self.high, dtype=jnp.float64)
-            return lo + (hi - lo) * jax.nn.sigmoid(u_arr)
+            return _sigmoid_constrain(u_arr, self.low, self.high)
         return u_arr
 
     def unconstrain(self, theta: ArrayLike) -> jax.Array:
@@ -198,10 +662,7 @@ class ParamSpec(eqx.Module):
                 jnp.log(jnp.expm1(safe_t)),
             )
         if self.bijector == "sigmoid":
-            lo = jnp.asarray(self.low, dtype=jnp.float64)
-            hi = jnp.asarray(self.high, dtype=jnp.float64)
-            p = jnp.clip((t_arr - lo) / (hi - lo), 1e-12, 1.0 - 1e-12)
-            return jnp.log(p) - jnp.log1p(-p)
+            return _sigmoid_unconstrain(t_arr, self.low, self.high)
         return t_arr
 
     def log_abs_det_jacobian(self, u: ArrayLike) -> jax.Array:
@@ -214,10 +675,11 @@ class ParamSpec(eqx.Module):
         if self.bijector == "softplus":
             return jnp.sum(-jax.nn.softplus(-u_arr))
         if self.bijector == "sigmoid":
-            span = math.log(self.high - self.low)
+            exp_scale, _, _, _, _, span_s = _sigmoid_scale(self.low, self.high)
+            log_span = math.log(span_s) + exp_scale * math.log(2.0)
             log_sig = -jax.nn.softplus(-u_arr)
             log_one_minus = -jax.nn.softplus(u_arr)
-            return jnp.sum(span + log_sig + log_one_minus)
+            return jnp.sum(log_span + log_sig + log_one_minus)
         return jnp.asarray(0.0, dtype=jnp.float64)
 
     def log_prior_unconstrained(self, u: ArrayLike) -> jax.Array:
@@ -411,7 +873,7 @@ class ParameterSpace(zdx.Base):
 # ---------------------------------------------------------------------------
 
 
-class LinearMarginalConfig(eqx.Module):
+class LinearMarginalConfig(_ValidatedZodiaxBase):
     """Configuration for analytical Gaussian marginalization of linear parameters."""
 
     offset_mode: str = eqx.field(static=True)
@@ -424,6 +886,7 @@ class LinearMarginalConfig(eqx.Module):
     marginalize_trend: bool = eqx.field(static=True)
     marginalize_gp: bool = eqx.field(static=True)
     marginalize_field: bool = eqx.field(static=True)
+    _marginalize_field_explicit: bool | None = eqx.field(static=True)
     n_gp_modes: int | None = eqx.field(static=True)
     include_gp_initial_cov: bool = eqx.field(static=True)
     include_field_initial_cov: bool = eqx.field(static=True)
@@ -451,11 +914,7 @@ class LinearMarginalConfig(eqx.Module):
         whiten_method: Literal["cholesky", "qr", "rank_one"] = "cholesky",
         dct_operator: DCTResponseOperator | LinearizedDCTOperator | None = None,
     ) -> None:
-        valid_offset_modes = ("hierarchical", "per_series", "shared", "none")
-        if offset_mode not in valid_offset_modes:
-            raise ValueError(
-                f"offset_mode must be one of {valid_offset_modes}; got {offset_mode!r}."
-            )
+        owner = "LinearMarginalConfig"
         if dct_operator is not None and not isinstance(
             dct_operator, (DCTResponseOperator, LinearizedDCTOperator)
         ):
@@ -463,25 +922,71 @@ class LinearMarginalConfig(eqx.Module):
                 "dct_operator must be a DCTResponseOperator, LinearizedDCTOperator, or None; "
                 f"got {type(dct_operator).__name__}."
             )
-        self.offset_mode = str(offset_mode)
-        self.global_prior_mean = float(global_prior_mean)
-        self.global_prior_sd = (
-            math.inf if global_prior_sd is None else float(global_prior_sd)
+        gpm = _concrete_scalar_f64(global_prior_mean, "global_prior_mean", owner=owner)
+        if not math.isfinite(gpm):
+            raise ValueError(f"{owner}: global_prior_mean must be finite; got {global_prior_mean!r}.")
+        if n_gp_modes is None:
+            modes_int: int | None = None
+        else:
+            nm = _concrete_scalar_f64(n_gp_modes, "n_gp_modes", owner=owner)
+            if not (math.isfinite(nm) and nm >= 1.0 and nm.is_integer()):
+                raise ValueError(
+                    f"{owner}: n_gp_modes must be None or an integer >= 1; got {n_gp_modes!r}."
+                )
+            modes_int = int(nm)
+        self.offset_mode = _validate_choice(offset_mode, _VALID_OFFSET_MODES, "offset_mode", owner)
+        self.whiten_method = _validate_choice(
+            whiten_method, _VALID_WHITEN_METHODS, "whiten_method", owner
         )
-        self.lab_prior_sd = math.inf if lab_prior_sd is None else float(lab_prior_sd)
-        self.solar_prior_sd = float(solar_prior_sd)
-        self.trend_prior_sd = float(trend_prior_sd)
+        self.global_prior_mean = gpm
+        self.global_prior_sd = _check_lmcfg_sd(global_prior_sd, "global_prior_sd", allow_inf=True)
+        self.lab_prior_sd = _check_lmcfg_sd(
+            lab_prior_sd, "lab_prior_sd", allow_zero=True, allow_inf=True
+        )
+        self.solar_prior_sd = _check_lmcfg_sd(solar_prior_sd, "solar_prior_sd")
+        self.trend_prior_sd = _check_lmcfg_sd(trend_prior_sd, "trend_prior_sd")
         self.marginalize_solar = bool(marginalize_solar)
         self.marginalize_trend = bool(marginalize_trend)
         self.marginalize_gp = bool(marginalize_gp)
-        self.marginalize_field = bool(
-            self.marginalize_gp if marginalize_field is None else marginalize_field
+        self._marginalize_field_explicit = (
+            None if marginalize_field is None else bool(marginalize_field)
         )
-        self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
+        self.marginalize_field = (
+            self.marginalize_gp
+            if self._marginalize_field_explicit is None
+            else self._marginalize_field_explicit
+        )
+        self.n_gp_modes = modes_int
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.include_field_initial_cov = bool(include_field_initial_cov)
-        self.whiten_method = str(whiten_method)
         self.dct_operator = dct_operator
+
+    def set(
+        self, parameters: Any = None, values: Any = None, /, **updates: Any
+    ) -> LinearMarginalConfig:
+        """Return a validated copy of ``self`` with updated config or ``dct_operator`` field(s)."""
+        top_level, nested = _partition_zdx_updates(parameters, values, updates)
+        unknown = set(top_level) - _LMCFG_SET_FIELDS
+        if unknown:
+            raise AttributeError(
+                f"LinearMarginalConfig has no settable attribute {sorted(unknown)[0]!r}."
+            )
+        for nest_path, _ in nested:
+            if nest_path.split(".", 1)[0] != "dct_operator":
+                raise AttributeError(f"LinearMarginalConfig cannot set nested path {nest_path!r}.")
+        if top_level:
+            kwargs = {name: getattr(self, name) for name in _LMCFG_SET_FIELDS}
+            kwargs["marginalize_field"] = self._marginalize_field_explicit
+            kwargs.update(top_level)
+            out = type(self)(**kwargs)
+        else:
+            out = self
+        for nest_path, nest_val in nested:
+            if out.dct_operator is None:
+                raise AttributeError(f"Cannot set {nest_path!r} when dct_operator is None.")
+            sub_path = nest_path.split(".", 1)[1]
+            out = eqx.tree_at(lambda c: c.dct_operator, out, out.dct_operator.set(sub_path, nest_val))
+        return out
 
 
 # ---------------------------------------------------------------------------

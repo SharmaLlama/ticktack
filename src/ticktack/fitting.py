@@ -78,11 +78,6 @@ class MAPResult(NamedTuple):
     method: str
     """Optimization method used."""
 
-    @property
-    def fitted_model(self) -> RadiocarbonModel:
-        """Fitted model at MAP (alias for :attr:`model`)."""
-        return self.model
-
 
 def _eval_log_posterior(
     u_vec: jax.Array,

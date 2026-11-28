@@ -65,10 +65,9 @@ print(f"NH-SH pre-spike gradient: {float(d14c_nh[0] - d14c_sh[0]):.2f} permil")
 
 ## 3. Semiparametric Miyake Inference (MAP, NUTS, & Tempered SMC)
 
-In `ticktack 2.0`, linear nuisance parameters – global Holocene baseline offset $\Delta_{\text{global}}$, per-series laboratory offsets $\delta_{\text{lab},s}$, 11-year solar quadrature coefficients, and causal Solin–Särkkä GP modes – are marginalized analytically via `LinearMarginalConfig`. Samplers only explore the low-dimensional nonlinear coordinates declared in `ParameterSpace`:
+In `ticktack 2.0`, linear nuisance parameters – global Holocene baseline offset $\Delta_{\text{global}}$, per-series laboratory offsets $\delta_{\text{lab},s}$, 11-year solar quadrature coefficients, and causal Solin–Särkkä GP modes – are marginalized analytically via `LinearMarginalConfig`. Samplers only explore the low-dimensional nonlinear coordinates declared in `ParameterSpace` (using `MiyakeSpike.param_specs` or the physical-unit constructors `ParamSpec.normal`, `ParamSpec.bounded`, and `ParamSpec.lognormal`):
 
 ```python
-import math
 import jax
 import tinygp.kernels as tk
 
@@ -80,11 +79,13 @@ prod_semi = tt.ProductionSum(
 )
 semi_model = tt.RadiocarbonModel(cbm_brehm, prod_semi)
 
-param_space = tt.ParameterSpace(semi_model, [
-    tt.ParamSpec("production.spike.t_start", "identity", prior_mean=774.4, prior_sd=0.4),
-    tt.ParamSpec("production.spike.duration", "sigmoid", prior_mean=-1.0, prior_sd=1.2, low=0.05, high=2.0),
-    tt.ParamSpec("production.spike.fluence", "exp", prior_mean=math.log(6.5), prior_sd=0.5),
-])
+param_space = tt.ParameterSpace(
+    semi_model,
+    semi_model.production.spike.param_specs(
+        t_start_sd=0.4,
+        duration_bounds=(0.05, 2.0),
+    ),
+)
 cfg = tt.LinearMarginalConfig(
     offset_mode="hierarchical",
     solar_prior_sd=0.25,
@@ -94,7 +95,7 @@ cfg = tt.LinearMarginalConfig(
 
 # 1. Constrained-space MAP optimization (includes bijector log-Jacobian)
 map_res = tt.fit_map(semi_model, dataset, param_space, cfg, method="BFGS", map_space="constrained")
-lp = tt.linear_posterior(map_res.fitted_model, dataset, cfg, hemisphere="north")
+lp = tt.linear_posterior(map_res.model, dataset, cfg, hemisphere="north")
 fl_map = float(map_res.theta_map["production.spike.fluence"])
 print(
     f"MAP t_start = {float(map_res.theta_map['production.spike.t_start']):.3f} CE | "

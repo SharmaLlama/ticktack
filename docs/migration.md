@@ -18,7 +18,7 @@ Beyond dramatic speedups – eliminating the 2000-year numerical burn-in on ever
 | Load a multi-series event | `MultiFitter` list of `SingleFitter` objects | `tt.Dataset.from_csvs(...)` or `tt.load_bundled_event("775CE")` |
 | Forward $\Delta^{14}\text{C}$ simulation | `cbm.run_burn_in(...)` + `cbm.run_production(...)` | `model = tt.RadiocarbonModel(cbm, production); model.predict_d14c(dataset)` or `model.predict_fine(t_grid)` |
 | Baseline / lab offset handling | Clamped to first 4 rings `np.mean(d14c[:4])` | Analytical Gaussian marginalization via `tt.LinearMarginalConfig(offset_mode="hierarchical")` |
-| Point optimization (MAP) | `scipy.optimize.minimize` finite-difference Nelder–Mead / Powell | `tt.fit_map(model, dataset, param_space, cfg, method="BFGS", map_space="constrained")` (exact `jax.grad`) |
+| Point optimization (MAP) | `scipy.optimize.minimize` finite-difference Nelder–Mead / Powell | `res = tt.fit_map(model, dataset, param_space, cfg, method="BFGS", map_space="constrained")` (exact `jax.grad`; fitted PyTree on `res.model`) |
 | Posterior MCMC sampling | Gradient-free `sf.MarkovChainSampler` (`emcee`) | `tt.sample_nuts(model, dataset, param_space, cfg)` (`NumPyro` NUTS, returns `arviz.InferenceData`) |
 | Bayesian evidence $\ln Z$ | Nested sampling via `dynesty` | `tt.sample_smc(...)` (`BlackJAX` adaptive tempered SMC with Lee–Whiteley SE) or `tt.log_evidence` (MacKay IFT) |
 
@@ -40,7 +40,6 @@ chain = sf.MarkovChainSampler(params, sf.log_joint_likelihood, burnin=500, produ
 **`ticktack 2.0`:**
 
 ```python
-import math
 import jax
 import ticktack as tt
 
@@ -60,10 +59,11 @@ production = tt.ProductionSum(
 )
 model = tt.RadiocarbonModel(cbm, production)
 
+# Or equivalently: model.production.spike.param_specs(t_start_sd=0.4)
 param_space = tt.ParameterSpace(model, [
-    tt.ParamSpec("production.spike.t_start", "identity", prior_mean=774.4, prior_sd=0.4),
-    tt.ParamSpec("production.spike.duration", "sigmoid", prior_mean=-1.0, prior_sd=1.2, low=0.05, high=2.0),
-    tt.ParamSpec("production.spike.fluence", "exp", prior_mean=math.log(6.5), prior_sd=0.5),
+    tt.ParamSpec.normal("production.spike.t_start", mean=774.4, sd=0.4),
+    tt.ParamSpec.bounded("production.spike.duration", 0.05, 2.0, median=0.35, logit_sd=1.2),
+    tt.ParamSpec.lognormal("production.spike.fluence", median=6.5, sigma_log=0.5),
 ])
 cfg = tt.LinearMarginalConfig(offset_mode="hierarchical", marginalize_solar=True)
 idata = tt.sample_nuts(model, dataset, param_space, cfg, rng_key=jax.random.PRNGKey(0))

@@ -93,7 +93,7 @@ def six_event_fits(brehm21_cbm: tt.CarbonBoxModel) -> dict[str, dict[str, object
             compute_laplace=False,
             compute_linear_posterior=False,
         )
-        lp = tt.linear_posterior(map_res.fitted_model, ds, cfg_gp)
+        lp = tt.linear_posterior(map_res.model, ds, cfg_gp)
         results[ev] = {
             "dataset": ds,
             "map_res": map_res,
@@ -481,7 +481,7 @@ class TestMacKayErrorScaleAndKalmanGPMarginal:
         fit_993 = six_event_fits["993CE"]
         ds_993: tt.Dataset = fit_993["dataset"]  # type: ignore[assignment]
         res_993: tt.MAPResult = fit_993["map_res"]  # type: ignore[assignment]
-        sp_993 = res_993.fitted_model.production.spike
+        sp_993 = res_993.model.production.spike
         sp_only_m = tt.RadiocarbonModel(
             brehm21_cbm,
             tt.ProductionSum(steady=tt.SteadyProduction(), spike=sp_993),

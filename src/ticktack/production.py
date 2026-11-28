@@ -11,7 +11,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import textwrap
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import equinox as eqx
 import jax
@@ -20,7 +20,11 @@ from jax.typing import ArrayLike
 import tinygp.kernels as tk
 import zodiax as zdx
 
+from ._utils import _concrete_scalar_f64
 from .constants import DEFAULT_Q_STD
+
+if TYPE_CHECKING:
+    from .likelihood import ParamSpec
 
 __all__ = [
     "solin_sarkka_eigenpairs",
@@ -619,6 +623,131 @@ class MiyakeSpike(ProductionTerm):
 
     def _default_slug_name(self) -> str:
         return "spike"
+
+    def param_specs(
+        self,
+        prefix: str = "production.spike",
+        *,
+        t_start_sd: float,
+        duration_bounds: tuple[float, float] = (0.05, 2.0),
+        duration_logit_sd: float = 1.2,
+        fluence_sigma_log: float = 0.5,
+        skewness_sd: float | None = None,
+    ) -> tuple[ParamSpec, ...]:
+        """Build physical-unit :class:`~ticktack.likelihood.ParamSpec` priors centred on ``self``.
+
+        Constructs prior specifications centred at the spike's current concrete
+        parameter values ``(self.t_start, self.duration, self.fluence)`` (plus
+        ``self.skewness`` when ``profile="skewgaussian"`` and ``skewness_sd`` is
+        provided) without manual unconstrained log or logit transforms:
+
+        * ``t_start``: :meth:`~ticktack.likelihood.ParamSpec.normal` with mean
+          ``self.t_start`` and standard deviation ``t_start_sd`` (in ``yr``).
+        * ``duration``: :meth:`~ticktack.likelihood.ParamSpec.bounded` on
+          ``duration_bounds`` (in ``yr``) with physical median
+          ``self.duration`` and logit spread ``duration_logit_sd``. For sharp
+          sub-seasonal Miyake events (e.g. ``self.duration = 0.05`` or ``0.02`` yr),
+          pass matching ``duration_bounds=(0.01, 2.0)``.
+        * ``fluence``: :meth:`~ticktack.likelihood.ParamSpec.lognormal` with
+          physical median ``self.fluence`` (in ``atoms cm^-2 s^-1 yr``, or
+          ``q_0 yr`` when :attr:`~ticktack.model.RadiocarbonModel.alpha_unit`
+          uses normalized production units) and log-space spread ``fluence_sigma_log``.
+        * ``skewness`` *(optional)*: :meth:`~ticktack.likelihood.ParamSpec.normal`
+          with mean ``self.skewness`` and standard deviation ``skewness_sd``
+          (dimensionless Azzalini shape parameter, only when ``profile="skewgaussian"``).
+
+        Always call ``param_specs`` on an initial pre-fit spike specification
+        rather than on an already-fitted model (do not write
+        ``map_res.model.production.spike.param_specs(...)``): centring the prior
+        on parameters estimated from the same dataset uses the data twice and
+        biases posterior uncertainties and model evidence.
+
+        Parameters
+        ----------
+        prefix : str, default "production.spike"
+            ``zodiax`` path prefix to this :class:`MiyakeSpike` inside a
+            :class:`~ticktack.model.RadiocarbonModel` (use ``"production"`` when
+            the spike is the sole production term rather than inside a
+            :class:`ProductionSum`, or ``""`` for bare leaf names).
+        t_start_sd : float
+            Required ``1 sigma`` Gaussian prior standard deviation on onset epoch
+            ``t_start`` in calendar years (``yr``, ``> 0``).
+        duration_bounds : tuple[float, float], default (0.05, 2.0)
+            Lower and upper physical bounds ``(low, high)`` in ``yr`` for FWHM
+            ``duration``. Must strictly bracket ``self.duration``.
+        duration_logit_sd : float, default 1.2
+            Logit-space prior standard deviation (``> 0``) on ``duration``.
+        fluence_sigma_log : float, default 0.5
+            Natural-log prior standard deviation (``> 0``) on ``fluence``.
+        skewness_sd : float or None, default None
+            Optional ``1 sigma`` Gaussian prior standard deviation (``> 0``) on
+            ``skewness`` when ``profile="skewgaussian"``. Leave ``None`` to hold
+            ``skewness`` fixed.
+
+        Returns
+        -------
+        tuple[ParamSpec, ...]
+            Tuple of 3 (or 4 when ``skewness_sd`` is set) :class:`~ticktack.likelihood.ParamSpec`
+            objects ready to pass to :class:`~ticktack.likelihood.ParameterSpace`.
+
+        Examples
+        --------
+        >>> import ticktack as tt
+        >>> cbm = tt.load_preset("Brehm21")
+        >>> prod = tt.ProductionSum(
+        ...     steady=tt.SteadyProduction(),
+        ...     spike=tt.MiyakeSpike(t_start=774.5, duration=0.08, fluence=6.5),
+        ... )
+        >>> model = tt.RadiocarbonModel(cbm, prod)
+        >>> ps = tt.ParameterSpace(
+        ...     model,
+        ...     model.production.spike.param_specs(
+        ...         t_start_sd=0.5,
+        ...         duration_bounds=(0.01, 2.0),
+        ...     ),
+        ... )
+        >>> ps.n_params
+        3
+        """
+        from .likelihood import ParamSpec
+
+        owner = "MiyakeSpike.param_specs"
+        stripped = str(prefix).strip().rstrip(".")
+        base = f"{stripped}." if stripped else ""
+        t0 = _concrete_scalar_f64(self.t_start, "t_start", owner=owner)
+        dur0 = _concrete_scalar_f64(self.duration, "duration", owner=owner)
+        fl0 = _concrete_scalar_f64(self.fluence, "fluence", owner=owner)
+        if len(duration_bounds) != 2:
+            raise ValueError(f"duration_bounds must be a (low, high) pair; got {duration_bounds!r}.")
+        d_lo = _concrete_scalar_f64(duration_bounds[0], "duration_bounds[0]", owner=owner)
+        d_hi = _concrete_scalar_f64(duration_bounds[1], "duration_bounds[1]", owner=owner)
+        if not (1e-9 <= d_lo < d_hi < math.inf):
+            raise ValueError(
+                "duration_bounds=(low, high) requires finite 1e-9 <= low < high in yr "
+                "(above the 1e-12 yr Dirac cutoff; e.g. (0.01, 2.0)); "
+                f"got ({duration_bounds[0]!r}, {duration_bounds[1]!r})."
+            )
+        if not (d_lo < dur0 < d_hi):
+            raise ValueError(
+                f"MiyakeSpike.duration={dur0} yr must lie strictly inside "
+                f"duration_bounds=({d_lo}, {d_hi}); pass matching "
+                "duration_bounds=(low, high) (e.g. duration_bounds=(0.01, 2.0) "
+                "for a sharp spike)."
+            )
+        specs: list[ParamSpec] = [
+            ParamSpec.normal(f"{base}t_start", mean=t0, sd=t_start_sd),
+            ParamSpec.bounded(f"{base}duration", d_lo, d_hi, median=dur0, logit_sd=duration_logit_sd),
+            ParamSpec.lognormal(f"{base}fluence", median=fl0, sigma_log=fluence_sigma_log),
+        ]
+        if skewness_sd is not None:
+            if self.profile != "skewgaussian":
+                raise ValueError(
+                    "skewness_sd is only valid when profile='skewgaussian'; "
+                    f"got profile={self.profile!r}."
+                )
+            sk0 = _concrete_scalar_f64(self.skewness, "skewness", owner=owner)
+            specs.append(ParamSpec.normal(f"{base}skewness", mean=sk0, sd=skewness_sd))
+        return tuple(specs)
 
     def unit_profile(self, u: jax.Array) -> jax.Array:
         """Dimensionless unit-area kernel ``phi_unit(u)`` for ``t = t_start + duration * u``."""
