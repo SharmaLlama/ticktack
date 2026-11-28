@@ -270,13 +270,16 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 float(spec_z.unconstrain(med_z)), float(spec_z.prior_mean), rtol=1e-13
             )
 
-        # Wide zero-straddling intervals near DBL_MAX (including [-1e308, 1e308]) and unit invariance
+        # Wide intervals near DBL_MAX (including zero-straddling and asymmetric near-endpoint medians)
         for lo_w, hi_w, med_w in (
             (-1e308, 1e308, -0.5e308),
             (-1e308, 1e308, 1e10),
             (-0.8e308, 0.8e308, 1e10),
             (-1.6e308, 0.1e308, -0.91e308),
             (-0.1e308, 1.6e308, 0.91e308),
+            (0.0, 1e308, 1e-20),
+            (-1e308, 0.0, -1e-20),
+            (0.0, 1e308, 0.1),
         ):
             spec_w = tt.ParamSpec.bounded("wide_z", lo_w, hi_w, median=med_w)
             lo_wd = Decimal.from_float(lo_w)
@@ -311,14 +314,23 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 assert math.isfinite(float(spec_w.unconstrain(t_wj)))
                 assert math.isfinite(float(jax.grad(spec_w.unconstrain)(t_wj)))
 
-        # Subnormal median in bounded and near-DBL_MIN tail u = -708 in constrain
+        # Subnormal median in bounded and near-DBL_MIN tail u = -708 round-trip + grad
         spec_sub = tt.ParamSpec.bounded("sub", -1.0, 1.0, median=1e-310)
         np.testing.assert_allclose(float(spec_sub.prior_mean), 2.0e-310, rtol=1e-12)
+        spec_sub01 = tt.ParamSpec.bounded("sub01", 0.0, 1.0, median=1e-310)
+        np.testing.assert_allclose(float(spec_sub01.prior_mean), math.log(1e-310), rtol=1e-12)
+        np.testing.assert_allclose(
+            float(spec_sub01.constrain(spec_sub01.prior_mean)), 1e-310, rtol=1e-12, atol=1e-308
+        )
         for hi_tail in (1.0, 2.0):
             spec_tail = tt.ParamSpec.bounded("tail", 0.0, hi_tail)
             th_tail = float(spec_tail.constrain(jnp.asarray(-708.0)))
             assert th_tail > 0.0
             np.testing.assert_allclose(th_tail, hi_tail * math.exp(-708.0), rtol=1e-12)
+            np.testing.assert_allclose(float(spec_tail.unconstrain(th_tail)), -708.0, rtol=1e-12)
+            g_tail = float(jax.grad(spec_tail.unconstrain)(jnp.asarray(th_tail)))
+            assert g_tail > 0.0
+            np.testing.assert_allclose(g_tail, 1.0 / th_tail + 1.0 / hi_tail, rtol=1e-12)
 
         base_u = float(tt.ParamSpec.bounded("ui", -1.35, 4.85, median=-0.37).prior_mean)
         for unit_scale in (1e-12, 1.0, 365.25, 1e12):
@@ -609,6 +621,23 @@ class TestZodiaxPyTreeAndJitCaching:
         cfg_op = cfg1.set("dct_operator", op)
         assert cfg_op.get("dct_operator", to_array=False) is op
         assert cfg_op.get("dct_operator.w_dct").shape == op.w_dct.shape
+        cfg_clamped = cfg_op.min("dct_operator.w_dct", 0.01).max("dct_operator.w_dct", -0.01)
+        assert isinstance(cfg_clamped.dct_operator.w_dct, jax.Array)
+        np.testing.assert_allclose(
+            np.asarray(cfg_clamped.dct_operator.w_dct),
+            np.clip(np.asarray(op.w_dct), -0.01, 0.01),
+        )
+        jit_clamp = jax.jit(
+            lambda cap: cfg_op.min("dct_operator.w_dct", cap)
+            .max("dct_operator.w_dct", -cap)
+            .dct_operator.w_dct
+        )
+        np.testing.assert_allclose(
+            np.asarray(jit_clamp(jnp.asarray(0.005))),
+            np.clip(np.asarray(op.w_dct), -0.005, 0.005),
+        )
+        g_cap = float(jax.grad(lambda cap: jnp.sum(jit_clamp(cap) ** 2))(jnp.asarray(1e-6)))
+        assert math.isfinite(g_cap) and g_cap >= 0.0
 
         # Mixed top-level static + nested PyTree leaf update in one .set(...) call
         mixed_cfg = cfg_op.set(
@@ -995,6 +1024,24 @@ class TestValidationErrors:
         cfg = tt.LinearMarginalConfig()
         with pytest.raises(ValueError, match="offset_mode"):
             cfg.set("offset_mode", "bad_mode")
+        with pytest.raises(ValueError, match="whiten_method"):
+            cfg.set("whiten_method", "typo")
+        with pytest.raises(ValueError, match="lab_prior_sd"):
+            cfg.multiply("lab_prior_sd", -1.0)
+        with pytest.raises(ValueError, match="lab_prior_sd"):
+            cfg.add("lab_prior_sd", -2.0)
+        with pytest.raises(ValueError, match="global_prior_sd"):
+            cfg.set("global_prior_sd", 0.0)
+        with pytest.raises(ValueError, match="solar_prior_sd"):
+            cfg.set("solar_prior_sd", 0.0)
+        with pytest.raises(ValueError, match="trend_prior_sd"):
+            cfg.set("trend_prior_sd", float("inf"))
+        with pytest.raises(ValueError, match="global_prior_mean"):
+            cfg.set("global_prior_mean", float("nan"))
+        with pytest.raises(ValueError, match="n_gp_modes"):
+            cfg.set("n_gp_modes", 0)
+        assert cfg.set("lab_prior_sd", 0.0).lab_prior_sd == 0.0
+        assert math.isinf(cfg.set("global_prior_sd", None).global_prior_sd)
         with pytest.raises(TypeError, match="dct_operator"):
             cfg.set("dct_operator", "not_an_operator")
         with pytest.raises(AttributeError, match="no settable attribute"):

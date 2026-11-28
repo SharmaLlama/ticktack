@@ -101,6 +101,10 @@ __all__ = [
 
 _BIJECTOR_TYPES = Literal["identity", "exp", "softplus", "sigmoid"]
 _VALID_BIJECTORS = ("identity", "exp", "softplus", "sigmoid")
+_VALID_OFFSET_MODES = ("hierarchical", "per_series", "shared", "none")
+_VALID_WHITEN_METHODS = ("cholesky", "qr", "rank_one")
+_SUBNORMAL_MIN = math.ldexp(1.0, -1074)
+_FLOAT64_TINY = float(np.finfo(np.float64).tiny)
 _PARAMSPEC_SET_FIELDS = frozenset({"path", "bijector", "prior_mean", "prior_sd", "low", "high"})
 _LMCFG_SET_FIELDS = frozenset(
     {
@@ -115,9 +119,35 @@ _ZDX_BINARY_OPS: dict[str, Any] = {
     "multiply": lambda a, b: a * b,
     "divide": lambda a, b: a / b,
     "power": lambda a, b: a**b,
-    "min": np.minimum,
-    "max": np.maximum,
+    "min": lambda a, b: (
+        jnp.minimum(a, b)
+        if isinstance(a, jax.Array) or isinstance(b, jax.Array)
+        else np.minimum(a, b)
+    ),
+    "max": lambda a, b: (
+        jnp.maximum(a, b)
+        if isinstance(a, jax.Array) or isinstance(b, jax.Array)
+        else np.maximum(a, b)
+    ),
 }
+
+
+def _validate_choice(val: Any, allowed: tuple[str, ...], name: str, owner: str) -> str:
+    if val not in allowed:
+        raise ValueError(f"{owner}: {name} must be one of {allowed}; got {val!r}.")
+    return str(val)
+
+
+def _check_lmcfg_sd(
+    val: Any, name: str, *, allow_zero: bool = False, allow_inf: bool = False
+) -> float:
+    if val is None and allow_inf:
+        return math.inf
+    v = _concrete_scalar_f64(val, name, owner="LinearMarginalConfig")
+    lo_ok = (v >= 0.0) if allow_zero else (v > 0.0)
+    if math.isnan(v) or not lo_ok or (not allow_inf and not math.isfinite(v)):
+        raise ValueError(f"LinearMarginalConfig: invalid {name}={val!r}.")
+    return v
 
 
 def _partition_zdx_updates(
@@ -201,16 +231,28 @@ def _sigmoid_logit_xp(theta: ArrayLike, low: float, high: float, xp: Any) -> Any
         t_arr = xp.clip(t_arr, -cap, cap)
     t_s = (t_arr * math.ldexp(1.0, -exp_a)) * math.ldexp(1.0, -exp_b)
     lo, hi, span = xp.asarray(lo_s), xp.asarray(hi_s), xp.asarray(span_s)
-    floor = xp.maximum(1e-300 * span, np.finfo(np.float64).tiny)
+    floor = _SUBNORMAL_MIN if xp is np else _FLOAT64_TINY
     raw_lo, raw_hi = t_s - lo, hi - t_s
     d_lo, d_hi = xp.clip(raw_lo, floor, span), xp.clip(raw_hi, floor, span)
+    log_d_lo, log_d_hi = xp.log(d_lo), xp.log(d_hi)
+    # When exp_scale > 2, 2^-exp_scale can underflow small endpoint gaps (e.g. 1e-20 on (0, 1e308)).
+    if exp_scale > 2:
+        shift_ln, span_q = (exp_scale - 2) * math.log(2.0), 0.25 * high - 0.25 * low
+        d_lo_q = xp.clip(0.25 * t_arr - 0.25 * low, floor, span_q)
+        d_hi_q = xp.clip(0.25 * high - 0.25 * t_arr, floor, span_q)
+        log_d_lo = xp.where(raw_lo < _FLOAT64_TINY, xp.log(d_lo_q) - shift_ln, log_d_lo)
+        log_d_hi = xp.where(raw_hi < _FLOAT64_TINY, xp.log(d_hi_q) - shift_ln, log_d_hi)
     # Near the midpoint, log(d_lo) - log(d_hi) cancels; evaluate log1p((d_lo - d_hi) / d_hi).
-    near_mid = (raw_lo > floor) & (raw_hi > floor) & (xp.abs(d_lo - d_hi) <= 0.5 * d_hi)
+    near_mid = (
+        (raw_lo > _FLOAT64_TINY) & (raw_hi > _FLOAT64_TINY) & (xp.abs(d_lo - d_hi) <= 0.5 * d_hi)
+    )
     t_mid = xp.clip(t_s, lo, hi)
     # On zero-straddling intervals, 2*theta - (low + high) avoids cancellation as theta -> 0.
     numer = (2.0 * t_mid - (lo + hi)) if (low < 0.0 < high) else (d_lo - d_hi)
     safe_d_hi = xp.where(near_mid, d_hi, 1.0)
-    return xp.where(near_mid, xp.log1p(xp.where(near_mid, numer / safe_d_hi, 0.0)), xp.log(d_lo) - xp.log(d_hi))
+    return xp.where(
+        near_mid, xp.log1p(xp.where(near_mid, numer / safe_d_hi, 0.0)), log_d_lo - log_d_hi
+    )
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
@@ -224,33 +266,56 @@ def _sigmoid_unconstrain_jvp(
 ) -> tuple[jax.Array, jax.Array]:
     (t_arr,), (t_dot,) = primals, tangents
     exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
-    in_cap = jnp.ones_like(t_arr, dtype=bool)
-    t_in = t_arr
+    in_cap, t_in = jnp.ones_like(t_arr, dtype=bool), t_arr
     if exp_scale < 0:
         cap = (8.0 * math.ldexp(1.0, exp_a)) * math.ldexp(1.0, exp_b)
         in_cap, t_in = jnp.abs(t_arr) < cap, jnp.clip(t_arr, -cap, cap)
-    t_s = (t_in * math.ldexp(1.0, -exp_a)) * math.ldexp(1.0, -exp_b)
-    floor = max(1e-300 * span_s, float(np.finfo(np.float64).tiny))
+    s_inv_a, s_inv_b = math.ldexp(1.0, -exp_a), math.ldexp(1.0, -exp_b)
+    t_s = (t_in * s_inv_a) * s_inv_b
     raw_lo, raw_hi = t_s - lo_s, hi_s - t_s
-    d_lo, d_hi = jnp.clip(raw_lo, floor, span_s), jnp.clip(raw_hi, floor, span_s)
-    deriv_s = jnp.where(in_cap & (raw_lo > floor) & (raw_hi > floor), 1.0 / d_lo + 1.0 / d_hi, 0.0)
-    deriv = (deriv_s * math.ldexp(1.0, -exp_a)) * math.ldexp(1.0, -exp_b)
+    d_lo, d_hi = jnp.clip(raw_lo, _FLOAT64_TINY, span_s), jnp.clip(raw_hi, _FLOAT64_TINY, span_s)
+    if exp_scale > 2:
+        raw_lo_q, raw_hi_q = 0.25 * t_in - 0.25 * low, 0.25 * high - 0.25 * t_in
+        span_q = 0.25 * high - 0.25 * low
+        d_lo_q = jnp.clip(raw_lo_q, _FLOAT64_TINY, span_q)
+        d_hi_q = jnp.clip(raw_hi_q, _FLOAT64_TINY, span_q)
+        term_lo = jnp.where(
+            raw_lo >= _FLOAT64_TINY,
+            ((1.0 / d_lo) * s_inv_a) * s_inv_b,
+            jnp.where(raw_lo_q > _FLOAT64_TINY, 0.25 / d_lo_q, 0.0),
+        )
+        term_hi = jnp.where(
+            raw_hi >= _FLOAT64_TINY,
+            ((1.0 / d_hi) * s_inv_a) * s_inv_b,
+            jnp.where(raw_hi_q > _FLOAT64_TINY, 0.25 / d_hi_q, 0.0),
+        )
+        both_norm = (raw_lo >= _FLOAT64_TINY) & (raw_hi >= _FLOAT64_TINY)
+        sum_norm = ((1.0 / d_lo + 1.0 / d_hi) * s_inv_a) * s_inv_b
+        deriv = jnp.where(in_cap, jnp.where(both_norm, sum_norm, term_lo + term_hi), 0.0)
+    else:
+        interior = in_cap & (raw_lo > _FLOAT64_TINY) & (raw_hi > _FLOAT64_TINY)
+        deriv = (jnp.where(interior, 1.0 / d_lo + 1.0 / d_hi, 0.0) * s_inv_a) * s_inv_b
     return _sigmoid_unconstrain(t_arr, low, high), deriv * t_dot
 
 
 @functools.partial(jax.custom_jvp, nondiff_argnums=(1, 2))
 def _sigmoid_constrain(u_arr: jax.Array, low: float, high: float) -> jax.Array:
-    _, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
+    exp_scale, exp_a, exp_b, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
     lo, hi, span = jnp.asarray(lo_s), jnp.asarray(hi_s), jnp.asarray(span_s)
+    s_a, s_b = math.ldexp(1.0, exp_a), math.ldexp(1.0, exp_b)
     tails_s = jnp.where(
         u_arr < 0.0, lo + span * jax.nn.sigmoid(u_arr), hi - span * jax.nn.sigmoid(-u_arr)
     )
+    tails = (tails_s * s_a) * s_b
+    if exp_scale > 0:
+        log_span = math.log(span_s) + exp_scale * math.log(2.0)
+        deep_lo = low + jnp.exp(jnp.minimum(log_span + u_arr, 709.0))
+        deep_hi = high - jnp.exp(jnp.minimum(log_span - u_arr, 709.0))
+        tails = jnp.where(u_arr < -37.0, deep_lo, jnp.where(u_arr > 37.0, deep_hi, tails))
     if low < 0.0 < high:
         mid_s = 0.5 * (lo + hi) + (0.5 * span) * jnp.tanh(0.5 * jnp.clip(u_arr, -2.0, 2.0))
-        res_s = jnp.where(jnp.abs(u_arr) <= 1.0, mid_s, tails_s)
-    else:
-        res_s = tails_s
-    return (res_s * math.ldexp(1.0, exp_a)) * math.ldexp(1.0, exp_b)
+        return jnp.where(jnp.abs(u_arr) <= 1.0, (mid_s * s_a) * s_b, tails)
+    return tails
 
 
 @_sigmoid_constrain.defjvp
@@ -291,51 +356,32 @@ class ParamSpec(_ValidatedZodiaxBase):
     high: float = eqx.field(static=True)
 
     def __init__(
-        self,
-        path: str,
-        bijector: _BIJECTOR_TYPES = "identity",
-        prior_mean: ArrayLike = 0.0,
-        prior_sd: ArrayLike = 10.0,
-        *,
-        low: ArrayLike = 0.0,
-        high: ArrayLike = 1.0,
+        self, path: str, bijector: _BIJECTOR_TYPES = "identity",
+        prior_mean: ArrayLike = 0.0, prior_sd: ArrayLike = 10.0,
+        *, low: ArrayLike = 0.0, high: ArrayLike = 1.0,
     ) -> None:
         owner = f"ParamSpec({path!r})"
-        if bijector not in _VALID_BIJECTORS:
-            raise ValueError(
-                f"{owner}: bijector must be one of {_VALID_BIJECTORS}; got {bijector!r}."
-            )
+        bij = _validate_choice(bijector, _VALID_BIJECTORS, "bijector", owner)
         low_f = _concrete_scalar_f64(low, "low", owner=owner)
         high_f = _concrete_scalar_f64(high, "high", owner=owner)
         if not (math.isfinite(low_f) and math.isfinite(high_f)):
-            raise ValueError(
-                f"{owner}: low and high must be finite; got low={low!r}, high={high!r}."
-            )
-        if bijector == "sigmoid" and not (high_f > low_f):
-            raise ValueError(
-                f"{owner}: sigmoid bijector requires low < high; got low={low!r}, high={high!r}."
-            )
+            raise ValueError(f"{owner}: low and high must be finite; got low={low!r}, high={high!r}.")
+        if bij == "sigmoid" and not (high_f > low_f):
+            raise ValueError(f"{owner}: sigmoid requires low < high; got low={low!r}, high={high!r}.")
         pm_np = _concrete_f64_array(prior_mean, "prior_mean", owner=owner)
         ps_np = _concrete_f64_array(prior_sd, "prior_sd", owner=owner)
         if not np.all(np.isfinite(pm_np)):
-            raise ValueError(
-                f"{owner}: prior_mean must be finite; got {prior_mean!r}."
-            )
+            raise ValueError(f"{owner}: prior_mean must be finite; got {prior_mean!r}.")
         if not np.all(np.isfinite(ps_np)) or np.any(ps_np <= 0.0):
-            raise ValueError(
-                f"{owner}: prior_sd must be finite and strictly positive (> 0); got {prior_sd!r}."
-            )
+            raise ValueError(f"{owner}: prior_sd must be finite and > 0; got {prior_sd!r}.")
         b_shape = np.broadcast_shapes(pm_np.shape, ps_np.shape)
-        pm_b = np.broadcast_to(pm_np, b_shape)
-        ps_b = np.broadcast_to(ps_np, b_shape)
+        pm_b, ps_b = np.broadcast_to(pm_np, b_shape), np.broadcast_to(ps_np, b_shape)
 
-        self.path = str(path)
-        self.bijector = str(bijector)
+        self.path, self.bijector = str(path), bij
         self._prior_shape = tuple(int(s) for s in b_shape)
         self._prior_mean_tuple = tuple(float(x) for x in pm_b.reshape(-1))
         self._prior_sd_tuple = tuple(float(x) for x in ps_b.reshape(-1))
-        self.low = low_f
-        self.high = high_f
+        self.low, self.high = low_f, high_f
 
     @classmethod
     def normal(cls, path: str, mean: ArrayLike = 0.0, sd: ArrayLike = 1.0) -> ParamSpec:
@@ -386,8 +432,8 @@ class ParamSpec(_ValidatedZodiaxBase):
 
         Places ``u = ln(theta) ~ N(ln(median), sigma_log^2)`` under the
         exponential bijector ``theta = exp(u)``, so the induced physical prior
-        has exact median ``median`` (``spec.constrain(spec.prior_mean) == median``)
-        and multiplicative ``1 sigma`` central 68% interval
+        has median ``median`` (``spec.constrain(spec.prior_mean) == median`` to
+        float64 precision) and multiplicative ``1 sigma`` central 68% interval
         ``[median * exp(-sigma_log), median * exp(+sigma_log)]``. Supports both
         scalar and ND array leaves.
 
@@ -472,7 +518,7 @@ class ParamSpec(_ValidatedZodiaxBase):
         -------
         ParamSpec
             Specification with ``bijector="sigmoid"``, bounds ``(low, high)``,
-            exact logit ``prior_mean``, and ``prior_sd=logit_sd``.
+            logit ``prior_mean``, and ``prior_sd=logit_sd``.
 
         Examples
         --------
@@ -825,11 +871,7 @@ class LinearMarginalConfig(_ValidatedZodiaxBase):
         whiten_method: Literal["cholesky", "qr", "rank_one"] = "cholesky",
         dct_operator: DCTResponseOperator | LinearizedDCTOperator | None = None,
     ) -> None:
-        valid_offset_modes = ("hierarchical", "per_series", "shared", "none")
-        if offset_mode not in valid_offset_modes:
-            raise ValueError(
-                f"offset_mode must be one of {valid_offset_modes}; got {offset_mode!r}."
-            )
+        owner = "LinearMarginalConfig"
         if dct_operator is not None and not isinstance(
             dct_operator, (DCTResponseOperator, LinearizedDCTOperator)
         ):
@@ -837,14 +879,22 @@ class LinearMarginalConfig(_ValidatedZodiaxBase):
                 "dct_operator must be a DCTResponseOperator, LinearizedDCTOperator, or None; "
                 f"got {type(dct_operator).__name__}."
             )
-        self.offset_mode = str(offset_mode)
-        self.global_prior_mean = float(global_prior_mean)
-        self.global_prior_sd = (
-            math.inf if global_prior_sd is None else float(global_prior_sd)
+        gpm = _concrete_scalar_f64(global_prior_mean, "global_prior_mean", owner=owner)
+        if not math.isfinite(gpm):
+            raise ValueError(f"{owner}: global_prior_mean must be finite; got {global_prior_mean!r}.")
+        if n_gp_modes is not None and (isinstance(n_gp_modes, bool) or int(n_gp_modes) < 1):
+            raise ValueError(f"{owner}: n_gp_modes must be None or >= 1; got {n_gp_modes!r}.")
+        self.offset_mode = _validate_choice(offset_mode, _VALID_OFFSET_MODES, "offset_mode", owner)
+        self.whiten_method = _validate_choice(
+            whiten_method, _VALID_WHITEN_METHODS, "whiten_method", owner
         )
-        self.lab_prior_sd = math.inf if lab_prior_sd is None else float(lab_prior_sd)
-        self.solar_prior_sd = float(solar_prior_sd)
-        self.trend_prior_sd = float(trend_prior_sd)
+        self.global_prior_mean = gpm
+        self.global_prior_sd = _check_lmcfg_sd(global_prior_sd, "global_prior_sd", allow_inf=True)
+        self.lab_prior_sd = _check_lmcfg_sd(
+            lab_prior_sd, "lab_prior_sd", allow_zero=True, allow_inf=True
+        )
+        self.solar_prior_sd = _check_lmcfg_sd(solar_prior_sd, "solar_prior_sd")
+        self.trend_prior_sd = _check_lmcfg_sd(trend_prior_sd, "trend_prior_sd")
         self.marginalize_solar = bool(marginalize_solar)
         self.marginalize_trend = bool(marginalize_trend)
         self.marginalize_gp = bool(marginalize_gp)
@@ -859,7 +909,6 @@ class LinearMarginalConfig(_ValidatedZodiaxBase):
         self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.include_field_initial_cov = bool(include_field_initial_cov)
-        self.whiten_method = str(whiten_method)
         self.dct_operator = dct_operator
 
     def set(

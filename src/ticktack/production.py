@@ -644,12 +644,12 @@ class MiyakeSpike(ProductionTerm):
         * ``t_start``: :meth:`~ticktack.likelihood.ParamSpec.normal` with mean
           ``self.t_start`` and standard deviation ``t_start_sd`` (in ``yr``).
         * ``duration``: :meth:`~ticktack.likelihood.ParamSpec.bounded` on
-          ``duration_bounds`` (in ``yr``) with exact physical median
+          ``duration_bounds`` (in ``yr``) with physical median
           ``self.duration`` and logit spread ``duration_logit_sd``. For sharp
           sub-seasonal Miyake events (e.g. ``self.duration = 0.05`` or ``0.02`` yr),
           pass matching ``duration_bounds=(0.01, 2.0)``.
         * ``fluence``: :meth:`~ticktack.likelihood.ParamSpec.lognormal` with
-          exact physical median ``self.fluence`` (in ``atoms cm^-2 s^-1 yr``, or
+          physical median ``self.fluence`` (in ``atoms cm^-2 s^-1 yr``, or
           ``q_0 yr`` when :attr:`~ticktack.model.RadiocarbonModel.alpha_unit`
           uses normalized production units) and log-space spread ``fluence_sigma_log``.
         * ``skewness`` *(optional)*: :meth:`~ticktack.likelihood.ParamSpec.normal`
