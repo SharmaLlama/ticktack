@@ -12,7 +12,7 @@ Every `CarbonBoxModel` holds a static `Topology` PyTree defining the directed re
 
 ### Constrained Rate Parametrizations
 
-Rather than exposing raw matrix entries that can violate mass conservation or positivity during gradient steps, `ticktack 2.0` pairs a static `Topology` with a `CBMChart` inside `CarbonBoxModel(topology, chart)` (accessible via `load_preset(name, chart=...)`, `CarbonBoxModel.from_boxes(...)`, or the compatible `*CBM` subclasses):
+Rather than exposing raw matrix entries that can violate mass conservation or positivity during gradient steps, `ticktack 2.0` pairs a static `Topology` with a `CBMChart` inside `CarbonBoxModel(topology, chart)` (accessible via `load_preset(name, chart=...)`, `CarbonBoxModel.from_boxes(...)`, or the compatible `*CBM` subclasses; passing `load_preset(name, kind=...)` is deprecated, emits `DeprecationWarning`, and will be removed in Wave 6 in favour of `chart=...`):
 
 | Chart / Class | Free Parameters | Physical Constraint Enforced | Typical Use Case |
 | :--- | :--- | :--- | :--- |

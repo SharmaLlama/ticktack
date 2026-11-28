@@ -1213,3 +1213,107 @@ def test_flag_descriptors_jit_to_balanced_guards_non_identity_prod_and_open_from
     )
     assert cbm_1box.with_chart(cbm_1box.chart).active_parameter_mask().shape == (0,)
     assert SubspaceCBM.from_fisher.__annotations__["base_cbm"] == "CarbonBoxModel"
+
+
+def test_claude_gate5_exact_box_matching_default_prod_kirchhoff_msg_and_kind_deprecation() -> None:
+    """Verify Claude Gate 5 fixes: exact trop/strat matching, 70/30 default prod, Kirchhoff wording, and kind= deprecation."""
+    import warnings
+
+    # 1. Exact normalized whole-name matching excludes "Tropical Surface Ocean" and "Stratified Ocean"
+    cbm_ocean = CarbonBoxModel.from_boxes(
+        masses={
+            "Stratosphere": 90.0,
+            "Troposphere": 510.0,
+            "Tropical Surface Ocean": 800.0,
+            "Stratified Ocean": 3500.0,
+        },
+        fluxes=[
+            ("Stratosphere", "Troposphere", 45.0),
+            ("Troposphere", "Stratosphere", 45.0),
+            ("Troposphere", "Tropical Surface Ocean", 60.0),
+            ("Tropical Surface Ocean", "Troposphere", 60.0),
+            ("Tropical Surface Ocean", "Stratified Ocean", 40.0),
+            ("Stratified Ocean", "Tropical Surface Ocean", 40.0),
+        ],
+        chart="balanced",
+    )
+    assert cbm_ocean.topology.trop_box_indices == (1,)
+    assert cbm_ocean.topology.prod_box_indices == (0, 1)
+    np.testing.assert_allclose(cbm_ocean.production_vector(), [0.70, 0.30, 0.0, 0.0], rtol=1e-14)
+    d14c_ss = np.asarray(cbm_ocean.steady_state_d14c(), dtype=np.float64)
+    assert d14c_ss[1] == pytest.approx(0.0, abs=1e-12)
+    assert d14c_ss[2] < -1.0  # Tropical Surface Ocean is depleted, not merged into R_ref
+
+    # Without an exact troposphere name, "Tropical Surface Ocean" must not match
+    with pytest.raises(ValueError, match="troposphere"):
+        CarbonBoxModel.from_boxes(
+            masses={"Tropical Surface Ocean": 800.0, "Stratified Ocean": 3500.0},
+            fluxes=[
+                ("Tropical Surface Ocean", "Stratified Ocean", 40.0),
+                ("Stratified Ocean", "Tropical Surface Ocean", 40.0),
+            ],
+            chart="balanced",
+        )
+
+    # Ambiguous single-globe troposphere names or mismatched strat/trop counts must raise ValueError
+    with pytest.raises(ValueError, match="Ambiguous.*troposphere"):
+        CarbonBoxModel.from_boxes(
+            masses={"Troposphere": 255.0, "Trop": 255.0, "Ocean": 3500.0},
+            fluxes=[
+                ("Troposphere", "Trop", 50.0),
+                ("Trop", "Troposphere", 50.0),
+                ("Troposphere", "Ocean", 40.0),
+                ("Ocean", "Troposphere", 40.0),
+            ],
+            chart="balanced",
+        )
+    with pytest.raises(ValueError, match="production="):
+        CarbonBoxModel.from_boxes(
+            masses={"Stratosphere": 45.0, "Strat": 45.0, "Troposphere": 510.0},
+            fluxes=[
+                ("Stratosphere", "Troposphere", 22.0),
+                ("Troposphere", "Stratosphere", 22.0),
+                ("Strat", "Troposphere", 22.0),
+                ("Troposphere", "Strat", 22.0),
+            ],
+            chart="balanced",
+        )
+
+    # Hemispheric default production assigns 70% strat / 30% trop split evenly across hemispheres
+    cbm_hemi = CarbonBoxModel.from_boxes(
+        masses={
+            ("Stratosphere", "south"): 45.0,
+            ("Troposphere", "south"): 250.0,
+            ("Stratosphere", "north"): 45.0,
+            ("Troposphere", "north"): 250.0,
+        },
+        fluxes=[
+            (("Stratosphere", "south"), ("Troposphere", "south"), 22.0),
+            (("Troposphere", "south"), ("Stratosphere", "south"), 22.0),
+            (("Troposphere", "south"), ("Troposphere", "north"), 70.0),
+            (("Troposphere", "north"), ("Troposphere", "south"), 70.0),
+            (("Stratosphere", "north"), ("Troposphere", "north"), 22.0),
+            (("Troposphere", "north"), ("Stratosphere", "north"), 22.0),
+        ],
+        chart="balanced",
+    )
+    np.testing.assert_allclose(cbm_hemi.production_vector(), [0.35, 0.15, 0.35, 0.15], rtol=1e-14)
+
+    # 2. Kirchhoff imbalance ValueError recommends chart='fixed' and quotes rtol=1e-6, atol=1e-9
+    with pytest.raises(ValueError, match=r"rtol=1e-6.*chart='fixed'"):
+        CarbonBoxModel.from_boxes(
+            masses={"Stratosphere": 90.0, "Troposphere": 510.0},
+            fluxes=[("Stratosphere", "Troposphere", 45.0), ("Troposphere", "Stratosphere", 41.0)],
+            chart="balanced",
+        )
+
+    # 3. load_preset(..., kind=...) emits DeprecationWarning; chart=... and default do not
+    with pytest.warns(DeprecationWarning, match=r"Wave 6.*chart="):
+        _ = load_preset("Guttler15", kind="balanced")
+    with pytest.warns(DeprecationWarning, match=r"Wave 6.*chart="):
+        _ = load_preset("Guttler15", "fixed")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DeprecationWarning)
+        _ = load_preset("Guttler15", chart="balanced")
+        _ = load_preset("Guttler15")
+    assert not [w for w in caught if issubclass(w.category, DeprecationWarning)]

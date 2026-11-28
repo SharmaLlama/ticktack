@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import inspect
 import math
+import warnings
 from importlib import resources
 from pathlib import Path
 from typing import Any, Literal
@@ -966,13 +967,21 @@ def load_preset(
     """Instantiate a ``ticktack.cbm.CarbonBoxModel`` PyTree for a named preset.
 
     Passing ``chart=...`` returns a concrete :class:`~ticktack.cbm.CarbonBoxModel`
-    backed by the corresponding :class:`~ticktack.cbm.CBMChart`; ``kind=...`` is
-    retained as a backward-compatible alias returning the legacy ``*CBM`` wrapper.
+    backed by the corresponding :class:`~ticktack.cbm.CBMChart`. The ``kind=...``
+    argument is deprecated (emits :class:`DeprecationWarning` and will be removed
+    in Wave 6); pass ``chart=...`` instead.
     """
     from . import cbm as cbm_mod  # Lazy import by design.
 
     if chart is not None and kind is not None and chart != kind:
         raise ValueError(f"Conflicting preset chart={chart!r} and kind={kind!r}.")
+    if kind is not None:
+        warnings.warn(
+            "load_preset(..., kind=...) is deprecated and will be removed in Wave 6; "
+            "pass chart=... instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     use_chart = chart is not None
     kind = chart if use_chart else ("fixed" if kind is None else kind)  # type: ignore[assignment]
     eff_decay = (
@@ -1007,12 +1016,17 @@ def _build_preset_model(
     edge_fluxes = jnp.asarray([f for _, _, f in spec.edges], dtype=jnp.float64)
     prod_vec = jnp.asarray(spec.prod_coefficients, dtype=jnp.float64)
     sink_rates = jnp.asarray(spec.sink_rates, dtype=jnp.float64)
-    direct_args = (topology, masses, spec, edge_fluxes, prod_vec, sink_rates, decay_rate)
 
     if kind == "fixed":
-        return _instantiate_fixed_cbm(cbm_mod.FixedCBM, *direct_args)
+        return cbm_mod.FixedCBM(
+            topology, masses, edge_fluxes,
+            prod_fractions=prod_vec, sink_rates=sink_rates, decay_rate=decay_rate,
+        )
     if kind == "open":
-        return _instantiate_open_cbm(cbm_mod.OpenCBM, *direct_args)
+        return cbm_mod.OpenCBM.from_masses_and_fluxes(
+            topology, masses, edge_fluxes, sink_rates,
+            prod_fractions=prod_vec, decay_rate=decay_rate,
+        )
     if kind not in ("balanced", "reversible"):
         raise ValueError(
             f"Unknown chart/kind={kind!r}; expected 'fixed', 'balanced', 'open', or 'reversible'."
@@ -1024,56 +1038,12 @@ def _build_preset_model(
             f"Preset {name!r} has open sink_rates; pass chart='open' or "
             f"miyake17_closure='closed_shallow' for closed {label}."
         )
-    common = dict(
-        topology=topology,
-        masses=masses,
-        edge_fluxes=edge_fluxes,
-        prod_fractions=prod_vec,
-        decay_rate=decay_rate,
-    )
     if kind == "reversible":
-        return cbm_mod.ReversibleCBM.from_masses_and_fluxes(**common)
+        return cbm_mod.ReversibleCBM.from_masses_and_fluxes(
+            topology, masses, edge_fluxes, prod_fractions=prod_vec, decay_rate=decay_rate
+        )
     tie_mat = spec.edge_tie_matrix(tie_symmetric_edges=True) if tie_symmetric_edges else None
-    return cbm_mod.BalancedCBM.from_masses_and_fluxes(**common, tie_matrix=tie_mat)
-
-
-def _instantiate_fixed_cbm(
-    cls: Any,
-    topology: Any,
-    masses: jax.Array,
-    spec: PresetSpec,
-    edge_fluxes: jax.Array,
-    prod_vec: jax.Array,
-    sink_rates: jax.Array,
-    decay_rate: float,
-) -> Any:
-    del spec
-    return cls(
-        topology=topology,
-        masses=masses,
-        edge_fluxes=edge_fluxes,
-        prod_fractions=prod_vec,
-        sink_rates=sink_rates,
-        decay_rate=decay_rate,
-    )
-
-
-def _instantiate_open_cbm(
-    cls: Any,
-    topology: Any,
-    masses: jax.Array,
-    spec: PresetSpec,
-    edge_fluxes: jax.Array,
-    prod_vec: jax.Array,
-    sink_rates: jax.Array,
-    decay_rate: float,
-) -> Any:
-    del spec
-    return cls.from_masses_and_fluxes(
-        topology=topology,
-        masses=masses,
-        edge_fluxes=edge_fluxes,
-        prod_fractions=prod_vec,
-        sink_rates=sink_rates,
-        decay_rate=decay_rate,
+    return cbm_mod.BalancedCBM.from_masses_and_fluxes(
+        topology, masses, edge_fluxes,
+        prod_fractions=prod_vec, decay_rate=decay_rate, tie_matrix=tie_mat,
     )
