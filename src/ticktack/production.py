@@ -718,18 +718,13 @@ class MiyakeSpike(ProductionTerm):
         dur0 = _concrete_scalar_f64(self.duration, "duration", owner=owner)
         fl0 = _concrete_scalar_f64(self.fluence, "fluence", owner=owner)
         if len(duration_bounds) != 2:
+            raise ValueError(f"duration_bounds must be a (low, high) pair; got {duration_bounds!r}.")
+        d_lo = _concrete_scalar_f64(duration_bounds[0], "duration_bounds[0]", owner=owner)
+        d_hi = _concrete_scalar_f64(duration_bounds[1], "duration_bounds[1]", owner=owner)
+        if not (1e-9 <= d_lo < d_hi < math.inf):
             raise ValueError(
-                f"duration_bounds must be a (low, high) pair; got {duration_bounds!r}."
-            )
-        d_lo = _concrete_scalar_f64(
-            duration_bounds[0], "duration_bounds[0]", owner=owner
-        )
-        d_hi = _concrete_scalar_f64(
-            duration_bounds[1], "duration_bounds[1]", owner=owner
-        )
-        if not (0.0 <= d_lo < d_hi < math.inf):
-            raise ValueError(
-                "duration_bounds=(low, high) requires finite 0 <= low < high; "
+                "duration_bounds=(low, high) requires finite 1e-9 <= low < high in yr "
+                "(above the 1e-12 yr Dirac cutoff; e.g. (0.01, 2.0)); "
                 f"got ({duration_bounds[0]!r}, {duration_bounds[1]!r})."
             )
         if not (d_lo < dur0 < d_hi):
@@ -741,12 +736,8 @@ class MiyakeSpike(ProductionTerm):
             )
         specs: list[ParamSpec] = [
             ParamSpec.normal(f"{base}t_start", mean=t0, sd=t_start_sd),
-            ParamSpec.bounded(
-                f"{base}duration", d_lo, d_hi, median=dur0, logit_sd=duration_logit_sd
-            ),
-            ParamSpec.lognormal(
-                f"{base}fluence", median=fl0, sigma_log=fluence_sigma_log
-            ),
+            ParamSpec.bounded(f"{base}duration", d_lo, d_hi, median=dur0, logit_sd=duration_logit_sd),
+            ParamSpec.lognormal(f"{base}fluence", median=fl0, sigma_log=fluence_sigma_log),
         ]
         if skewness_sd is not None:
             if self.profile != "skewgaussian":

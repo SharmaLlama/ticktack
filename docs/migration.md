@@ -18,7 +18,7 @@ Beyond dramatic speedups – eliminating the 2000-year numerical burn-in on ever
 | Load a multi-series event | `MultiFitter` list of `SingleFitter` objects | `tt.Dataset.from_csvs(...)` or `tt.load_bundled_event("775CE")` |
 | Forward $\Delta^{14}\text{C}$ simulation | `cbm.run_burn_in(...)` + `cbm.run_production(...)` | `model = tt.RadiocarbonModel(cbm, production); model.predict_d14c(dataset)` or `model.predict_fine(t_grid)` |
 | Baseline / lab offset handling | Clamped to first 4 rings `np.mean(d14c[:4])` | Analytical Gaussian marginalization via `tt.LinearMarginalConfig(offset_mode="hierarchical")` |
-| Point optimization (MAP) | `scipy.optimize.minimize` finite-difference Nelder–Mead / Powell | `tt.fit_map(model, dataset, param_space, cfg, method="BFGS", map_space="constrained")` (exact `jax.grad`) |
+| Point optimization (MAP) | `scipy.optimize.minimize` finite-difference Nelder–Mead / Powell | `res = tt.fit_map(model, dataset, param_space, cfg, method="BFGS", map_space="constrained")` (exact `jax.grad`; fitted PyTree on `res.model`) |
 | Posterior MCMC sampling | Gradient-free `sf.MarkovChainSampler` (`emcee`) | `tt.sample_nuts(model, dataset, param_space, cfg)` (`NumPyro` NUTS, returns `arviz.InferenceData`) |
 | Bayesian evidence $\ln Z$ | Nested sampling via `dynesty` | `tt.sample_smc(...)` (`BlackJAX` adaptive tempered SMC with Lee–Whiteley SE) or `tt.log_evidence` (MacKay IFT) |
 

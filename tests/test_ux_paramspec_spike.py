@@ -274,14 +274,19 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
         for lo_w, hi_w, med_w in (
             (-1e308, 1e308, -0.5e308),
             (-1e308, 1e308, 1e10),
+            (-0.8e308, 0.8e308, 1e10),
             (-1.6e308, 0.1e308, -0.91e308),
             (-0.1e308, 1.6e308, 0.91e308),
         ):
             spec_w = tt.ParamSpec.bounded("wide_z", lo_w, hi_w, median=med_w)
-            u_w_ref = float(
-                (Decimal.from_float(med_w) - Decimal.from_float(lo_w)).ln()
-                - (Decimal.from_float(hi_w) - Decimal.from_float(med_w)).ln()
-            )
+            lo_wd = Decimal.from_float(lo_w)
+            hi_wd = Decimal.from_float(hi_w)
+            med_wd = Decimal.from_float(med_w)
+            span_wd = hi_wd - lo_wd
+            u_w_ref = float((med_wd - lo_wd).ln() - (hi_wd - med_wd).ln())
+            g_u_ref = float(Decimal(1) / (med_wd - lo_wd) + Decimal(1) / (hi_wd - med_wd))
+            g_c_ref = float((med_wd - lo_wd) * (hi_wd - med_wd) / span_wd)
+
             np.testing.assert_allclose(float(spec_w.prior_mean), u_w_ref, rtol=1e-13)
             np.testing.assert_allclose(
                 float(spec_w.constrain(spec_w.prior_mean)), med_w, rtol=1e-13
@@ -290,12 +295,30 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 float(spec_w.unconstrain(med_w)), float(spec_w.prior_mean), rtol=1e-13
             )
             assert math.isfinite(float(spec_w.log_abs_det_jacobian(spec_w.prior_mean)))
-            g_w = float(jax.grad(spec_w.unconstrain)(jnp.asarray(med_w)))
-            assert math.isfinite(g_w) and g_w >= 0.0
+
+            g_c = float(jax.grad(spec_w.constrain)(jnp.asarray(spec_w.prior_mean)))
+            assert g_c > 0.0
+            np.testing.assert_allclose(g_c, g_c_ref, rtol=1e-12)
+
+            g_u = float(jax.grad(spec_w.unconstrain)(jnp.asarray(med_w)))
+            assert math.isfinite(g_u)
+            if g_u_ref >= float(np.finfo(np.float64).tiny):
+                assert g_u > 0.0
+                np.testing.assert_allclose(g_u, g_u_ref, rtol=1e-12)
+
             for t_w_ob in (lo_w, hi_w):
                 t_wj = jnp.asarray(t_w_ob, dtype=jnp.float64)
                 assert math.isfinite(float(spec_w.unconstrain(t_wj)))
                 assert math.isfinite(float(jax.grad(spec_w.unconstrain)(t_wj)))
+
+        # Subnormal median in bounded and near-DBL_MIN tail u = -708 in constrain
+        spec_sub = tt.ParamSpec.bounded("sub", -1.0, 1.0, median=1e-310)
+        np.testing.assert_allclose(float(spec_sub.prior_mean), 2.0e-310, rtol=1e-12)
+        for hi_tail in (1.0, 2.0):
+            spec_tail = tt.ParamSpec.bounded("tail", 0.0, hi_tail)
+            th_tail = float(spec_tail.constrain(jnp.asarray(-708.0)))
+            assert th_tail > 0.0
+            np.testing.assert_allclose(th_tail, hi_tail * math.exp(-708.0), rtol=1e-12)
 
         base_u = float(tt.ParamSpec.bounded("ui", -1.35, 4.85, median=-0.37).prior_mean)
         for unit_scale in (1e-12, 1.0, 365.25, 1e12):
@@ -535,6 +558,21 @@ class TestZodiaxPyTreeAndJitCaching:
         spec_arr = spec_id.set(["prior_mean"], np.array([1.2, -0.8]))
         np.testing.assert_allclose(np.asarray(spec_arr.prior_mean), [1.2, -0.8])
 
+        # zodiax.Base arithmetic & min/max operators on static and @property fields
+        spec_ops = (
+            spec1.add("low", -0.02)
+            .multiply("prior_sd", 2.0)
+            .divide("prior_sd", 4.0)
+            .power("prior_sd", 2.0)
+            .min("high", 1.5)
+            .max("low", 0.04)
+        )
+        np.testing.assert_allclose(spec_ops.low, 0.04)
+        np.testing.assert_allclose(spec_ops.high, 1.5)
+        np.testing.assert_allclose(float(spec_ops.prior_sd), (1.2 * 2.0 / 4.0) ** 2.0)
+        spec_vec_add = spec_arr.add("prior_mean", np.array([0.3, 0.8]))
+        np.testing.assert_allclose(np.asarray(spec_vec_add.prior_mean), [1.5, 0.0])
+
         cfg1 = tt.LinearMarginalConfig(offset_mode="hierarchical", lab_prior_sd=1.5)
         cfg2 = tt.LinearMarginalConfig(offset_mode="hierarchical", lab_prior_sd=1.5)
         assert isinstance(cfg1, zdx.Base)
@@ -542,6 +580,17 @@ class TestZodiaxPyTreeAndJitCaching:
         assert hash(cfg1) == hash(cfg2)
         assert cfg1.get("offset_mode", to_array=False) == "hierarchical"
         np.testing.assert_allclose(float(cfg1.get("lab_prior_sd")), 1.5)
+        cfg_ops = (
+            cfg1.multiply("lab_prior_sd", 2.0)
+            .add("global_prior_mean", 1.25)
+            .divide("solar_prior_sd", 2.0)
+            .min("trend_prior_sd", 3.0)
+            .max("lab_prior_sd", 4.0)
+        )
+        np.testing.assert_allclose(cfg_ops.lab_prior_sd, 4.0)
+        np.testing.assert_allclose(cfg_ops.global_prior_mean, 1.25)
+        np.testing.assert_allclose(cfg_ops.solar_prior_sd, 0.5)
+        np.testing.assert_allclose(cfg_ops.trend_prior_sd, 3.0)
 
         cbm = tt.load_preset("Brehm21")
         years = np.arange(772.0, 778.0, 1.0)
@@ -930,10 +979,14 @@ class TestValidationErrors:
                     "production.spike.duration", 0.05, 2.0, median=out_med
                 )
 
-        # .set(...) validation on ParamSpec and LinearMarginalConfig
+        # .set(...) and arithmetic operator validation on ParamSpec and LinearMarginalConfig
         s = tt.ParamSpec.normal("x", 0.0, 1.0)
         with pytest.raises(ValueError, match="prior_sd"):
             s.set("prior_sd", -1.0)
+        with pytest.raises(ValueError, match="prior_sd"):
+            s.multiply("prior_sd", -1.0)
+        with pytest.raises(ValueError, match="low < high"):
+            tt.ParamSpec.bounded("b", 0.1, 1.0).add("low", 2.0)
         with pytest.raises(AttributeError, match="no settable attribute"):
             s.set("nonexistent", 1.0)
         with pytest.raises(AttributeError, match="nested"):
@@ -957,8 +1010,9 @@ class TestValidationErrors:
         with pytest.raises(ValueError, match="duration_bounds"):
             sharp.param_specs(t_start_sd=0.5)
 
-        with pytest.raises(ValueError, match="0 <= low < high"):
-            sharp.param_specs(t_start_sd=0.5, duration_bounds=(-0.1, 1.0))
+        for bad_bounds in ((-0.1, 1.0), (0.0, 2.0), (1e-12, 2.0)):
+            with pytest.raises(ValueError, match="1e-9 <= low < high"):
+                sharp.param_specs(t_start_sd=0.5, duration_bounds=bad_bounds)
 
         with pytest.raises(ValueError, match="sd"):
             tt.MiyakeSpike(duration=0.2).param_specs(t_start_sd=0.0)

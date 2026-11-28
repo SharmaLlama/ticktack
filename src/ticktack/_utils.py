@@ -18,12 +18,7 @@ def _concrete(value: Any) -> np.ndarray | None:
         return None
 
 
-def _concrete_f64_array(
-    value: ArrayLike,
-    name: str,
-    *,
-    owner: str = "ticktack",
-) -> np.ndarray:
+def _concrete_f64_array(value: ArrayLike, name: str, *, owner: str = "ticktack") -> np.ndarray:
     """Convert ``value`` to a concrete ``float64`` NumPy array, rejecting JAX tracers."""
     c = _concrete(value)
     if c is None:
@@ -34,18 +29,11 @@ def _concrete_f64_array(
         raise ValueError(f"{owner}: {name} must be numeric; got {value!r}.") from exc
 
 
-def _concrete_scalar_f64(
-    value: Any,
-    name: str,
-    *,
-    owner: str = "ticktack",
-) -> float:
+def _concrete_scalar_f64(value: Any, name: str, *, owner: str = "ticktack") -> float:
     """Convert scalar ``value`` to a concrete Python ``float``, rejecting non-scalars/tracers."""
     arr = _concrete_f64_array(value, name, owner=owner)
     if arr.ndim != 0:
-        raise ValueError(
-            f"{owner}: {name} must be a scalar float; got shape {arr.shape}."
-        )
+        raise ValueError(f"{owner}: {name} must be a scalar float; got shape {arr.shape}.")
     return float(arr)
 
 
