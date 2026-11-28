@@ -148,6 +148,45 @@ def _partition_zdx_updates(
     return top_level, nested
 
 
+def _sigmoid_scale(low: float, high: float) -> tuple[int, float, float, float]:
+    """Return ``(exp_scale, lo_s, hi_s, span_s)`` rescaled by ``2**-exp_scale``."""
+    _, exp_scale = math.frexp(max(abs(low), abs(high)))
+    lo_s = math.ldexp(low, -exp_scale)
+    hi_s = math.ldexp(high, -exp_scale)
+    return exp_scale, lo_s, hi_s, hi_s - lo_s
+
+
+def _sigmoid_logit(theta: ArrayLike, low: float, high: float) -> jax.Array:
+    """Unit-invariant logit ``ln((theta - low) / (high - theta))`` on ``(low, high)``."""
+    # Rescale by an exact power of two so endpoints and span are O(1) with zero mantissa loss.
+    exp_scale, lo_s, hi_s, span_s = _sigmoid_scale(low, high)
+    t_arr = jnp.asarray(theta, dtype=jnp.float64)
+    if exp_scale < 0:
+        cap = math.ldexp(4.0, exp_scale)
+        t_arr = jnp.clip(t_arr, -cap, cap)
+    t_s = jnp.ldexp(t_arr, -exp_scale)
+    lo = jnp.asarray(lo_s, dtype=jnp.float64)
+    hi = jnp.asarray(hi_s, dtype=jnp.float64)
+    span = jnp.asarray(span_s, dtype=jnp.float64)
+    floor = jnp.maximum(1e-300 * span, jnp.finfo(jnp.float64).tiny)
+    raw_lo = t_s - lo
+    raw_hi = hi - t_s
+    d_lo = jnp.clip(raw_lo, floor, span)
+    d_hi = jnp.clip(raw_hi, floor, span)
+    # Near the midpoint, log(d_lo) - log(d_hi) cancels; evaluate log1p((d_lo - d_hi) / d_hi).
+    near_mid = (
+        (raw_lo > floor)
+        & (raw_hi > floor)
+        & (jnp.abs(d_lo - d_hi) <= 0.5 * d_hi)
+    )
+    t_mid = jnp.clip(t_s, lo, hi)
+    # On zero-straddling intervals, 2*theta - (low + high) avoids cancellation as theta -> 0.
+    numer = (2.0 * t_mid - (lo + hi)) if (low < 0.0 < high) else (d_lo - d_hi)
+    safe_d_hi = jnp.where(near_mid, d_hi, 1.0)
+    safe_rel = jnp.where(near_mid, numer / safe_d_hi, 0.0)
+    return jnp.where(near_mid, jnp.log1p(safe_rel), jnp.log(d_lo) - jnp.log(d_hi))
+
+
 class ParamSpec(zdx.Base):
     """Specification for a parameter leaf (scalar or array) with a smooth bijector.
 
@@ -195,12 +234,9 @@ class ParamSpec(zdx.Base):
             raise ValueError(
                 f"{owner}: low and high must be finite; got low={low!r}, high={high!r}."
             )
-        if bijector == "sigmoid" and not (
-            high_f > low_f and math.isfinite(high_f - low_f)
-        ):
+        if bijector == "sigmoid" and not (high_f > low_f):
             raise ValueError(
-                f"{owner}: sigmoid bijector requires finite low < high and finite span; "
-                f"got low={low!r}, high={high!r}."
+                f"{owner}: sigmoid bijector requires low < high; got low={low!r}, high={high!r}."
             )
         pm_np = _concrete_f64_array(prior_mean, "prior_mean", owner=owner)
         ps_np = _concrete_f64_array(prior_sd, "prior_sd", owner=owner)
@@ -346,17 +382,15 @@ class ParamSpec(zdx.Base):
         Maps ``u ~ N(u_0, logit_sd^2)`` through ``theta = low + (high - low) * sigmoid(u)``.
         When ``median`` is omitted, ``u_0 = 0`` centres the prior median at the
         interval midpoint ``0.5 * (low + high)``. When ``median`` is supplied,
-        ``u_0 = logit((median - low) / (high - low))`` is evaluated in
-        cancellation-free ``float64`` arithmetic so
-        ``spec.constrain(spec.prior_mean) == median`` across both narrow and wide
-        intervals (when ``low + high != 0`` and ``median -> 0``, ``prior_mean`` is
-        ``O(1)`` so ``constrain(prior_mean)`` is accurate to ``~eps * (high - low)``
-        in absolute units).
+        ``u_0`` is set to the logit of ``(median - low) / (high - low)`` so
+        ``spec.constrain(spec.prior_mean) == median`` across narrow and wide
+        intervals.
 
-        Choosing ``logit_sd <= sqrt(2)`` (``~1.414``; default ``1.2``) ensures the
-        induced logit-normal physical density ``p_theta(theta)`` is strictly
-        unimodal across every ``median`` in ``(low, high)``, whereas values
-        ``> sqrt(2)`` split the physical prior into two boundary-ward modes.
+        Choosing ``logit_sd <= sqrt(2)`` (``~1.414``; default ``1.2``) guarantees
+        that the physical density ``p_theta(theta)`` has a single peak for every
+        ``median`` in ``(low, high)``; larger ``logit_sd > sqrt(2)`` becomes
+        bimodal when ``median`` is near the midpoint, pushing prior mass toward
+        both bounds.
 
         Parameters
         ----------
@@ -387,15 +421,9 @@ class ParamSpec(zdx.Base):
         owner = f"ParamSpec.bounded({path!r})"
         low_f = _concrete_scalar_f64(low, "low", owner=owner)
         high_f = _concrete_scalar_f64(high, "high", owner=owner)
-        if not (
-            math.isfinite(low_f)
-            and math.isfinite(high_f)
-            and high_f > low_f
-            and math.isfinite(high_f - low_f)
-        ):
+        if not (math.isfinite(low_f) and math.isfinite(high_f) and high_f > low_f):
             raise ValueError(
-                f"{owner}: requires finite low < high and finite span; "
-                f"got low={low!r}, high={high!r}."
+                f"{owner}: requires finite low < high; got low={low!r}, high={high!r}."
             )
         lsd_np = _concrete_f64_array(logit_sd, "logit_sd", owner=owner)
         if not np.all(np.isfinite(lsd_np)) or np.any(lsd_np <= 0.0):
@@ -414,17 +442,7 @@ class ParamSpec(zdx.Base):
                     f"{owner}: median={median!r} must be finite and lie strictly "
                     f"inside (low, high)=({low_f}, {high_f})."
                 )
-            d_lo = med_np - low_f
-            d_hi = high_f - med_np
-            near_mid = np.abs(d_lo - d_hi) <= 0.5 * d_hi
-            if low_f < 0.0 < high_f and high_f - low_f > 1.0:
-                numer, denom = med_np - 0.5 * (low_f + high_f), 0.5 * d_hi
-            elif low_f < 0.0 < high_f:
-                numer, denom = 2.0 * med_np - (low_f + high_f), d_hi
-            else:
-                numer, denom = d_lo - d_hi, d_hi
-            safe_rel = np.where(near_mid, numer / denom, 0.0)
-            pm = np.where(near_mid, np.log1p(safe_rel), np.log(d_lo) - np.log(d_hi))
+            pm = np.asarray(_sigmoid_logit(med_np, low_f, high_f), dtype=np.float64)
         return cls(
             path,
             bijector="sigmoid",
@@ -499,19 +517,22 @@ class ParamSpec(zdx.Base):
         if self.bijector == "softplus":
             return jax.nn.softplus(u_arr) + 1e-6
         if self.bijector == "sigmoid":
-            lo = jnp.asarray(self.low, dtype=jnp.float64)
-            hi = jnp.asarray(self.high, dtype=jnp.float64)
-            span = hi - lo
-            tails = jnp.where(
+            exp_scale, lo_s, hi_s, span_s = _sigmoid_scale(self.low, self.high)
+            lo = jnp.asarray(lo_s, dtype=jnp.float64)
+            hi = jnp.asarray(hi_s, dtype=jnp.float64)
+            span = jnp.asarray(span_s, dtype=jnp.float64)
+            tails_s = jnp.where(
                 u_arr < 0.0,
                 lo + span * jax.nn.sigmoid(u_arr),
                 hi - span * jax.nn.sigmoid(-u_arr),
             )
             if self.low < 0.0 < self.high:
                 u_mid = jnp.clip(u_arr, -2.0, 2.0)
-                mid = 0.5 * (lo + hi) + (0.5 * span) * jnp.tanh(0.5 * u_mid)
-                return jnp.where(jnp.abs(u_arr) <= 1.0, mid, tails)
-            return tails
+                mid_s = 0.5 * (lo + hi) + (0.5 * span) * jnp.tanh(0.5 * u_mid)
+                res_s = jnp.where(jnp.abs(u_arr) <= 1.0, mid_s, tails_s)
+            else:
+                res_s = tails_s
+            return jnp.ldexp(res_s, exp_scale)
         return u_arr
 
     def unconstrain(self, theta: ArrayLike) -> jax.Array:
@@ -529,33 +550,7 @@ class ParamSpec(zdx.Base):
                 jnp.log(jnp.expm1(safe_t)),
             )
         if self.bijector == "sigmoid":
-            lo = jnp.asarray(self.low, dtype=jnp.float64)
-            hi = jnp.asarray(self.high, dtype=jnp.float64)
-            span = hi - lo
-            floor = jnp.maximum(1e-300 * span, jnp.finfo(jnp.float64).tiny)
-            raw_lo = t_arr - lo
-            raw_hi = hi - t_arr
-            d_lo = jnp.clip(raw_lo, floor, span)
-            d_hi = jnp.clip(raw_hi, floor, span)
-            near_mid = (
-                (raw_lo > floor)
-                & (raw_hi > floor)
-                & (jnp.abs(d_lo - d_hi) <= 0.5 * d_hi)
-            )
-            t_mid = jnp.clip(t_arr, lo, hi)
-            if self.low < 0.0 < self.high and self.high - self.low > 1.0:
-                numer_s, denom_s = t_mid - 0.5 * (lo + hi), 0.5 * d_hi
-            elif self.low < 0.0 < self.high:
-                numer_s, denom_s = (2.0 * t_mid - (lo + hi)) / span, d_hi / span
-            elif self.high - self.low <= 1.0:
-                numer_s, denom_s = (d_lo - d_hi) / span, d_hi / span
-            else:
-                numer_s, denom_s = d_lo - d_hi, d_hi
-            safe_denom = jnp.where(near_mid, denom_s, 1.0)
-            safe_rel = jnp.where(near_mid, numer_s / safe_denom, 0.0)
-            return jnp.where(
-                near_mid, jnp.log1p(safe_rel), jnp.log(d_lo) - jnp.log(d_hi)
-            )
+            return _sigmoid_logit(t_arr, self.low, self.high)
         return t_arr
 
     def log_abs_det_jacobian(self, u: ArrayLike) -> jax.Array:
@@ -568,10 +563,11 @@ class ParamSpec(zdx.Base):
         if self.bijector == "softplus":
             return jnp.sum(-jax.nn.softplus(-u_arr))
         if self.bijector == "sigmoid":
-            span = math.log(self.high - self.low)
+            exp_scale, _, _, span_s = _sigmoid_scale(self.low, self.high)
+            log_span = math.log(span_s) + exp_scale * math.log(2.0)
             log_sig = -jax.nn.softplus(-u_arr)
             log_one_minus = -jax.nn.softplus(u_arr)
-            return jnp.sum(span + log_sig + log_one_minus)
+            return jnp.sum(log_span + log_sig + log_one_minus)
         return jnp.asarray(0.0, dtype=jnp.float64)
 
     def log_prior_unconstrained(self, u: ArrayLike) -> jax.Array:
@@ -778,6 +774,7 @@ class LinearMarginalConfig(zdx.Base):
     marginalize_trend: bool = eqx.field(static=True)
     marginalize_gp: bool = eqx.field(static=True)
     marginalize_field: bool = eqx.field(static=True)
+    _marginalize_field_explicit: bool | None = eqx.field(static=True)
     n_gp_modes: int | None = eqx.field(static=True)
     include_gp_initial_cov: bool = eqx.field(static=True)
     include_field_initial_cov: bool = eqx.field(static=True)
@@ -828,8 +825,13 @@ class LinearMarginalConfig(zdx.Base):
         self.marginalize_solar = bool(marginalize_solar)
         self.marginalize_trend = bool(marginalize_trend)
         self.marginalize_gp = bool(marginalize_gp)
-        self.marginalize_field = bool(
-            self.marginalize_gp if marginalize_field is None else marginalize_field
+        self._marginalize_field_explicit = (
+            None if marginalize_field is None else bool(marginalize_field)
+        )
+        self.marginalize_field = (
+            self.marginalize_gp
+            if self._marginalize_field_explicit is None
+            else self._marginalize_field_explicit
         )
         self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
@@ -860,6 +862,7 @@ class LinearMarginalConfig(zdx.Base):
                 )
         if top_level:
             kwargs = {name: getattr(self, name) for name in _LMCFG_SET_FIELDS}
+            kwargs["marginalize_field"] = self._marginalize_field_explicit
             kwargs.update(top_level)
             out = type(self)(**kwargs)
         else:

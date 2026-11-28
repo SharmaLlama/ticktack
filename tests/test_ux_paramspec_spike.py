@@ -139,7 +139,7 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
         )
 
     def test_bounded_midpoint_asymmetric_and_narrow_interval_cancellation(self) -> None:
-        getcontext().prec = 80
+        getcontext().prec = 340
         # Default midpoint (median=None) and unimodality default logit_sd = 1.2 <= sqrt(2)
         spec_mid = tt.ParamSpec.bounded("x", -1.35, 4.85)
         assert spec_mid.bijector == "sigmoid"
@@ -270,8 +270,10 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 float(spec_z.unconstrain(med_z)), float(spec_z.prior_mean), rtol=1e-13
             )
 
-        # Wide zero-straddling intervals near DBL_MAX without intermediate 2 * med overflow
+        # Wide zero-straddling intervals near DBL_MAX (including [-1e308, 1e308]) and unit invariance
         for lo_w, hi_w, med_w in (
+            (-1e308, 1e308, -0.5e308),
+            (-1e308, 1e308, 1e10),
             (-1.6e308, 0.1e308, -0.91e308),
             (-0.1e308, 1.6e308, 0.91e308),
         ):
@@ -287,12 +289,23 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             np.testing.assert_allclose(
                 float(spec_w.unconstrain(med_w)), float(spec_w.prior_mean), rtol=1e-13
             )
+            assert math.isfinite(float(spec_w.log_abs_det_jacobian(spec_w.prior_mean)))
             g_w = float(jax.grad(spec_w.unconstrain)(jnp.asarray(med_w)))
             assert math.isfinite(g_w) and g_w >= 0.0
-            for t_w_ob in (lo_w - 0.05e308, lo_w, hi_w, hi_w + 0.05e308):
+            for t_w_ob in (lo_w, hi_w):
                 t_wj = jnp.asarray(t_w_ob, dtype=jnp.float64)
                 assert math.isfinite(float(spec_w.unconstrain(t_wj)))
                 assert math.isfinite(float(jax.grad(spec_w.unconstrain)(t_wj)))
+
+        base_u = float(tt.ParamSpec.bounded("ui", -1.35, 4.85, median=-0.37).prior_mean)
+        for unit_scale in (1e-12, 1.0, 365.25, 1e12):
+            spec_ui = tt.ParamSpec.bounded(
+                "ui",
+                -1.35 * unit_scale,
+                4.85 * unit_scale,
+                median=-0.37 * unit_scale,
+            )
+            np.testing.assert_allclose(float(spec_ui.prior_mean), base_u, rtol=1e-15)
 
         # Out-of-bounds inputs (theta <= low and theta >= high) remain finite with finite autodiff grad
         for lo_ob, hi_ob in (
@@ -569,6 +582,64 @@ class TestZodiaxPyTreeAndJitCaching:
         assert cfg_cleared.dct_operator is None
         assert cfg_cleared.offset_mode == "shared"
         assert cfg_cleared.marginalize_gp is False
+        assert cfg_cleared.marginalize_field is False
+
+        # Regression: .set("marginalize_gp", ...) tracks inherited vs explicit marginalize_field
+        cfg_gp_off_set = tt.LinearMarginalConfig(marginalize_gp=True).set(
+            "marginalize_gp", False
+        )
+        cfg_gp_off_ctor = tt.LinearMarginalConfig(marginalize_gp=False)
+        assert cfg_gp_off_set.marginalize_field is False
+        assert cfg_gp_off_set == cfg_gp_off_ctor
+        assert hash(cfg_gp_off_set) == hash(cfg_gp_off_ctor)
+
+        cfg_gp_on_set = cfg_gp_off_ctor.set("marginalize_gp", True)
+        assert cfg_gp_on_set.marginalize_field is True
+        assert cfg_gp_on_set == tt.LinearMarginalConfig(marginalize_gp=True)
+
+        cfg_field_explicit = tt.LinearMarginalConfig(
+            marginalize_gp=True, marginalize_field=True
+        ).set("marginalize_gp", False)
+        assert cfg_field_explicit.marginalize_gp is False
+        assert cfg_field_explicit.marginalize_field is True
+        assert cfg_field_explicit == tt.LinearMarginalConfig(
+            marginalize_gp=False, marginalize_field=True
+        )
+
+        cfg_field_reset = (
+            tt.LinearMarginalConfig(marginalize_gp=True)
+            .set("marginalize_field", False)
+            .set("marginalize_field", None)
+        )
+        assert cfg_field_reset.marginalize_field is True
+        assert cfg_field_reset == tt.LinearMarginalConfig(marginalize_gp=True)
+
+        # GaussianField likelihood parity between constructor and .set("marginalize_gp", False)
+        gf = tt.GaussianField(
+            jnp.zeros(16, dtype=jnp.float64), 770.0, 780.0, sigma=0.3, length_yr=3.0
+        )
+        gf_model = tt.RadiocarbonModel(
+            cbm, tt.ProductionSum(steady=tt.SteadyProduction(), field=gf)
+        )
+        ll_set = float(
+            tt.marginal_log_likelihood(
+                gf_model, ds, cfg_gp_off_set.set("dct_operator", op)
+            )
+        )
+        ll_ctor = float(
+            tt.marginal_log_likelihood(
+                gf_model, ds, cfg_gp_off_ctor.set("dct_operator", op)
+            )
+        )
+        ll_marg = float(
+            tt.marginal_log_likelihood(
+                gf_model,
+                ds,
+                tt.LinearMarginalConfig(marginalize_gp=True, dct_operator=op),
+            )
+        )
+        np.testing.assert_allclose(ll_set, ll_ctor, rtol=1e-14)
+        assert abs(ll_set - ll_marg) > 1e-4
 
     def test_filter_jit_caching_across_likelihood_fitting_sampling_fisher(self) -> None:
         cbm = tt.load_preset("Brehm21")
@@ -822,10 +893,10 @@ class TestValidationErrors:
 
         with pytest.raises(ValueError, match="low < high"):
             tt.ParamSpec("x", "sigmoid", low=2.0, high=2.0)
-        with pytest.raises(ValueError, match="finite span"):
-            tt.ParamSpec("x", "sigmoid", low=-1e308, high=1e308)
-        with pytest.raises(ValueError, match="finite span"):
-            tt.ParamSpec.bounded("x", -1e308, 1e308, median=1e307)
+        with pytest.raises(ValueError, match="finite"):
+            tt.ParamSpec("x", "sigmoid", low=float("-inf"), high=1.0)
+        with pytest.raises(ValueError, match="finite"):
+            tt.ParamSpec.bounded("x", -1.0, float("inf"))
 
         # ParamSpec.normal
         with pytest.raises(ValueError, match="sd"):

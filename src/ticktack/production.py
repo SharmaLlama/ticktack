@@ -656,6 +656,12 @@ class MiyakeSpike(ProductionTerm):
           with mean ``self.skewness`` and standard deviation ``skewness_sd``
           (dimensionless Azzalini shape parameter, only when ``profile="skewgaussian"``).
 
+        Always call ``param_specs`` on an initial pre-fit spike specification
+        rather than on an already-fitted model (do not write
+        ``map_res.model.production.spike.param_specs(...)``): centring the prior
+        on parameters estimated from the same dataset uses the data twice and
+        biases posterior uncertainties and model evidence.
+
         Parameters
         ----------
         prefix : str, default "production.spike"
@@ -706,7 +712,8 @@ class MiyakeSpike(ProductionTerm):
         from .likelihood import ParamSpec
 
         owner = "MiyakeSpike.param_specs"
-        base = f"{stripped}." if (stripped := str(prefix).strip().rstrip(".")) else ""
+        stripped = str(prefix).strip().rstrip(".")
+        base = f"{stripped}." if stripped else ""
         t0 = _concrete_scalar_f64(self.t_start, "t_start", owner=owner)
         dur0 = _concrete_scalar_f64(self.duration, "duration", owner=owner)
         fl0 = _concrete_scalar_f64(self.fluence, "fluence", owner=owner)
