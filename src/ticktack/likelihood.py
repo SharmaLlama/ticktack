@@ -294,13 +294,9 @@ def _sigmoid_unconstrain_jvp(
     inside = (t_arr > low) & (t_arr < high)
     s_inv_a = math.ldexp(1.0, -exp_a)
     s_inv_b = math.ldexp(1.0, -exp_b)
-    scaled_floor = (
-        max(_XLA_RECIP_MIN, math.ldexp(_XLA_RECIP_MIN, -exp_scale))
-        if exp_scale > -1000
-        else _FLOAT64_TINY
-    )
-    d_lo = jnp.clip(raw_lo, scaled_floor, span_s)
-    d_hi = jnp.clip(raw_hi, scaled_floor, span_s)
+    scaled_floor = max(_XLA_RECIP_MIN, math.ldexp(_XLA_RECIP_MIN, -exp_scale))
+    d_lo = jnp.maximum(raw_lo, scaled_floor)
+    d_hi = jnp.maximum(raw_hi, scaled_floor)
     if exp_scale > 0:
         term_lo = jnp.where(raw_lo >= scaled_floor, ((1.0 / d_lo) * s_inv_a) * s_inv_b, 0.0)
         term_hi = jnp.where(raw_hi >= scaled_floor, ((1.0 / d_hi) * s_inv_a) * s_inv_b, 0.0)
@@ -326,6 +322,7 @@ def _sigmoid_unconstrain_jvp(
     else:
         ok = inside & (raw_lo >= scaled_floor) & (raw_hi >= scaled_floor)
         deriv = (jnp.where(ok, 1.0 / d_lo + 1.0 / d_hi, 0.0) * s_inv_a) * s_inv_b
+    deriv = jnp.where(jnp.isfinite(deriv), deriv, 0.0)
     return _sigmoid_unconstrain(t_arr, low, high), deriv * t_dot
 
 
@@ -341,7 +338,7 @@ def _sigmoid_constrain(u_arr: jax.Array, low: float, high: float) -> jax.Array:
     sig_neg = jnp.where(u_arr > 37.0, jnp.exp(-u_arr), jax.nn.sigmoid(-u_arr))
     tails_s = jnp.where(u_arr < 0.0, lo + span * sig_pos, hi - span * sig_neg)
     tails = (tails_s * s_a) * s_b
-    if exp_scale > 0:
+    if exp_scale >= 0:
         log_span = math.log(span_s) + exp_scale * math.log(2.0)
         deep_lo = low + jnp.exp(jnp.minimum(log_span + u_arr, 709.0))
         deep_hi = high - jnp.exp(jnp.minimum(log_span - u_arr, 709.0))
@@ -928,8 +925,15 @@ class LinearMarginalConfig(_ValidatedZodiaxBase):
         gpm = _concrete_scalar_f64(global_prior_mean, "global_prior_mean", owner=owner)
         if not math.isfinite(gpm):
             raise ValueError(f"{owner}: global_prior_mean must be finite; got {global_prior_mean!r}.")
-        if n_gp_modes is not None and (isinstance(n_gp_modes, bool) or int(n_gp_modes) < 1):
-            raise ValueError(f"{owner}: n_gp_modes must be None or >= 1; got {n_gp_modes!r}.")
+        if n_gp_modes is None:
+            modes_int: int | None = None
+        else:
+            nm = _concrete_scalar_f64(n_gp_modes, "n_gp_modes", owner=owner)
+            if not (math.isfinite(nm) and nm >= 1.0 and nm.is_integer()):
+                raise ValueError(
+                    f"{owner}: n_gp_modes must be None or an integer >= 1; got {n_gp_modes!r}."
+                )
+            modes_int = int(nm)
         self.offset_mode = _validate_choice(offset_mode, _VALID_OFFSET_MODES, "offset_mode", owner)
         self.whiten_method = _validate_choice(
             whiten_method, _VALID_WHITEN_METHODS, "whiten_method", owner
@@ -952,7 +956,7 @@ class LinearMarginalConfig(_ValidatedZodiaxBase):
             if self._marginalize_field_explicit is None
             else self._marginalize_field_explicit
         )
-        self.n_gp_modes = None if n_gp_modes is None else int(n_gp_modes)
+        self.n_gp_modes = modes_int
         self.include_gp_initial_cov = bool(include_gp_initial_cov)
         self.include_field_initial_cov = bool(include_field_initial_cov)
         self.dct_operator = dct_operator

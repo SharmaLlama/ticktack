@@ -280,6 +280,8 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             (0.0, 1e308, 4.0e-308),
             (-1e308, 0.0, -4.0e-308),
             (0.0, 0.5, 4.0e-308),
+            (0.0, 1.5, 3.0e-308),
+            (-1.5, 0.0, -3.0e-308),
             (1.5e-305, 2000.0, 3.8e-305),
             (-2000.0, -1.5e-305, -3.8e-305),
             (0.0, 1e308, 1e-20),
@@ -349,7 +351,7 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 rtol=1e-12,
                 atol=0.0,
             )
-        for hi_tail in (1.0, 2.0, 4.85):
+        for hi_tail in (1.0, 1.5, 2.0, 4.85):
             spec_tail = tt.ParamSpec.bounded("tail", 0.0, hi_tail)
             u_tail_val = -708.0 if hi_tail == 1.0 else -708.5
             th_tail = float(spec_tail.constrain(jnp.asarray(u_tail_val)))
@@ -372,6 +374,24 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             np.testing.assert_allclose(
                 g_23, 1.0 / 2.3e-308 + 1.0 / hi_tail, rtol=1e-12, atol=0.0
             )
+        spec_mir15 = tt.ParamSpec.bounded("mir15", -1.5, 0.0)
+        th_mir15 = float(spec_mir15.constrain(jnp.asarray(708.5)))
+        np.testing.assert_allclose(th_mir15, -1.5 * math.exp(-708.5), rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(float(spec_mir15.unconstrain(th_mir15)), 708.5, rtol=1e-12, atol=0.0)
+
+        # Tiny-bound intervals near DBL_MIN (exp_scale <= -1000 and narrow ~1.4e-308 span): finite grad & jacfwd
+        for lo_tb, hi_tb, v_tb in (
+            (2.5e-308, 1.0e-302, jnp.array([3.0e-308, 0.5e-302], dtype=jnp.float64)),
+            (
+                1.0e-300,
+                1.0e-300 + 1.4e-308,
+                jnp.array([1.0e-300 + 0.7e-308, 1.0e-300 + 1.1e-308], dtype=jnp.float64),
+            ),
+        ):
+            spec_tb = tt.ParamSpec.bounded("tb", lo_tb, hi_tb)
+            assert math.isfinite(float(jax.grad(spec_tb.unconstrain)(v_tb[0])))
+            jac_tb = np.asarray(jax.jacfwd(spec_tb.unconstrain)(v_tb))
+            assert np.all(np.isfinite(jac_tb))
 
         base_u = float(tt.ParamSpec.bounded("ui", -1.35, 4.85, median=-0.37).prior_mean)
         for unit_scale in (1e-12, 1.0, 365.25, 1e12):
@@ -1093,6 +1113,12 @@ class TestValidationErrors:
             cfg.set("global_prior_mean", float("nan"))
         with pytest.raises(ValueError, match="n_gp_modes"):
             cfg.set("n_gp_modes", 0)
+        for bad_modes in (np.bool_(True), True, "4", 1.5, float("inf")):
+            with pytest.raises(ValueError, match="n_gp_modes"):
+                tt.LinearMarginalConfig(n_gp_modes=bad_modes)  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="n_gp_modes"):
+            tt.LinearMarginalConfig(n_gp_modes=3).divide("n_gp_modes", 2)
+        assert tt.LinearMarginalConfig(n_gp_modes=4).divide("n_gp_modes", 2).n_gp_modes == 2
         assert cfg.set("lab_prior_sd", 0.0).lab_prior_sd == 0.0
         assert math.isinf(cfg.set("global_prior_sd", None).global_prior_sd)
         for bad_num in (False, True, np.bool_(True), "1.5", 1.0 + 2.0j):
