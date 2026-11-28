@@ -23,10 +23,9 @@ def _concrete_f64_array(value: ArrayLike, name: str, *, owner: str = "ticktack")
     c = _concrete(value)
     if c is None:
         raise ValueError(f"{owner}: {name} must be a concrete (non-traced) value.")
-    try:
-        return np.asarray(c, dtype=np.float64)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{owner}: {name} must be numeric; got {value!r}.") from exc
+    if isinstance(value, (bool, np.bool_)) or c.dtype.kind not in ("i", "u", "f"):
+        raise ValueError(f"{owner}: {name} must be numeric (not bool); got {value!r}.")
+    return np.asarray(c, dtype=np.float64)
 
 
 def _concrete_scalar_f64(value: Any, name: str, *, owner: str = "ticktack") -> float:

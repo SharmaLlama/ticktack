@@ -105,6 +105,8 @@ _VALID_OFFSET_MODES = ("hierarchical", "per_series", "shared", "none")
 _VALID_WHITEN_METHODS = ("cholesky", "qr", "rank_one")
 _SUBNORMAL_MIN = math.ldexp(1.0, -1074)
 _FLOAT64_TINY = float(np.finfo(np.float64).tiny)
+# 2^54 * DBL_MIN (~4.01e-292): any FTZ flush of subnormal lo_s/hi_s perturbs gaps >= this by < 0.5 ulp.
+_FTZ_SAFE_GAP = math.ldexp(_FLOAT64_TINY, 54)
 # Detect once whether the active XLA backend preserves float64 subnormals (x86_64) or sets FTZ (aarch64).
 _XLA_TINY = (
     _SUBNORMAL_MIN
@@ -255,15 +257,15 @@ def _sigmoid_logit_xp(theta: ArrayLike, low: float, high: float, xp: Any) -> Any
     d_hi = xp.clip(raw_hi, floor, span_s)
     log_d_lo = xp.log(d_lo)
     log_d_hi = xp.log(d_hi)
-    # When exp_scale > 2, 2^-exp_scale can underflow small unscaled gaps (e.g. 4e-308 on (0, 1e308)).
-    if exp_scale > 2:
+    # When exp_scale > 0, 2^-exp_scale can underflow small gaps or flush subnormal lo_s/hi_s under FTZ.
+    if exp_scale > 0:
         shift_ln = exp_scale * math.log(2.0)
         if abs(low) < 1e290:
             d_lo_u = xp.clip(xp.clip(t_arr, low, min(high, 1e300)) - low, floor, 1e300)
-            log_d_lo = xp.where(raw_lo < _FLOAT64_TINY, xp.log(d_lo_u) - shift_ln, log_d_lo)
+            log_d_lo = xp.where(raw_lo < _FTZ_SAFE_GAP, xp.log(d_lo_u) - shift_ln, log_d_lo)
         if abs(high) < 1e290:
             d_hi_u = xp.clip(high - xp.clip(t_arr, max(low, -1e300), high), floor, 1e300)
-            log_d_hi = xp.where(raw_hi < _FLOAT64_TINY, xp.log(d_hi_u) - shift_ln, log_d_hi)
+            log_d_hi = xp.where(raw_hi < _FTZ_SAFE_GAP, xp.log(d_hi_u) - shift_ln, log_d_hi)
     # Near the midpoint, log(d_lo) - log(d_hi) cancels; evaluate log1p((d_lo - d_hi) / d_hi).
     near_mid = (
         (raw_lo > _FLOAT64_TINY) & (raw_hi > _FLOAT64_TINY) & (xp.abs(d_lo - d_hi) <= 0.5 * d_hi)
@@ -299,14 +301,14 @@ def _sigmoid_unconstrain_jvp(
     )
     d_lo = jnp.clip(raw_lo, scaled_floor, span_s)
     d_hi = jnp.clip(raw_hi, scaled_floor, span_s)
-    if exp_scale > 2:
+    if exp_scale > 0:
         term_lo = jnp.where(raw_lo >= scaled_floor, ((1.0 / d_lo) * s_inv_a) * s_inv_b, 0.0)
         term_hi = jnp.where(raw_hi >= scaled_floor, ((1.0 / d_hi) * s_inv_a) * s_inv_b, 0.0)
         if abs(low) < 1e290:
             raw_lo_u = jnp.clip(t_arr, low, min(high, 1e300)) - low
             d_lo_u = jnp.clip(raw_lo_u, _XLA_RECIP_MIN, 1e300)
             term_lo = jnp.where(
-                raw_lo >= _FLOAT64_TINY,
+                raw_lo >= _FTZ_SAFE_GAP,
                 term_lo,
                 jnp.where(raw_lo_u >= _XLA_RECIP_MIN, 1.0 / d_lo_u, 0.0),
             )
@@ -314,11 +316,11 @@ def _sigmoid_unconstrain_jvp(
             raw_hi_u = high - jnp.clip(t_arr, max(low, -1e300), high)
             d_hi_u = jnp.clip(raw_hi_u, _XLA_RECIP_MIN, 1e300)
             term_hi = jnp.where(
-                raw_hi >= _FLOAT64_TINY,
+                raw_hi >= _FTZ_SAFE_GAP,
                 term_hi,
                 jnp.where(raw_hi_u >= _XLA_RECIP_MIN, 1.0 / d_hi_u, 0.0),
             )
-        both_norm = (raw_lo >= _FLOAT64_TINY) & (raw_hi >= _FLOAT64_TINY)
+        both_norm = (raw_lo >= _FTZ_SAFE_GAP) & (raw_hi >= _FTZ_SAFE_GAP)
         sum_norm = ((1.0 / d_lo + 1.0 / d_hi) * s_inv_a) * s_inv_b
         deriv = jnp.where(inside, jnp.where(both_norm, sum_norm, term_lo + term_hi), 0.0)
     else:

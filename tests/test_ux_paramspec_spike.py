@@ -280,6 +280,8 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
             (0.0, 1e308, 4.0e-308),
             (-1e308, 0.0, -4.0e-308),
             (0.0, 0.5, 4.0e-308),
+            (1.5e-305, 2000.0, 3.8e-305),
+            (-2000.0, -1.5e-305, -3.8e-305),
             (0.0, 1e308, 1e-20),
             (-1e308, 0.0, -1e-20),
             (0.0, 1e308, 0.1),
@@ -347,18 +349,28 @@ class TestParamSpecPhysicalConstructorsAndQuadrature:
                 rtol=1e-12,
                 atol=0.0,
             )
-        for hi_tail in (1.0, 2.0):
+        for hi_tail in (1.0, 2.0, 4.85):
             spec_tail = tt.ParamSpec.bounded("tail", 0.0, hi_tail)
-            th_tail = float(spec_tail.constrain(jnp.asarray(-708.0)))
+            u_tail_val = -708.0 if hi_tail == 1.0 else -708.5
+            th_tail = float(spec_tail.constrain(jnp.asarray(u_tail_val)))
             assert th_tail > 0.0
-            np.testing.assert_allclose(th_tail, hi_tail * math.exp(-708.0), rtol=1e-12, atol=0.0)
             np.testing.assert_allclose(
-                float(spec_tail.unconstrain(th_tail)), -708.0, rtol=1e-12, atol=0.0
+                th_tail, hi_tail * math.exp(u_tail_val), rtol=1e-12, atol=0.0
+            )
+            np.testing.assert_allclose(
+                float(spec_tail.unconstrain(th_tail)), u_tail_val, rtol=1e-12, atol=0.0
             )
             g_tail = float(jax.grad(spec_tail.unconstrain)(jnp.asarray(th_tail)))
             assert g_tail > 0.0
             np.testing.assert_allclose(
                 g_tail, 1.0 / th_tail + 1.0 / hi_tail, rtol=1e-12, atol=0.0
+            )
+            g_23 = float(
+                jax.grad(spec_tail.unconstrain)(jnp.asarray(2.3e-308, dtype=jnp.float64))
+            )
+            assert g_23 > 0.0
+            np.testing.assert_allclose(
+                g_23, 1.0 / 2.3e-308 + 1.0 / hi_tail, rtol=1e-12, atol=0.0
             )
 
         base_u = float(tt.ParamSpec.bounded("ui", -1.35, 4.85, median=-0.37).prior_mean)
@@ -1083,6 +1095,13 @@ class TestValidationErrors:
             cfg.set("n_gp_modes", 0)
         assert cfg.set("lab_prior_sd", 0.0).lab_prior_sd == 0.0
         assert math.isinf(cfg.set("global_prior_sd", None).global_prior_sd)
+        for bad_num in (False, True, np.bool_(True), "1.5", 1.0 + 2.0j):
+            with pytest.raises(ValueError, match="numeric"):
+                tt.LinearMarginalConfig(lab_prior_sd=bad_num)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="numeric"):
+                tt.ParamSpec.normal("x", mean=0.0, sd=bad_num)  # type: ignore[arg-type]
+            with pytest.raises(ValueError, match="numeric"):
+                tt.MiyakeSpike(duration=0.2).param_specs(t_start_sd=bad_num)  # type: ignore[arg-type]
         with pytest.raises(TypeError, match="dct_operator"):
             cfg.set("dct_operator", "not_an_operator")
         with pytest.raises(AttributeError, match="no settable attribute"):
